@@ -1,0 +1,15 @@
+# ================================================
+# FILE: configs/mapping_dales_to_common.yaml
+# ================================================
+# DALES native IDs -> Common IDs (adjust IDs to match your DALES LAS classification codes if they differ)
+# DALES categories per paper: ground, vegetation, buildings, cars, trucks, poles (inc. towers), power lines, fences, unknown
+# Example mapping assuming: 0 unknown, 1 ground, 2 vegetation, 3 buildings, 4 cars, 5 trucks, 6 poles, 7 power lines, 8 fences
+0: 0    # unknown -> ignore
+1: 1    # ground -> ground
+2: 2    # vegetation -> vegetation
+3: 3    # buildings -> buildings
+4: 7    # cars -> vehicle
+5: 7    # trucks -> vehicle
+6: 5    # poles (inc. towers) -> poles
+7: 4    # power lines -> wires
+8: 6    # fences -> fence

@@ -1,0 +1,17 @@
+# ================================================
+# FILE: configs/mapping_eclair_to_common.yaml
+# ================================================
+# ECLAIR native IDs -> Common IDs
+# Common: 0 ignore, 1 ground, 2 vegetation, 3 buildings, 4 wires, 5 poles, 6 fence, 7 vehicle
+0: 0    # Undefined -> ignore
+1: 0    # Unassigned -> ignore (optional; keep 1 if you want to score it natively only)
+2: 1    # Ground -> ground
+3: 2    # Vegetation -> vegetation
+4: 3    # Buildings -> buildings
+5: 0    # Noise -> ignore
+6: 4    # Transmission wires -> wires
+7: 4    # Distribution wires -> wires
+8: 5    # Poles -> poles
+9: 5    # Transmission towers -> poles (merged as per mapping discussion)
+10: 6   # Fence -> fence
+11: 7   # Vehicles -> vehicle
