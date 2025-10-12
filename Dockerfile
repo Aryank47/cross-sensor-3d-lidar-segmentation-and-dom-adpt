@@ -19,6 +19,15 @@ RUN micromamba install -y -n base -c pytorch -c nvidia -c conda-forge \
     python=3.10 pytorch=2.3.1 pytorch-cuda=12.1 mkl numpy omegaconf torchmetrics laspy lazrs-python && \
     micromamba clean -a -y
 
+# 2) Install PyTorch 2.3.1 + cu121 via pip (reliable)
+RUN micromamba run -n base python -m pip install -U pip wheel ninja && \
+    micromamba run -n base python -m pip install --index-url https://download.pytorch.org/whl/cu121 \
+    torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 && \
+    micromamba run -n base python - <<'PY'
+import torch
+print("Torch:", torch.__version__, "CUDA:", torch.version.cuda)
+PY
+
 # PyG wheels matching torch 2.3.1 + cu121
 RUN micromamba run -n base pip install -U pip wheel && \
     micromamba run -n base pip install \
@@ -34,8 +43,9 @@ RUN git clone https://github.com/NVIDIA/MinkowskiEngine.git && \
     --config-settings=--build-option=--force_cuda .
 
 WORKDIR /app
-COPY *.py /app/
-COPY configs /app/configs
-COPY scripts /app/scripts
+COPY experiment0/*.py /app/
+COPY experiment0/configs /app/configs
+COPY experiment0/scripts /app/scripts
+
 ENV PYTHONUNBUFFERED=1
 CMD ["bash"]

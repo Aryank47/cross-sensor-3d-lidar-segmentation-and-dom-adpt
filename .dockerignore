@@ -4,9 +4,7 @@
 # Allow only what the image needs
 !Dockerfile
 !.dockerignore
-!*.py
-!configs/**
-!scripts/**
+!experiment0/**
 
 # (if you have extra small text files, allow them explicitly)
 !requirements.txt
