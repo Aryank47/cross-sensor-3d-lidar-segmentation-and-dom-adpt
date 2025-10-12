@@ -1,0 +1,13 @@
+# Ignore EVERYTHING by default
+**
+
+# Allow only what the image needs
+!Dockerfile
+!.dockerignore
+!*.py
+!configs/**
+!scripts/**
+
+# (if you have extra small text files, allow them explicitly)
+!requirements.txt
+!README.md
