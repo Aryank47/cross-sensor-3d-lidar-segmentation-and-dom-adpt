@@ -73,9 +73,17 @@ class NormalizeFeatures(BaseTransform):
         if "coordinates" in self.feature_names:
             coordinates = data.pos
             features.append(coordinates)
+        # if "colors" in self.feature_names:
+        #     rgb = (data.rgb / np.iinfo("uint16").max - 0.5).reshape(-1, 3)
+        #     features.append(rgb)
         if "colors" in self.feature_names:
-            rgb = (data.rgb / np.iinfo("uint16").max - 0.5).reshape(-1, 3)
-            features.append(rgb)
+            if getattr(data, "rgb", None) is not None:
+                rgb = (data.rgb / np.iinfo("uint16").max - 0.5).reshape(-1, 3)
+                features.append(rgb)
+            else:
+                # If colors requested but not present, fall back to zeros (keeps dim consistent).
+                zeros = torch.zeros((data.pos.shape[0], 3), dtype=torch.float32)
+                features.append(zeros)
         data.x = torch.cat(features, dim=-1).float()
         return data
 

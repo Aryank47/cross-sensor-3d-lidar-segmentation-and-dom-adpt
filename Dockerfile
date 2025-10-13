@@ -24,7 +24,8 @@ COPY --from=micromamba "$MAMBA_EXE" "$MAMBA_EXE"
 # base env (no torch yet)
 RUN micromamba install -y -n base -c conda-forge \
     python=3.10 mkl numpy omegaconf torchmetrics laspy lazrs-python \
-    && micromamba clean --all --yes
+    && micromamba clean --all --yes && \
+    micromamba remove -y -n base pytorch libtorch || true
 
 # Torch 2.0.1 + cu118 and PyG wheels compatible with it
 RUN micromamba run -n base python -m pip install --index-url https://download.pytorch.org/whl/cu118 \
@@ -37,7 +38,7 @@ RUN micromamba run -n base pip install \
 # Build ME with CUDA & OpenBLAS
 ENV CUDA_HOME=/usr/local/cuda
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
-ENV TORCH_CUDA_ARCH_LIST="8.9"
+ENV TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9"
 ENV FORCE_CUDA=1
 ENV CC=gcc
 ENV CXX=g++
@@ -66,6 +67,8 @@ FROM nvidia/cuda:11.8.0-runtime-ubuntu20.04 AS runtime
 ENV MAMBA_ROOT_PREFIX="/opt/conda"
 ENV MAMBA_EXE="/bin/micromamba"
 ENV PATH=/opt/conda/bin:$PATH
+ENV LD_LIBRARY_PATH=/opt/conda/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+ENV CUDA_HOME=/usr/local/cuda
 COPY --from=micromamba "$MAMBA_EXE" "$MAMBA_EXE"
 
 # Ensure OpenBLAS is present at runtime for the ME wheel
@@ -77,25 +80,36 @@ COPY --from=build /build/*.whl /wheels/
 
 WORKDIR /app
 
-# minimal base libs via conda, then pip the GPU stack + ME wheel
+# minimal base libs via conda (NO packages that depend on pytorch!)
 RUN micromamba install -y -n base -c conda-forge \
-    python=3.10 mkl numpy omegaconf torchmetrics laspy lazrs-python && \
+    python=3.10 mkl numpy omegaconf laspy lazrs-python libstdcxx-ng=12 && \
     micromamba clean --all --yes && \
-    micromamba run -n base python -m pip install -U pip wheel ninja && \
-    micromamba run -n base python -m pip install --index-url https://download.pytorch.org/whl/cu118 \
-    torch==2.0.1 && \
+    # make sure nothing Torch-y got dragged in
+    micromamba remove -y -n base pytorch libtorch || true
+
+# pip toolchain
+ENV PYTHONNOUSERSITE=1 PIP_NO_CACHE_DIR=1
+RUN micromamba run -n base python -m pip install -U pip wheel ninja
+
+# PyTorch GPU stack (pip), THEN torchmetrics (pip), THEN PyG (pip), THEN ME wheel
+RUN micromamba run -n base python -m pip install --index-url https://download.pytorch.org/whl/cu118 \
+    torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 && \
+    micromamba run -n base python -m pip install torchmetrics==1.3.2 && \
     micromamba run -n base pip install \
     torch-geometric==2.3.1 torch-scatter==2.1.1 torch-sparse==0.6.17 \
     torch-cluster==1.6.1 torch-spline-conv==1.2.2 \
     -f https://data.pyg.org/whl/torch-2.0.1+cu118.html && \
-    ls -lh /wheels && \
-    micromamba run -n base python -m pip install --no-cache-dir --no-index \
-    --find-links=/wheels MinkowskiEngine && \
-    micromamba run -n base python - <<'PY'
+    micromamba run -n base python -m pip install --no-index --find-links=/wheels MinkowskiEngine
+
+RUN micromamba run -n base python -m pip install "numpy<2" fire
+
+# sanity check
+RUN micromamba run -n base python - <<'PY'
 import torch, MinkowskiEngine as ME
 print("Torch:", torch.__version__, "CUDA:", torch.version.cuda,
       "| CUDA avail:", torch.cuda.is_available(), "| ME import OK")
 PY
+
 
 # copy only experiment0 code
 COPY experiment0/*.py /app/

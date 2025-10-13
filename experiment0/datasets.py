@@ -20,10 +20,12 @@ class BaseLasDataset(torch.utils.data.Dataset):
     @staticmethod
     def _las2pyg(las: laspy.LasData, path: Path) -> Data:
         gt_key = "classification" if "classification" in set(las.point_format.dimension_names) else "raw_classification"
+        gt = las[gt_key]
+        gt = getattr(gt, "array", gt)
         data = Data(
             xyz=torch.from_numpy(las.xyz.copy()),
-            intensity=torch.from_numpy(las.intensity.astype(np.int64)),
-            classification=torch.from_numpy(las[gt_key]).long(),
+            intensity=torch.from_numpy(las.intensity.astype(np.int64)),            
+            classification = torch.from_numpy(np.asarray(gt).copy()).long(),
             return_number=torch.from_numpy(np.asarray(las.return_number)).long(),
             number_of_returns=torch.from_numpy(np.asarray(las.number_of_returns)).long(),
             edge_of_flight_line=torch.from_numpy(np.asarray(las.edge_of_flight_line)),

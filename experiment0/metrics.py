@@ -11,12 +11,16 @@ class ConfusionMatrix:
         self.num_classes = num_classes
         self.mat = torch.zeros((num_classes, num_classes), dtype=torch.long)
 
-    def update(self, pred: torch.Tensor, target: torch.Tensor):
-        # pred, target: (N,)
-        with torch.no_grad():
-            k = (target >= 0) & (target < self.num_classes)
-            inds = self.num_classes * target[k].to(torch.int64) + pred[k].to(torch.int64)
-            self.mat += torch.bincount(inds, minlength=self.num_classes ** 2).reshape(self.num_classes, self.num_classes)
+    def update(self, y_pred: torch.Tensor, y_true: torch.Tensor):
+        num = self.num_classes
+        y_pred = y_pred.reshape(-1).to('cpu', non_blocking=True)
+        y_true = y_true.reshape(-1).to('cpu', non_blocking=True)
+
+        # guard both sides
+        valid = (y_true >= 0) & (y_true < num) & (y_pred >= 0) & (y_pred < num)
+        if valid.any():
+            inds = (y_true[valid] * num + y_pred[valid]).to(torch.int64)
+            self.mat += torch.bincount(inds, minlength=num*num).reshape(num, num)
 
     def value(self) -> torch.Tensor:
         return self.mat

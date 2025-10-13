@@ -81,9 +81,13 @@ def evaluate_split(
         logits = logits[mask]
         y = y[mask]
         pred_native = logits.argmax(dim=1)
+        print('DALES eval ranges:',
+        f'y_true[{int(y.min())},{int(y.max())}]',
+        f'pred[{int(pred_native.min())},{int(pred_native.max())}]')
 
+        pred_native = pred_native.clamp_(min=0, max=8)  # DALES has 9 classes
         # native confusion
-        conf_native.update(pred_native, y)
+        conf_native.update(pred_native.to('cpu'), y.to('cpu'))
 
         # map to common
         pred_common = map_labels_tensor(pred_native, common_mapping)
@@ -205,6 +209,11 @@ def train(
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}")
         for batch in pbar:
             coords, feats, batch_idx = batch.pos / voxel_size, batch.x, batch.batch
+            if feats.shape[1] != cfg.num_features:
+                raise ValueError(
+                    f"Feature dim mismatch: got {feats.shape[1]} but cfg.num_features={cfg.num_features}. "
+                    f"Check feature_names in {config_file} and NormalizeFeatures."
+                )
             coords = torch.cat([batch_idx.unsqueeze(1), coords], dim=1)
 
             in_field = TensorField(
