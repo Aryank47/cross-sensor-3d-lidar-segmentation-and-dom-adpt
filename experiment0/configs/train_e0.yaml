@@ -1,13 +1,10 @@
-# ================================================
-# FILE: configs/train_e0.yaml
-# ================================================
 # Core geometry & features (kept identical across runs for fairness)
-voxel_size: 0.15
+voxel_size: 0.18
 feature_names:
   - intensity
   - return_number
   - number_of_returns
-  - colors
+  - coordinates
 num_features: 14
 
 # Native class counts (ECLAIR has 12 incl. Undefined=0)
@@ -16,11 +13,11 @@ num_classes_native: 12
 num_classes_dales_native: 9
 
 # Which native IDs to ignore during loss/metrics
-ignore_ids_native: [0]   # 0 = Undefined in ECLAIR config
-ignore_ids_dales: [0]    # 0 = Unknown in DALES mapping below
+ignore_ids_native: [0] # 0 = Undefined in ECLAIR config
+ignore_ids_dales: [0] # 0 = Unknown in DALES mapping below
 
 # For native (ECLAIR) macro-averages, which labels to include
-important_native: [1,2,3,4,5,6,7,8,9,10,11]
+important_native: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
 # Common label space (0 = ignore)
 # 0: ignore, 1: ground, 2: vegetation, 3: buildings, 4: wires, 5: poles, 6: fence, 7: vehicle
@@ -31,7 +28,7 @@ mapping_eclair_to_common: ./configs/mapping_eclair_to_common.yaml
 mapping_dales_to_common: ./configs/mapping_dales_to_common.yaml
 
 # Dataloading
-train_batch_size: 2
+train_batch_size: 1
 eval_batch_size: 1
 
 # Transforms (reuse the functional.py ones)
@@ -42,7 +39,7 @@ train_transforms:
       feature_names: ${feature_names}
   - name: RemapClassification
     params:
-      class_mapping: {}   # keep native during training; we map to common only for eval
+      class_mapping: {} # keep native during training; we map to common only for eval
 
 eval_transforms:
   - name: NormalizeCoordinates
@@ -51,9 +48,5 @@ eval_transforms:
       feature_names: ${feature_names}
   - name: RemapClassification
     params:
-      class_mapping: {}   # keep native for ECLAIR native eval; mapped later when computing common
-
-
-
-
+      class_mapping: {} # keep native for ECLAIR native eval; mapped later when computing common
 
