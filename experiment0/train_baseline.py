@@ -113,7 +113,7 @@ def evaluate_split(
         # Native confusion: This is NOT meaningful for DALES because model uses ECLAIR taxonomy.
         # We keep it for debugging but it will show mismatches.
         # Clamp ONLY for this native confusion matrix (not used in metrics):
-        pred_native_clamped = pred_native.clamp(min=0, max=num_classes_dales_native - 1)
+        pred_native_clamped = pred_native.clamp(min=0, max=num_classes_native - 1)
         conf_native.update(pred_native_clamped.to("cpu"), y.to("cpu"))
 
         # map to common - USE UNCLAMPED PREDICTIONS

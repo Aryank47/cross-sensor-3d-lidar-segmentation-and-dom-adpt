@@ -6,6 +6,14 @@ from typing import Dict, List, Optional
 import torch
 
 
+def map_labels_tensor(y: torch.Tensor, mapping: Dict[int, int]) -> torch.Tensor:
+    """Vectorized label remapping for 1D torch tensors."""
+    out = torch.zeros_like(y)
+    for src, dst in mapping.items():
+        out[y == src] = dst
+    return out
+
+
 class ConfusionMatrix:
     def __init__(self, num_classes: int):
         self.num_classes = num_classes
