@@ -40,13 +40,24 @@ class NormalizeCoordinates(BaseTransform):
         self.normalization_value = normalization_value
 
     def __call__(self, data: Data) -> Data:
-        coordinates = data.xyz
-        centroid = coordinates.mean(0)
-        coordinates -= centroid
-        coordinates /= self.normalization_value
+        coordinates = getattr(data, "xyz", None)
+        if coordinates is None:
+            coordinates = getattr(data, "pos", None)
 
+        if coordinates is None:
+            raise AttributeError(
+                "NormalizeCoordinates expected 'xyz' or 'pos' on Data; "
+                f"found keys: {list(data.keys())}"
+            )
+
+        centroid = coordinates.mean(0)
+        coordinates = (coordinates - centroid) / self.normalization_value
         data.pos = coordinates.float()
-        del data.xyz
+
+        # Optional: only delete xyz if present
+        if hasattr(data, "xyz"):
+            del data.xyz
+
         return data
 
 

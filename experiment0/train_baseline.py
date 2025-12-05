@@ -237,7 +237,9 @@ def validate_config_with_data(cfg, dataset, config_file):
 
     # Get one sample
     sample = dataset[0]
-    if cfg.train_transforms:
+    # Only apply transforms here if dataset was created WITHOUT transforms
+    # (i.e., sample doesn't yet have x).
+    if not hasattr(sample, "x") and cfg.train_transforms:
         transforms = compose_transforms_from_list(cfg.train_transforms)
         sample = transforms(sample)
 
@@ -308,7 +310,7 @@ def train(
     amp: bool = True,
     seed: int = 1984,
     eval_every: int = 5,
-    num_workers: int = 4,
+    num_workers: int = 0,
     voxel_size: Optional[float] = None,
 ):
     cfg = OmegaConf.load(config_file)
@@ -344,21 +346,21 @@ def train(
         batch_size=cfg.train_batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=False,
     )
     val_loader = PyGDataLoader(
         eclair_val,
         batch_size=cfg.eval_batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=False,
     )
     dales_loader = PyGDataLoader(
         dales_test,
         batch_size=cfg.eval_batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=False,
     )
 
     # ---------------------- model & loss ----------------------------

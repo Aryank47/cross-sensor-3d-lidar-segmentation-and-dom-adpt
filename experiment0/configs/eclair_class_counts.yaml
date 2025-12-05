@@ -1,0 +1,15 @@
+description: Per-class sample counts for ECLAIR train split (for Class-Balanced Loss)
+num_classes: 12
+samples_per_cls:
+- 0
+- 922679
+- 257857898
+- 231859625
+- 9553783
+- 17700
+- 1524742
+- 551282
+- 93366
+- 227410
+- 526745
+- 555978

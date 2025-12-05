@@ -9,7 +9,7 @@ EPOCHS=80
 EVAL_EVERY=5
 
 # GPU settings
-export CUDA_VISIBLE_DEVICES=0
+#export CUDA_VISIBLE_DEVICES=0
 
 # ================================================
 # PHASE 1: Loss Ablation at Default Voxel Size (0.15m)
@@ -28,7 +28,8 @@ python train_baseline.py \
   --config_file $CFG \
   --loss_name ce \
   --voxel_size $VOXEL \
-  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True
+  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True \
+  --num_workers 0
 
 # E0b: Focal Loss
 python train_baseline.py \
@@ -38,7 +39,8 @@ python train_baseline.py \
   --config_file $CFG \
   --loss_name focal --focal_gamma 2.0 \
   --voxel_size $VOXEL \
-  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True
+  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True \
+  --num_workers 0
 
 # E0c: DICE Loss
 python train_baseline.py \
@@ -48,7 +50,8 @@ python train_baseline.py \
   --config_file $CFG \
   --loss_name dice --dice_smooth 1.0 \
   --voxel_size $VOXEL \
-  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True
+  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True \
+  --num_workers 0
 
 # E0d: Focal + DICE
 python train_baseline.py \
@@ -58,7 +61,8 @@ python train_baseline.py \
   --config_file $CFG \
   --loss_name focal_dice --focal_gamma 2.0 --dice_smooth 1.0 \
   --voxel_size $VOXEL \
-  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True
+  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True \
+  --num_workers 0
 
 # E0e: Class-Balanced Loss (NEW)
 python train_baseline.py \
@@ -68,7 +72,8 @@ python train_baseline.py \
   --config_file $CFG \
   --loss_name class_balanced \
   --voxel_size $VOXEL \
-  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True
+  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True \
+  --num_workers 0
 
 # E0f: Lovász Loss (NEW)
 python train_baseline.py \
@@ -78,7 +83,8 @@ python train_baseline.py \
   --config_file $CFG \
   --loss_name lovasz \
   --voxel_size $VOXEL \
-  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True
+  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True \
+  --num_workers 0
 
 # E0g: DICE + Lovász (NEW)
 python train_baseline.py \
@@ -88,7 +94,8 @@ python train_baseline.py \
   --config_file $CFG \
   --loss_name dice_lovasz --dice_smooth 1.0 \
   --voxel_size $VOXEL \
-  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True
+  --epochs $EPOCHS --eval_every $EVAL_EVERY --amp True \
+  --num_workers 0
 
 # ================================================
 # PHASE 2: Voxel Size Ablation with Best Loss
