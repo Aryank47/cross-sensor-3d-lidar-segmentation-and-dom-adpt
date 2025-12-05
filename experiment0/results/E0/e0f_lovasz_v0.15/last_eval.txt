@@ -1,0 +1,26 @@
+Epoch 60: loss=0.025033
+======================================================================
+ECLAIR Validation (Native Taxonomy):
+  Overall: mIoU=0.4317 | macroF1=0.4759
+  Utility Classes (ECLAIR-specific):
+    Trans Wires    : IoU=0.918 | Rec=0.996 | Prec=0.921 | F1=0.957
+    Dist Wires     : IoU=0.000 | Rec=0.000 | Prec=0.000 | F1=nan
+    Poles          : IoU=0.116 | Rec=0.875 | Prec=0.118 | F1=0.207
+    Towers         : IoU=0.000 | Rec=0.000 | Prec=0.000 | F1=nan
+
+ECLAIR Validation (Common Taxonomy):
+  Overall: mIoU=0.5042 | macroF1=0.5729
+  Common Classes:
+    Wires          : IoU=0.569 | Rec=0.984 | Prec=0.575 | F1=0.726
+    Poles          : IoU=0.177 | Rec=0.624 | Prec=0.198 | F1=0.301
+
+======================================================================
+DALES Test (Common Taxonomy):
+  Overall: mIoU=0.0121 | macroF1=0.0235
+  Domain Gap:
+    ΔmIoU (ECLAIR→DALES) = 0.4921
+
+  Per-Class Domain Gap (Common Space):
+    Wires          : ECLAIR=0.569 | DALES=0.000 | Δ=+0.569
+    Poles          : ECLAIR=0.177 | DALES=0.006 | Δ=+0.171
+======================================================================
