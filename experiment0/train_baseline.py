@@ -389,6 +389,7 @@ def train(
         samples_per_cls=samples_per_cls,  # NEW
         cb_beta=0.9999,  # NEW - can be made a CLI arg if needed
     )
+    loss_fn = loss_fn.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)

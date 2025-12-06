@@ -184,15 +184,29 @@ class ClassBalancedLoss(nn.Module):
         self, samples_per_cls: List[int], beta: float = 0.9999, ignore_index: int = -100
     ):
         super().__init__()
-        effective_num = 1.0 - np.power(beta, samples_per_cls)
-        weights = (1.0 - beta) / np.array(effective_num)
+
+        counts = np.asarray(samples_per_cls, dtype=np.float64)
+
+        # Cui et al. effective number
+        effective_num = 1.0 - np.power(beta, counts)
+
+        # Avoid division by zero when count == 0
+        eps = 1e-8
+        effective_num = np.where(effective_num > eps, effective_num, eps)
+
+        weights = (1.0 - beta) / effective_num
+
+        # Normalise to sum to num_classes
         weights = weights / weights.sum() * len(weights)
-        self.register_buffer("weight", torch.tensor(weights, dtype=torch.float))
-        self.ignore_index = ignore_index
+
+        self.register_buffer("weight", torch.tensor(weights, dtype=torch.float32))
+        self.ignore_index = ignore_index 
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # Ensure weight lives on the same device as logits/targets
+        weight = self.weight.to(logits.device)
         return F.cross_entropy(
-            logits, target, weight=self.weight, ignore_index=self.ignore_index
+            logits, target, weight=weight, ignore_index=self.ignore_index
         )
 
 
