@@ -8,33 +8,66 @@ from typing import Dict, List, Optional, Tuple
 
 import MinkowskiEngine as ME
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import EclairTiles, GenericLasFolder
 from functional import compose_transforms_from_list
 from losses import make_loss
 from metrics import ConfusionMatrix, compute_scores, map_labels_tensor
-from MinkowskiEngine import (MinkowskiAlgorithm, SparseTensorQuantizationMode,
-                             TensorField)
+from MinkowskiEngine import (
+    MinkowskiAlgorithm,
+    SparseTensorQuantizationMode,
+    TensorField,
+)
 from model import MinkUNet14C
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch_geometric.loader import DataLoader as PyGDataLoader
 from tqdm import tqdm
 
 
-def set_seed(seed: int):
+def setup_ddp():
+    """
+    Returns:
+        is_distributed: bool
+        rank: int
+        world_size: int
+        local_rank: int
+    """
+    if "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
+        world_size = int(os.environ["WORLD_SIZE"])
+        rank = int(os.environ["RANK"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+        print(
+            f"[DDP] Initialized: rank={rank}, world_size={world_size}, local_rank={local_rank}"
+        )
+        return True, rank, world_size, local_rank
+    else:
+        # Single-process / single-GPU or CPU
+        return False, 0, 1, 0
+
+
+def set_seed(seed: int, deterministic: bool = True):
     import random
 
     import numpy as np
 
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
     np.random.seed(seed)
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
+
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    else:
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
 
 
 @torch.no_grad()
@@ -45,7 +78,8 @@ def evaluate_split(
     voxel_size: float,
     num_classes_native: int,
     ignore_ids_native: List[int],
-    common_mapping: Dict[int, int],
+    pred_common_mapping: Dict[int, int],  # NEW
+    gt_common_mapping: Dict[int, int],  # NEW
     num_common: int,
     important_native: List[int],
 ):
@@ -62,8 +96,8 @@ def evaluate_split(
         coords = torch.cat([batch_idx.unsqueeze(1), coords], dim=1)
 
         in_field = TensorField(
-            features=feats.to(device),
-            coordinates=coords.to(device),
+            features=feats.to(device, non_blocking=True),
+            coordinates=coords.to(device, non_blocking=True),
             quantization_mode=SparseTensorQuantizationMode.UNWEIGHTED_AVERAGE,
             minkowski_algorithm=MinkowskiAlgorithm.MEMORY_EFFICIENT,
         )
@@ -89,7 +123,7 @@ def evaluate_split(
         # pred_native = pred_native.clamp_(min=0, max=8)  # DALES has 9 classes
         # # native confusion
         # conf_native.update(pred_native.to('cpu'), y.to('cpu'))
-        y = batch.classification.long().to(device)
+        y = batch.classification.long().to(device, non_blocking=True)
 
         # For DALES: model outputs 12 classes (ECLAIR), but y is DALES native (0-8)
         # We need to ignore DALES class 0 (unknown)
@@ -117,8 +151,8 @@ def evaluate_split(
         conf_native.update(pred_native_clamped.to("cpu"), y.to("cpu"))
 
         # map to common - USE UNCLAMPED PREDICTIONS
-        pred_common = map_labels_tensor(pred_native, common_mapping)  # Map 12→8
-        y_common = map_labels_tensor(y, common_mapping)  # Map 9→8
+        pred_common = map_labels_tensor(pred_native, pred_common_mapping)  # Map 12→8
+        y_common = map_labels_tensor(y, gt_common_mapping)  # Map 9→8
 
         # ignore id for common assumed 0
         cmask = y_common != 0
@@ -248,7 +282,6 @@ def validate_config_with_data(cfg, dataset, config_file):
 
     if actual_dim != expected_dim:
         # Provide detailed breakdown
-        feature_breakdown = []
         expected_breakdown = []
 
         if "intensity" in cfg.feature_names:
@@ -295,6 +328,89 @@ def validate_config_with_data(cfg, dataset, config_file):
     print()
 
 
+# def train(
+#     eclair_dir: str,
+#     dales_dir: str,
+#     output_dir: str = "runs/E0",
+#     config_file: str = "./configs/train_e0.yaml",
+#     loss_name: str = "ce",
+#     dice_smooth: float = 1.0,
+#     focal_gamma: float = 2.0,
+#     focal_alpha: Optional[List[float]] = None,
+#     focal_use_cb_alpha: bool = True,
+#     epochs: int = 80,
+#     lr: float = 1e-3,
+#     weight_decay: float = 1e-4,
+#     amp: bool = True,
+#     seed: int = 1984,
+#     eval_every: int = 5,
+#     num_workers: int = 0,
+#     voxel_size: Optional[float] = None,
+#     use_cache: bool = False,
+# ):
+#     cfg = OmegaConf.load(config_file)
+#     set_seed(seed, deterministic=False)
+#     # Allow voxel size override from CLI
+#     if voxel_size is not None:
+#         cfg.voxel_size = voxel_size
+#         print(f"✓ Overriding voxel_size: {cfg.voxel_size}")
+
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+#     # ---------------------- datasets & loaders ----------------------
+#     if use_cache:
+#         from datasets import CachedEclairTiles
+
+#         cache_root = Path(eclair_dir) / "cache"
+#         eclair = CachedEclairTiles(cache_root=str(cache_root), split="train")
+#         eclair_val = CachedEclairTiles(cache_root=str(cache_root), split="val")
+
+#         # We already applied transforms when creating the cache, so we don't
+#         # pass transforms here. validate_config_with_data still works because
+#         # sample.x is present and has the correct feature dimension.
+#         validate_config_with_data(cfg, eclair, config_file)
+#     else:
+#         # ECLAIR splits from labels.json
+#         eclair = EclairTiles(
+#             root=eclair_dir,
+#             split="train",
+#             transforms=compose_transforms_from_list(cfg.train_transforms),
+#         )
+#         validate_config_with_data(cfg, eclair, config_file)
+#         eclair_val = EclairTiles(
+#             root=eclair_dir,
+#             split="val",
+#             transforms=compose_transforms_from_list(cfg.eval_transforms),
+#         )
+
+#         # DALES test (zero-shot). We simply glob LAS/LAZ files inside provided folder.
+#         dales_test = GenericLasFolder(
+#             root=dales_dir, transforms=compose_transforms_from_list(cfg.eval_transforms)
+#         )
+
+#     train_loader = PyGDataLoader(
+#         eclair,
+#         batch_size=cfg.train_batch_size,
+#         shuffle=True,
+#         num_workers=num_workers,
+#         pin_memory=True,
+#     )
+#     val_loader = PyGDataLoader(
+#         eclair_val,
+#         batch_size=cfg.eval_batch_size,
+#         shuffle=False,
+#         num_workers=num_workers,
+#         pin_memory=True,
+#     )
+#     dales_loader = PyGDataLoader(
+#         dales_test,
+#         batch_size=cfg.eval_batch_size,
+#         shuffle=False,
+#         num_workers=num_workers,
+#         pin_memory=True,
+#     )
+
+
 def train(
     eclair_dir: str,
     dales_dir: str,
@@ -304,6 +420,7 @@ def train(
     dice_smooth: float = 1.0,
     focal_gamma: float = 2.0,
     focal_alpha: Optional[List[float]] = None,
+    focal_use_cb_alpha: bool = True,
     epochs: int = 80,
     lr: float = 1e-3,
     weight_decay: float = 1e-4,
@@ -312,72 +429,184 @@ def train(
     eval_every: int = 5,
     num_workers: int = 0,
     voxel_size: Optional[float] = None,
+    use_cache: bool = False,
 ):
     cfg = OmegaConf.load(config_file)
-    set_seed(seed)
+
+    # --- DDP setup ---
+    is_distributed, rank, world_size, local_rank = setup_ddp()
+    # Rank-aware seeding so each worker has different dataloader shuffles
+    set_seed(seed + rank, deterministic=False)
+
     # Allow voxel size override from CLI
     if voxel_size is not None:
         cfg.voxel_size = voxel_size
-        print(f"✓ Overriding voxel_size: {cfg.voxel_size}")
+        if rank == 0:
+            print(f"✓ Overriding voxel_size: {cfg.voxel_size}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Device selection
+    if torch.cuda.is_available():
+        if is_distributed:
+            device = torch.device(f"cuda:{local_rank}")
+        else:
+            device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+        if is_distributed and rank == 0:
+            print("[WARN] DDP initialized but no CUDA device found – training on CPU.")
 
     # ---------------------- datasets & loaders ----------------------
-    # ECLAIR splits from labels.json
-    eclair = EclairTiles(
-        root=eclair_dir,
-        split="train",
-        transforms=compose_transforms_from_list(cfg.train_transforms),
-    )
-    validate_config_with_data(cfg, eclair, config_file)
-    eclair_val = EclairTiles(
-        root=eclair_dir,
-        split="val",
-        transforms=compose_transforms_from_list(cfg.eval_transforms),
-    )
+    if use_cache:
+        from datasets import CachedEclairTiles
 
-    # DALES test (zero-shot). We simply glob LAS/LAZ files inside provided folder.
-    dales_test = GenericLasFolder(
-        root=dales_dir, transforms=compose_transforms_from_list(cfg.eval_transforms)
-    )
+        cache_root = Path(eclair_dir) / "cache"
+        eclair = CachedEclairTiles(cache_root=str(cache_root), split="train")
+        eclair_val = CachedEclairTiles(cache_root=str(cache_root), split="val")
+
+        # We already applied transforms when creating the cache,
+        # validate_config_with_data still works because sample.x exists.
+        if rank == 0:
+            validate_config_with_data(cfg, eclair, config_file)
+    else:
+        # ECLAIR splits from labels.json
+        eclair = EclairTiles(
+            root=eclair_dir,
+            split="train",
+            transforms=compose_transforms_from_list(cfg.train_transforms),
+        )
+        if rank == 0:
+            validate_config_with_data(cfg, eclair, config_file)
+        eclair_val = EclairTiles(
+            root=eclair_dir,
+            split="val",
+            transforms=compose_transforms_from_list(cfg.eval_transforms),
+        )
+
+    # NOTE: DALES is no longer used in the training loop;
+    # cross-domain eval is handled by eval_cross_domain.py.
+
+    # Distributed sampler for training
+    train_sampler = DistributedSampler(eclair) if is_distributed else None
 
     train_loader = PyGDataLoader(
         eclair,
         batch_size=cfg.train_batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=num_workers,
-        pin_memory=False,
+        pin_memory=True,
     )
-    val_loader = PyGDataLoader(
-        eclair_val,
-        batch_size=cfg.eval_batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=False,
-    )
-    dales_loader = PyGDataLoader(
-        dales_test,
-        batch_size=cfg.eval_batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=False,
-    )
+    # For eval we only use rank 0, so no sampler needed
+    if rank == 0:
+        val_loader = PyGDataLoader(
+            eclair_val,
+            batch_size=cfg.eval_batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+    else:
+        val_loader = None  # not used on non-zero ranks
+
+    # # ---------------------- model & loss ----------------------------
+    # model = MinkUNet14C(cfg.num_features, cfg.num_classes_native).to(device)
+
+    # # Load class statistics for Class-Balanced Loss (if needed)
+    # samples_per_cls = None
+    # if loss_name.lower() in [
+    #     "class_balanced",
+    #     "cb",
+    #     "focal",
+    #     "focal_dice",
+    #     "dice_focal",
+    # ]:
+    #     class_stats_path = Path("./configs/eclair_class_counts.yaml")
+    #     if not class_stats_path.exists():
+    #         raise FileNotFoundError(
+    #             f"Class statistics not found at {class_stats_path}. "
+    #             f"Run: python compute_class_stats.py --eclair_dir {eclair_dir}"
+    #         )
+    #     class_stats = OmegaConf.load(class_stats_path)
+    #     samples_per_cls = class_stats.samples_per_cls
+    #     assert len(samples_per_cls) == cfg.num_classes_native
+    #     print(f"✓ Loaded class statistics: {len(samples_per_cls)} classes")
+
+    # loss_fn = make_loss(
+    #     name=loss_name,
+    #     num_classes=cfg.num_classes_native,
+    #     ignore_index=0,
+    #     focal_gamma=focal_gamma,
+    #     focal_alpha=focal_alpha,
+    #     dice_smooth=dice_smooth,
+    #     samples_per_cls=samples_per_cls,  # NEW
+    #     cb_beta=0.9999,  # NEW - can be made a CLI arg if needed
+    #     focal_use_cb_alpha=focal_use_cb_alpha,
+    # )
+    # loss_fn = loss_fn.to(device)
+
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    # scaler = torch.cuda.amp.GradScaler(enabled=amp)
+
+    # # convenience shorthands
+    # voxel_size = cfg.voxel_size
+    # ignore_ids_native = cfg.ignore_ids_native
+    # important_native = cfg.important_native
+
+    # # common mapping dicts
+    # eclair2common: Dict[int, int] = OmegaConf.to_container(
+    #     OmegaConf.load(cfg.mapping_eclair_to_common), resolve=True
+    # )
+    # dales2common: Dict[int, int] = OmegaConf.to_container(
+    #     OmegaConf.load(cfg.mapping_dales_to_common), resolve=True
+    # )
+    # num_common = cfg.num_classes_common
+
+    # out_dir = Path(output_dir)
+    # (out_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+    # metrics_csv = out_dir / "metrics.csv"
+
+    # best_val_mIoU_common = -1.0
 
     # ---------------------- model & loss ----------------------------
     model = MinkUNet14C(cfg.num_features, cfg.num_classes_native).to(device)
 
+    # Wrap in DDP if needed
+    if is_distributed:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=False,
+        )
+
+    # The "base" model (for eval + checkpointing) without DDP wrapper
+    base_model = model.module if is_distributed else model
+
     # Load class statistics for Class-Balanced Loss (if needed)
     samples_per_cls = None
-    if loss_name.lower() in ["class_balanced", "cb"]:
+    if loss_name.lower() in [
+        "class_balanced",
+        "cb",
+        "focal",
+        "focal_dice",
+        "dice_focal",
+    ]:
         class_stats_path = Path("./configs/eclair_class_counts.yaml")
         if not class_stats_path.exists():
-            raise FileNotFoundError(
-                f"Class statistics not found at {class_stats_path}. "
-                f"Run: python compute_class_stats.py --eclair_dir {eclair_dir}"
-            )
+            if rank == 0:
+                raise FileNotFoundError(
+                    f"Class statistics not found at {class_stats_path}. "
+                    f"Run: python compute_class_stats.py --eclair_dir {eclair_dir}"
+                )
+            else:
+                # If non-zero ranks hit this, just exit cleanly
+                return
         class_stats = OmegaConf.load(class_stats_path)
         samples_per_cls = class_stats.samples_per_cls
-        print(f"✓ Loaded class statistics: {len(samples_per_cls)} classes")
+        assert len(samples_per_cls) == cfg.num_classes_native
+        if rank == 0:
+            print(f"✓ Loaded class statistics: {len(samples_per_cls)} classes")
 
     loss_fn = make_loss(
         name=loss_name,
@@ -388,6 +617,7 @@ def train(
         dice_smooth=dice_smooth,
         samples_per_cls=samples_per_cls,  # NEW
         cb_beta=0.9999,  # NEW - can be made a CLI arg if needed
+        focal_use_cb_alpha=focal_use_cb_alpha,
     )
     loss_fn = loss_fn.to(device)
 
@@ -400,39 +630,244 @@ def train(
     ignore_ids_native = cfg.ignore_ids_native
     important_native = cfg.important_native
 
-    # common mapping dicts
+    # common mapping dicts (used only in eval)
     eclair2common: Dict[int, int] = OmegaConf.to_container(
         OmegaConf.load(cfg.mapping_eclair_to_common), resolve=True
-    )
-    dales2common: Dict[int, int] = OmegaConf.to_container(
-        OmegaConf.load(cfg.mapping_dales_to_common), resolve=True
     )
     num_common = cfg.num_classes_common
 
     out_dir = Path(output_dir)
-    (out_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
-    metrics_csv = out_dir / "metrics.csv"
+    if rank == 0:
+        (out_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+        metrics_csv = out_dir / "metrics.csv"
+    else:
+        metrics_csv = None
 
     best_val_mIoU_common = -1.0
+
+    # for epoch in range(1, epochs + 1):
+    #     model.train()
+    #     epoch_loss = 0.0
+    #     n_points = 0
+
+    #     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}")
+    #     for batch in pbar:
+    #         coords, feats, batch_idx = batch.pos / voxel_size, batch.x, batch.batch
+    #         if feats.shape[1] != cfg.num_features:
+    #             raise ValueError(
+    #                 f"Feature dim mismatch: got {feats.shape[1]} but cfg.num_features={cfg.num_features}. "
+    #                 f"Check feature_names in {config_file} and NormalizeFeatures."
+    #             )
+    #         coords = torch.cat([batch_idx.unsqueeze(1), coords], dim=1)
+
+    #         in_field = TensorField(
+    #             features=feats.to(device, non_blocking=True),
+    #             coordinates=coords.to(device, non_blocking=True),
+    #             quantization_mode=SparseTensorQuantizationMode.UNWEIGHTED_AVERAGE,
+    #             minkowski_algorithm=MinkowskiAlgorithm.MEMORY_EFFICIENT,
+    #         )
+    #         sinput = in_field.sparse()
+
+    #         with torch.cuda.amp.autocast(enabled=amp):
+    #             logits_sparse = model(sinput)  # [M_sparse, C]
+    #             logits = logits_sparse.slice(in_field).F  # [N_points, C]
+    #             y = batch.classification.long().to(device, non_blocking=True)
+    #             # mask out ignored ids (0 == Undefined) for loss
+    #             mask = torch.ones_like(y, dtype=torch.bool)
+    #             for ig in ignore_ids_native:
+    #                 mask &= y != ig
+    #             if mask.sum() == 0:
+    #                 continue
+    #             loss = loss_fn(logits[mask], y[mask])
+
+    #         scaler.scale(loss).backward()
+    #         scaler.step(optimizer)
+    #         scaler.update()
+    #         optimizer.zero_grad(set_to_none=True)
+
+    #         epoch_loss += loss.item() * int(mask.sum())
+    #         n_points += int(mask.sum())
+    #         pbar.set_postfix(
+    #             {
+    #                 "loss": f"{loss.item():.4f}",
+    #                 "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+    #             }
+    #         )
+
+    #     scheduler.step()
+    #     avg_loss = epoch_loss / max(1, n_points)
+
+    # periodic evaluation
+    # if epoch % eval_every == 0 or epoch == epochs:
+    #     # ECLAIR-val (native + common via eclair2common)
+    #     val_results = evaluate_split(
+    #         model,
+    #         val_loader,
+    #         device,
+    #         voxel_size,
+    #         cfg.num_classes_native,
+    #         ignore_ids_native,
+    #         pred_common_mapping=eclair2common,
+    #         gt_common_mapping=eclair2common,
+    #         num_common=num_common,
+    #         important_native=important_native,
+    #     )
+    #     # DALES-test (common via dales2common)
+    #     dales_results = evaluate_split(
+    #         model,
+    #         dales_loader,
+    #         device,
+    #         voxel_size,
+    #         cfg.num_classes_dales_native,
+    #         ignore_ids_native=cfg.ignore_ids_dales,
+    #         pred_common_mapping=eclair2common,  # model head is ECLAIR
+    #         gt_common_mapping=dales2common,
+    #         num_common=num_common,
+    #         important_native=list(range(cfg.num_classes_dales_native)),
+    #     )
+
+    #     # compute domain gap on common set
+    #     delta_miou = val_results["common"]["mIoU"] - dales_results["common"]["mIoU"]
+
+    #     # logging
+    #     exp_metadata = {
+    #         "loss_name": loss_name,
+    #         "voxel_size": cfg.voxel_size,
+    #         "focal_gamma": focal_gamma,
+    #         "dice_smooth": dice_smooth,
+    #     }
+    #     save_metrics_csv(
+    #         metrics_csv, epoch, "ECLAIR_val", val_results, exp_metadata
+    #     )
+    #     save_metrics_csv(
+    #         metrics_csv, epoch, "DALES_test", dales_results, exp_metadata
+    #     )
+    #     # Enhanced logging with per-class metrics for rare utility classes
+    #     with open(out_dir / "last_eval.txt", "w") as f:
+    #         f.write(f"Epoch {epoch}: loss={avg_loss:.6f}\n")
+    #         f.write("=" * 70 + "\n")
+
+    #         # ECLAIR validation (native taxonomy)
+    #         f.write("ECLAIR Validation (Native Taxonomy):\n")
+    #         f.write(
+    #             f"  Overall: mIoU={val_results['native']['mIoU']:.4f} | macroF1={val_results['native']['macroF1']:.4f}\n"
+    #         )
+    #         f.write("  Utility Classes (ECLAIR-specific):\n")
+
+    #         # Indices: 6=Trans Wires, 7=Dist Wires, 8=Poles, 9=Towers
+    #         for idx, name in [
+    #             (6, "Trans Wires"),
+    #             (7, "Dist Wires"),
+    #             (8, "Poles"),
+    #             (9, "Towers"),
+    #         ]:
+    #             iou = val_results["native"]["IoU_per_class"][idx]
+    #             rec = val_results["native"]["Recall_per_class"][idx]
+    #             prec = val_results["native"]["Precision_per_class"][idx]
+    #             f1 = val_results["native"]["F1_per_class"][idx]
+    #             f.write(
+    #                 f"    {name:15s}: IoU={iou:.3f} | Rec={rec:.3f} | Prec={prec:.3f} | F1={f1:.3f}\n"
+    #             )
+
+    #         f.write("\n")
+
+    #         # ECLAIR validation (common taxonomy)
+    #         f.write("ECLAIR Validation (Common Taxonomy):\n")
+    #         f.write(
+    #             f"  Overall: mIoU={val_results['common']['mIoU']:.4f} | macroF1={val_results['common']['macroF1']:.4f}\n"
+    #         )
+    #         f.write("  Common Classes:\n")
+
+    #         # Common space: 4=Wires, 5=Poles (Towers merged into Poles)
+    #         common_names = [
+    #             "Ignore",
+    #             "Ground",
+    #             "Vegetation",
+    #             "Buildings",
+    #             "Wires",
+    #             "Poles",
+    #             "Fence",
+    #             "Vehicle",
+    #         ]
+    #         for idx in [4, 5]:  # Wires, Poles
+    #             name = common_names[idx]
+    #             iou = val_results["common"]["IoU_per_class"][idx]
+    #             rec = val_results["common"]["Recall_per_class"][idx]
+    #             prec = val_results["common"]["Precision_per_class"][idx]
+    #             f1 = val_results["common"]["F1_per_class"][idx]
+    #             f.write(
+    #                 f"    {name:15s}: IoU={iou:.3f} | Rec={rec:.3f} | Prec={prec:.3f} | F1={f1:.3f}\n"
+    #             )
+
+    #         f.write("\n")
+    #         f.write("=" * 70 + "\n")
+
+    #         # DALES test (common taxonomy only)
+    #         f.write("DALES Test (Common Taxonomy):\n")
+    #         f.write(
+    #             f"  Overall: mIoU={dales_results['common']['mIoU']:.4f} | macroF1={dales_results['common']['macroF1']:.4f}\n"
+    #         )
+    #         f.write("  Domain Gap:\n")
+    #         f.write(f"    ΔmIoU (ECLAIR→DALES) = {delta_miou:.4f}\n")
+    #         f.write("\n")
+
+    #         # Per-class domain gap for utility classes
+    #         f.write("  Per-Class Domain Gap (Common Space):\n")
+    #         for idx in [4, 5]:  # Wires, Poles
+    #             name = common_names[idx]
+    #             eclair_iou = val_results["common"]["IoU_per_class"][idx]
+    #             dales_iou = dales_results["common"]["IoU_per_class"][idx]
+    #             gap = eclair_iou - dales_iou
+    #             f.write(
+    #                 f"    {name:15s}: ECLAIR={eclair_iou:.3f} | DALES={dales_iou:.3f} | Δ={gap:+.3f}\n"
+    #             )
+
+    #         f.write("=" * 70 + "\n")
+
+    #     # checkpoint by best common mIoU on ECLAIR-val
+    #     if val_results["common"]["mIoU"] > best_val_mIoU_common:
+    #         best_val_mIoU_common = val_results["common"]["mIoU"]
+    #         torch.save(model.state_dict(), out_dir / "checkpoints/best.pth")
+
+    #     # always save last
+    #     torch.save(model.state_dict(), out_dir / "checkpoints/last.pth")
+    # periodic evaluation
 
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_loss = 0.0
         n_points = 0
 
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}")
+        # Let DistributedSampler reshuffle indices every epoch
+        if is_distributed and train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+
+        # Progress bar only on rank 0
+        if rank == 0:
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}")
+        else:
+            pbar = train_loader
+
         for batch in pbar:
             coords, feats, batch_idx = batch.pos / voxel_size, batch.x, batch.batch
             if feats.shape[1] != cfg.num_features:
-                raise ValueError(
-                    f"Feature dim mismatch: got {feats.shape[1]} but cfg.num_features={cfg.num_features}. "
+                msg = (
+                    f"Feature dim mismatch: got {feats.shape[1]} but "
+                    f"cfg.num_features={cfg.num_features}. "
                     f"Check feature_names in {config_file} and NormalizeFeatures."
                 )
+                # Only rank 0 raises loudly
+                if rank == 0:
+                    raise ValueError(msg)
+                else:
+                    print(f"[RANK {rank}] {msg}")
+                    return
+
             coords = torch.cat([batch_idx.unsqueeze(1), coords], dim=1)
 
             in_field = TensorField(
-                features=feats.to(device),
-                coordinates=coords.to(device),
+                features=feats.to(device, non_blocking=True),
+                coordinates=coords.to(device, non_blocking=True),
                 quantization_mode=SparseTensorQuantizationMode.UNWEIGHTED_AVERAGE,
                 minkowski_algorithm=MinkowskiAlgorithm.MEMORY_EFFICIENT,
             )
@@ -441,7 +876,7 @@ def train(
             with torch.cuda.amp.autocast(enabled=amp):
                 logits_sparse = model(sinput)  # [M_sparse, C]
                 logits = logits_sparse.slice(in_field).F  # [N_points, C]
-                y = batch.classification.long().to(device)
+                y = batch.classification.long().to(device, non_blocking=True)
                 # mask out ignored ids (0 == Undefined) for loss
                 mask = torch.ones_like(y, dtype=torch.bool)
                 for ig in ignore_ids_native:
@@ -455,49 +890,46 @@ def train(
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
 
-            epoch_loss += loss.item() * int(mask.sum())
-            n_points += int(mask.sum())
-            pbar.set_postfix(
-                {
-                    "loss": f"{loss.item():.4f}",
-                    "lr": f"{scheduler.get_last_lr()[0]:.2e}",
-                }
-            )
+            # Local accumulation
+            batch_points = int(mask.sum())
+            epoch_loss += loss.item() * batch_points
+            n_points += batch_points
+
+            if rank == 0:
+                pbar.set_postfix(
+                    {
+                        "loss": f"{loss.item():.4f}",
+                        "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+                    }
+                )
 
         scheduler.step()
-        avg_loss = epoch_loss / max(1, n_points)
 
-        # periodic evaluation
-        if epoch % eval_every == 0 or epoch == epochs:
+        # --- Aggregate loss across all ranks for logging ---
+        loss_npts = torch.tensor(
+            [epoch_loss, n_points], device=device, dtype=torch.float64
+        )
+        if is_distributed:
+            dist.all_reduce(loss_npts, op=dist.ReduceOp.SUM)
+        total_loss, total_points = loss_npts.tolist()
+        avg_loss = total_loss / max(1.0, total_points)
+
+        # ------------------ periodic evaluation ------------------
+        if rank == 0 and (epoch % eval_every == 0 or epoch == epochs):
             # ECLAIR-val (native + common via eclair2common)
             val_results = evaluate_split(
-                model,
+                base_model,
                 val_loader,
                 device,
                 voxel_size,
                 cfg.num_classes_native,
                 ignore_ids_native,
-                common_mapping=eclair2common,
+                pred_common_mapping=eclair2common,
+                gt_common_mapping=eclair2common,
                 num_common=num_common,
                 important_native=important_native,
             )
-            # DALES-test (common via dales2common)
-            dales_results = evaluate_split(
-                model,
-                dales_loader,
-                device,
-                voxel_size,
-                cfg.num_classes_dales_native,
-                ignore_ids_native=cfg.ignore_ids_dales,
-                common_mapping=dales2common,
-                num_common=num_common,
-                important_native=list(range(cfg.num_classes_dales_native)),
-            )
 
-            # compute domain gap on common set
-            delta_miou = val_results["common"]["mIoU"] - dales_results["common"]["mIoU"]
-
-            # logging
             exp_metadata = {
                 "loss_name": loss_name,
                 "voxel_size": cfg.voxel_size,
@@ -507,10 +939,8 @@ def train(
             save_metrics_csv(
                 metrics_csv, epoch, "ECLAIR_val", val_results, exp_metadata
             )
-            save_metrics_csv(
-                metrics_csv, epoch, "DALES_test", dales_results, exp_metadata
-            )
-            # Enhanced logging with per-class metrics for rare utility classes
+
+            # keep the ECLAIR-focused logging to last_eval.txt
             with open(out_dir / "last_eval.txt", "w") as f:
                 f.write(f"Epoch {epoch}: loss={avg_loss:.6f}\n")
                 f.write("=" * 70 + "\n")
@@ -518,7 +948,8 @@ def train(
                 # ECLAIR validation (native taxonomy)
                 f.write("ECLAIR Validation (Native Taxonomy):\n")
                 f.write(
-                    f"  Overall: mIoU={val_results['native']['mIoU']:.4f} | macroF1={val_results['native']['macroF1']:.4f}\n"
+                    f"  Overall: mIoU={val_results['native']['mIoU']:.4f} | "
+                    f"macroF1={val_results['native']['macroF1']:.4f}\n"
                 )
                 f.write("  Utility Classes (ECLAIR-specific):\n")
 
@@ -534,7 +965,8 @@ def train(
                     prec = val_results["native"]["Precision_per_class"][idx]
                     f1 = val_results["native"]["F1_per_class"][idx]
                     f.write(
-                        f"    {name:15s}: IoU={iou:.3f} | Rec={rec:.3f} | Prec={prec:.3f} | F1={f1:.3f}\n"
+                        f"    {name:15s}: IoU={iou:.3f} | "
+                        f"Rec={rec:.3f} | Prec={prec:.3f} | F1={f1:.3f}\n"
                     )
 
                 f.write("\n")
@@ -542,11 +974,11 @@ def train(
                 # ECLAIR validation (common taxonomy)
                 f.write("ECLAIR Validation (Common Taxonomy):\n")
                 f.write(
-                    f"  Overall: mIoU={val_results['common']['mIoU']:.4f} | macroF1={val_results['common']['macroF1']:.4f}\n"
+                    f"  Overall: mIoU={val_results['common']['mIoU']:.4f} | "
+                    f"macroF1={val_results['common']['macroF1']:.4f}\n"
                 )
                 f.write("  Common Classes:\n")
 
-                # Common space: 4=Wires, 5=Poles (Towers merged into Poles)
                 common_names = [
                     "Ignore",
                     "Ground",
@@ -564,30 +996,8 @@ def train(
                     prec = val_results["common"]["Precision_per_class"][idx]
                     f1 = val_results["common"]["F1_per_class"][idx]
                     f.write(
-                        f"    {name:15s}: IoU={iou:.3f} | Rec={rec:.3f} | Prec={prec:.3f} | F1={f1:.3f}\n"
-                    )
-
-                f.write("\n")
-                f.write("=" * 70 + "\n")
-
-                # DALES test (common taxonomy only)
-                f.write("DALES Test (Common Taxonomy):\n")
-                f.write(
-                    f"  Overall: mIoU={dales_results['common']['mIoU']:.4f} | macroF1={dales_results['common']['macroF1']:.4f}\n"
-                )
-                f.write("  Domain Gap:\n")
-                f.write(f"    ΔmIoU (ECLAIR→DALES) = {delta_miou:.4f}\n")
-                f.write("\n")
-
-                # Per-class domain gap for utility classes
-                f.write("  Per-Class Domain Gap (Common Space):\n")
-                for idx in [4, 5]:  # Wires, Poles
-                    name = common_names[idx]
-                    eclair_iou = val_results["common"]["IoU_per_class"][idx]
-                    dales_iou = dales_results["common"]["IoU_per_class"][idx]
-                    gap = eclair_iou - dales_iou
-                    f.write(
-                        f"    {name:15s}: ECLAIR={eclair_iou:.3f} | DALES={dales_iou:.3f} | Δ={gap:+.3f}\n"
+                        f"    {name:15s}: IoU={iou:.3f} | "
+                        f"Rec={rec:.3f} | Prec={prec:.3f} | F1={f1:.3f}\n"
                     )
 
                 f.write("=" * 70 + "\n")
@@ -595,12 +1005,112 @@ def train(
             # checkpoint by best common mIoU on ECLAIR-val
             if val_results["common"]["mIoU"] > best_val_mIoU_common:
                 best_val_mIoU_common = val_results["common"]["mIoU"]
-                torch.save(model.state_dict(), out_dir / "checkpoints/best.pth")
+                torch.save(base_model.state_dict(), out_dir / "checkpoints/best.pth")
 
             # always save last
-            torch.save(model.state_dict(), out_dir / "checkpoints/last.pth")
+            torch.save(base_model.state_dict(), out_dir / "checkpoints/last.pth")
 
-    print("Training finished. Metrics saved to:", metrics_csv)
+    #     if epoch % eval_every == 0 or epoch == epochs:
+    #         # ECLAIR-val (native + common via eclair2common)
+    #         val_results = evaluate_split(
+    #             model,
+    #             val_loader,
+    #             device,
+    #             voxel_size,
+    #             cfg.num_classes_native,
+    #             ignore_ids_native,
+    #             pred_common_mapping=eclair2common,
+    #             gt_common_mapping=eclair2common,
+    #             num_common=num_common,
+    #             important_native=important_native,
+    #         )
+
+    #         exp_metadata = {
+    #             "loss_name": loss_name,
+    #             "voxel_size": cfg.voxel_size,
+    #             "focal_gamma": focal_gamma,
+    #             "dice_smooth": dice_smooth,
+    #         }
+    #         save_metrics_csv(
+    #             metrics_csv, epoch, "ECLAIR_val", val_results, exp_metadata
+    #         )
+
+    #         # keep the ECLAIR-focused logging to last_eval.txt
+    #         with open(out_dir / "last_eval.txt", "w") as f:
+    #             f.write(f"Epoch {epoch}: loss={avg_loss:.6f}\n")
+    #             f.write("=" * 70 + "\n")
+
+    #             # ECLAIR validation (native taxonomy)
+    #             f.write("ECLAIR Validation (Native Taxonomy):\n")
+    #             f.write(
+    #                 f"  Overall: mIoU={val_results['native']['mIoU']:.4f} | "
+    #                 f"macroF1={val_results['native']['macroF1']:.4f}\n"
+    #             )
+    #             f.write("  Utility Classes (ECLAIR-specific):\n")
+
+    #             # Indices: 6=Trans Wires, 7=Dist Wires, 8=Poles, 9=Towers
+    #             for idx, name in [
+    #                 (6, "Trans Wires"),
+    #                 (7, "Dist Wires"),
+    #                 (8, "Poles"),
+    #                 (9, "Towers"),
+    #             ]:
+    #                 iou = val_results["native"]["IoU_per_class"][idx]
+    #                 rec = val_results["native"]["Recall_per_class"][idx]
+    #                 prec = val_results["native"]["Precision_per_class"][idx]
+    #                 f1 = val_results["native"]["F1_per_class"][idx]
+    #                 f.write(
+    #                     f"    {name:15s}: IoU={iou:.3f} | "
+    #                     f"Rec={rec:.3f} | Prec={prec:.3f} | F1={f1:.3f}\n"
+    #                 )
+
+    #             f.write("\n")
+
+    #             # ECLAIR validation (common taxonomy)
+    #             f.write("ECLAIR Validation (Common Taxonomy):\n")
+    #             f.write(
+    #                 f"  Overall: mIoU={val_results['common']['mIoU']:.4f} | "
+    #                 f"macroF1={val_results['common']['macroF1']:.4f}\n"
+    #             )
+    #             f.write("  Common Classes:\n")
+
+    #             common_names = [
+    #                 "Ignore",
+    #                 "Ground",
+    #                 "Vegetation",
+    #                 "Buildings",
+    #                 "Wires",
+    #                 "Poles",
+    #                 "Fence",
+    #                 "Vehicle",
+    #             ]
+    #             for idx in [4, 5]:  # Wires, Poles
+    #                 name = common_names[idx]
+    #                 iou = val_results["common"]["IoU_per_class"][idx]
+    #                 rec = val_results["common"]["Recall_per_class"][idx]
+    #                 prec = val_results["common"]["Precision_per_class"][idx]
+    #                 f1 = val_results["common"]["F1_per_class"][idx]
+    #                 f.write(
+    #                     f"    {name:15s}: IoU={iou:.3f} | "
+    #                     f"Rec={rec:.3f} | Prec={prec:.3f} | F1={f1:.3f}\n"
+    #                 )
+
+    #             f.write("=" * 70 + "\n")
+
+    #         # checkpoint by best common mIoU on ECLAIR-val
+    #         if val_results["common"]["mIoU"] > best_val_mIoU_common:
+    #             best_val_mIoU_common = val_results["common"]["mIoU"]
+    #             torch.save(model.state_dict(), out_dir / "checkpoints/best.pth")
+
+    #         # always save last
+    #         torch.save(model.state_dict(), out_dir / "checkpoints/last.pth")
+
+    # print("Training finished. Metrics saved to:", metrics_csv)
+    if rank == 0:
+        print("Training finished. Metrics saved to:", metrics_csv)
+
+    if is_distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

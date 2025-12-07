@@ -1,18 +1,65 @@
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# class SoftDiceLoss(nn.Module):
+#     def __init__(
+#         self, smooth: float = 1.0, ignore_index: int = -100, reduction: str = "mean"
+#     ):
+#         super().__init__()
+#         self.smooth = smooth
+#         self.ignore_index = ignore_index
+#         self.reduction = reduction
+
+#     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+#         """
+#         Multi-class soft Dice computed per-class then averaged.
+#         logits: [N, C]
+#         target: [N] with class indices
+#         """
+#         num_classes = logits.shape[1]
+#         probs = F.softmax(logits, dim=1)
+#         # mask ignore
+#         mask = target != self.ignore_index
+#         if mask.sum() == 0:
+#             return logits.new_tensor(0.0)
+#         probs = probs[mask]
+#         target = target[mask]
+#         # one-hot
+#         target_1h = F.one_hot(target, num_classes=num_classes).float()
+
+#         dims = (0,)  # sum over points
+#         intersection = torch.sum(probs * target_1h, dim=dims)
+#         cardinality = torch.sum(probs + target_1h, dim=dims)
+#         dice = (2.0 * intersection + self.smooth) / (cardinality + self.smooth)
+#         loss = 1.0 - dice
+#         if self.reduction == "mean":
+#             return loss.mean()
+#         elif self.reduction == "sum":
+#             return loss.sum()
+#         else:
+#             return loss
+
 
 class SoftDiceLoss(nn.Module):
     def __init__(
-        self, smooth: float = 1.0, ignore_index: int = -100, reduction: str = "mean"
+        self,
+        smooth: float = 1.0,
+        ignore_index: int = -100,
+        powerize: bool = True,
+        use_tmask: bool = True,
+        eps: float = 1e-12,
+        reduction: str = "mean",  # << added back
     ):
         super().__init__()
         self.smooth = smooth
         self.ignore_index = ignore_index
+        self.powerize = powerize
+        self.use_tmask = use_tmask
+        self.eps = eps
         self.reduction = reduction
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -23,53 +70,120 @@ class SoftDiceLoss(nn.Module):
         """
         num_classes = logits.shape[1]
         probs = F.softmax(logits, dim=1)
-        # mask ignore
-        mask = target != self.ignore_index
-        if mask.sum() == 0:
-            return logits.new_tensor(0.0)
-        probs = probs[mask]
-        target = target[mask]
-        # one-hot
+
+        if self.ignore_index is not None:
+            mask = target != self.ignore_index
+            if not mask.any():
+                return logits.new_tensor(0.0)
+            probs = probs[mask]
+            target = target[mask]
+
         target_1h = F.one_hot(target, num_classes=num_classes).float()
 
-        dims = (0,)  # sum over points
-        intersection = torch.sum(probs * target_1h, dim=dims)
-        cardinality = torch.sum(probs + target_1h, dim=dims)
-        dice = (2.0 * intersection + self.smooth) / (cardinality + self.smooth)
-        loss = 1.0 - dice
-        if self.reduction == "mean":
-            return loss.mean()
-        elif self.reduction == "sum":
-            return loss.sum()
+        intersection = (probs * target_1h).sum(dim=0)  # [C]
+
+        if self.powerize:
+            union = probs.pow(2).sum(dim=0) + target_1h.sum(dim=0)
         else:
-            return loss
+            union = probs.sum(dim=0) + target_1h.sum(dim=0)
+
+        dice_per_class = (2.0 * intersection + self.smooth) / (
+            union + self.smooth + self.eps
+        )
+
+        if self.use_tmask:
+            tmask = (target_1h.sum(dim=0) > 0).float()
+        else:
+            tmask = torch.ones_like(union)
+
+        dice_per_class = dice_per_class * tmask
+        denom = tmask.sum().clamp_min(1.0)
+
+        if self.reduction == "none":
+            return 1.0 - (dice_per_class / denom)
+
+        dice = dice_per_class.sum() / denom  # scalar
+
+        if self.reduction == "mean":
+            return 1.0 - dice  # scalar, normal case
+        elif self.reduction == "sum":
+            return (1.0 - dice) * denom  # not super meaningful, but defined
+        else:
+            raise ValueError(f"Unknown reduction: {self.reduction}")
+
+
+def compute_class_balanced_alpha(
+    samples_per_cls: Sequence[int],
+    beta: float,
+) -> torch.Tensor:
+    """
+    Compute class-balanced weights (alpha) from Cui et al. (CVPR 2019)
+    using the 'effective number of samples' formula:
+
+        w_c = (1 - beta) / (1 - beta^{n_c})
+
+    Then normalized so that mean(w_c) = 1 (sum = num_classes).
+
+    Args:
+        samples_per_cls: list/seq with one entry per class (including ignore if you want).
+        beta: float in [0.9, 0.9999], e.g. 0.999 or 0.9999.
+
+    Returns:
+        alpha: torch.FloatTensor of shape [num_classes]
+    """
+    samples = np.asarray(samples_per_cls, dtype=np.float32)
+
+    # Avoid division by zero for classes with 0 samples (e.g., ignore label 0)
+    # They don't matter anyway because you mask them out before the loss.
+    samples_safe = samples.copy()
+    samples_safe[samples_safe <= 0] = 1.0
+
+    effective_num = 1.0 - np.power(beta, samples_safe)
+    weights = (1.0 - beta) / effective_num
+
+    # Normalize so average weight is 1.0 (sum = num_classes)
+    weights = weights / np.sum(weights) * len(weights)
+
+    alpha = torch.from_numpy(weights).float()
+    return alpha
 
 
 class FocalLoss(nn.Module):
     def __init__(
         self,
         gamma: float = 2.0,
-        alpha: Optional[List[float]] = None,
+        alpha: Optional[Sequence[float]] = None,
         ignore_index: int = -100,
     ):
         super().__init__()
         self.gamma = gamma
-        if alpha is not None:
-            self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float))
-        else:
-            self.alpha = None
+        # Store alpha as-is (list or tensor); we'll fix device/dtype in forward
+        self.alpha = alpha
         self.ignore_index = ignore_index
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # Prepare class weights on the same device as logits
+        weight = None
+        if self.alpha is not None:
+            if isinstance(self.alpha, torch.Tensor):
+                weight = self.alpha.to(device=logits.device, dtype=logits.dtype)
+            else:
+                # e.g. list/tuple from config
+                weight = torch.tensor(
+                    self.alpha, device=logits.device, dtype=logits.dtype
+                )
+
         ce = F.cross_entropy(
             logits,
             target,
             reduction="none",
             ignore_index=self.ignore_index,
-            weight=self.alpha,
+            weight=weight,
         )
+
         with torch.no_grad():
-            pt = torch.exp(-ce)  # pt = softmax probability of the true class
+            pt = torch.exp(-ce)  # p_t
+
         loss = ((1 - pt) ** self.gamma) * ce
         return loss.mean()
 
@@ -200,7 +314,7 @@ class ClassBalancedLoss(nn.Module):
         weights = weights / weights.sum() * len(weights)
 
         self.register_buffer("weight", torch.tensor(weights, dtype=torch.float32))
-        self.ignore_index = ignore_index 
+        self.ignore_index = ignore_index
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         # Ensure weight lives on the same device as logits/targets
@@ -217,49 +331,93 @@ def make_loss(
     focal_gamma: float = 2.0,
     focal_alpha: Optional[List[float]] = None,
     dice_smooth: float = 1.0,
-    samples_per_cls: Optional[List[int]] = None,  # NEW
-    cb_beta: float = 0.9999,  # NEW
+    samples_per_cls: Optional[List[int]] = None,
+    cb_beta: float = 0.9999,
+    focal_use_cb_alpha: bool = True,
 ) -> nn.Module:
     name = name.lower()
+
+    # ---- CE ----
     if name == "ce":
         return CrossEntropyLoss(ignore_index=ignore_index)
-    if name == "focal":
-        return FocalLoss(
-            gamma=focal_gamma, alpha=focal_alpha, ignore_index=ignore_index
-        )
-    if name == "dice":
-        return SoftDiceLoss(smooth=dice_smooth, ignore_index=ignore_index)
 
-    # NEW: Class-Balanced Loss
-    if name == "class_balanced" or name == "cb":
+    # ---- FOCAL (plain) ----
+    if name == "focal":
+        alpha_tensor = None
+
+        if focal_alpha is not None:
+            # explicit α from CLI/config
+            alpha_tensor = torch.tensor(focal_alpha, dtype=torch.float32)
+        elif focal_use_cb_alpha and samples_per_cls is not None:
+            # class-balanced α using effective number
+            alpha_tensor = compute_class_balanced_alpha(samples_per_cls, cb_beta)
+
+        return FocalLoss(
+            gamma=focal_gamma,
+            alpha=alpha_tensor,
+            ignore_index=ignore_index,
+        )
+
+    # ---- DICE (LiDOG-style defaults) ----
+    if name == "dice":
+        return SoftDiceLoss(
+            smooth=dice_smooth,
+            ignore_index=ignore_index,
+            # powerize/use_tmask already default to True in ctor
+        )
+
+    # ---- Class-balanced CE ----
+    if name in ("class_balanced", "cb"):
         if samples_per_cls is None:
             raise ValueError("samples_per_cls required for class_balanced loss")
         return ClassBalancedLoss(
-            samples_per_cls=samples_per_cls, beta=cb_beta, ignore_index=ignore_index
+            samples_per_cls=samples_per_cls,
+            beta=cb_beta,
+            ignore_index=ignore_index,
         )
 
-    # NEW: Lovász Loss
+    # ---- Lovász ----
     if name == "lovasz":
         return LovaszSoftmaxLoss(ignore_index=ignore_index)
 
+    # ---- Focal + DICE combo ----
     if name in ("focal_dice", "dice_focal"):
+        # Reuse the same α logic as plain Focal
+        alpha_tensor = None
+        if focal_alpha is not None:
+            alpha_tensor = torch.tensor(focal_alpha, dtype=torch.float32)
+        elif focal_use_cb_alpha and samples_per_cls is not None:
+            alpha_tensor = compute_class_balanced_alpha(samples_per_cls, cb_beta)
+
+        focal = FocalLoss(
+            gamma=focal_gamma,
+            alpha=alpha_tensor,
+            ignore_index=ignore_index,
+        )
+        dice = SoftDiceLoss(
+            smooth=dice_smooth,
+            ignore_index=ignore_index,
+        )
         return ComboLoss(
             ce=None,
-            focal=FocalLoss(
-                gamma=focal_gamma, alpha=focal_alpha, ignore_index=ignore_index
-            ),
-            dice=SoftDiceLoss(smooth=dice_smooth, ignore_index=ignore_index),
+            focal=focal,
+            dice=dice,
             lovasz=None,
-            weights=(0.0, 1.0, 1.0, 0.0),  # Updated
+            weights=(0.0, 1.0, 1.0, 0.0),
         )
 
-    # NEW: DICE + Lovász combination
+    # ---- DICE + Lovász combo ----
     if name == "dice_lovasz":
+        dice = SoftDiceLoss(
+            smooth=dice_smooth,
+            ignore_index=ignore_index,
+        )
+        lovasz = LovaszSoftmaxLoss(ignore_index=ignore_index)
         return ComboLoss(
             ce=None,
             focal=None,
-            dice=SoftDiceLoss(smooth=dice_smooth, ignore_index=ignore_index),
-            lovasz=LovaszSoftmaxLoss(ignore_index=ignore_index),
+            dice=dice,
+            lovasz=lovasz,
             weights=(0.0, 0.0, 1.0, 1.0),
         )
 
