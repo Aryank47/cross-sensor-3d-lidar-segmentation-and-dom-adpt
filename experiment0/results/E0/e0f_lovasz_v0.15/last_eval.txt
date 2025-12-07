@@ -1,26 +1,26 @@
-Epoch 60: loss=0.025033
+Epoch 80: loss=0.023858
 ======================================================================
 ECLAIR Validation (Native Taxonomy):
-  Overall: mIoU=0.4317 | macroF1=0.4759
+  Overall: mIoU=0.4499 | macroF1=0.5018
   Utility Classes (ECLAIR-specific):
-    Trans Wires    : IoU=0.918 | Rec=0.996 | Prec=0.921 | F1=0.957
+    Trans Wires    : IoU=0.935 | Rec=0.995 | Prec=0.940 | F1=0.967
     Dist Wires     : IoU=0.000 | Rec=0.000 | Prec=0.000 | F1=nan
-    Poles          : IoU=0.116 | Rec=0.875 | Prec=0.118 | F1=0.207
+    Poles          : IoU=0.139 | Rec=0.811 | Prec=0.143 | F1=0.244
     Towers         : IoU=0.000 | Rec=0.000 | Prec=0.000 | F1=nan
 
 ECLAIR Validation (Common Taxonomy):
-  Overall: mIoU=0.5042 | macroF1=0.5729
+  Overall: mIoU=0.5123 | macroF1=0.5806
   Common Classes:
-    Wires          : IoU=0.569 | Rec=0.984 | Prec=0.575 | F1=0.726
-    Poles          : IoU=0.177 | Rec=0.624 | Prec=0.198 | F1=0.301
+    Wires          : IoU=0.597 | Rec=0.977 | Prec=0.606 | F1=0.748
+    Poles          : IoU=0.129 | Rec=0.619 | Prec=0.140 | F1=0.229
 
 ======================================================================
 DALES Test (Common Taxonomy):
-  Overall: mIoU=0.0121 | macroF1=0.0235
+  Overall: mIoU=0.0096 | macroF1=0.0188
   Domain Gap:
-    ΔmIoU (ECLAIR→DALES) = 0.4921
+    ΔmIoU (ECLAIR→DALES) = 0.5027
 
   Per-Class Domain Gap (Common Space):
-    Wires          : ECLAIR=0.569 | DALES=0.000 | Δ=+0.569
-    Poles          : ECLAIR=0.177 | DALES=0.006 | Δ=+0.171
+    Wires          : ECLAIR=0.597 | DALES=0.000 | Δ=+0.597
+    Poles          : ECLAIR=0.129 | DALES=0.006 | Δ=+0.123
 ======================================================================
