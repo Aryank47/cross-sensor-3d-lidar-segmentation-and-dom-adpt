@@ -430,6 +430,7 @@ def train(
     num_workers: int = 0,
     voxel_size: Optional[float] = None,
     use_cache: bool = False,
+    cache_root: Optional[str] = None,
 ):
     cfg = OmegaConf.load(config_file)
 
@@ -459,7 +460,8 @@ def train(
     if use_cache:
         from datasets import CachedEclairTiles
 
-        cache_root = Path(eclair_dir) / "cache"
+        if cache_root is None:
+            cache_root = str(Path(eclair_dir) / "cache")
         eclair = CachedEclairTiles(cache_root=str(cache_root), split="train")
         eclair_val = CachedEclairTiles(cache_root=str(cache_root), split="val")
 

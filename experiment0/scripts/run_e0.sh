@@ -157,12 +157,15 @@ run_and_eval() {
   echo "TRAIN: ${OUTDIR} (loss=${LOSS_NAME})"
   echo "==================================="
 
+  CACHE_ROOT="/scratch/m23csa510/eclair_cache"
+
   torchrun --standalone --nproc_per_node="${NUM_GPUS}" train_baseline.py \
     --eclair_dir "${ECLAIR_DIR}" \
     --dales_dir "${DALES_DIR}" \
     --output_dir "${OUTDIR}" \
     --config_file "${CFG}" \
     --use_cache True \
+    --cache_root "${CACHE_ROOT}" \
     --loss_name "${LOSS_NAME}" \
     --voxel_size "${VOXEL}" \
     --epochs "${EPOCHS}" \
