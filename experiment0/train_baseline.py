@@ -431,6 +431,7 @@ def train(
     voxel_size: Optional[float] = None,
     use_cache: bool = False,
     cache_root: Optional[str] = None,
+    cb_beta: float = 0.9999,
 ):
     cfg = OmegaConf.load(config_file)
 
@@ -455,6 +456,8 @@ def train(
         device = torch.device("cpu")
         if is_distributed and rank == 0:
             print("[WARN] DDP initialized but no CUDA device found – training on CPU.")
+
+    amp = amp and torch.cuda.is_available()
 
     # ---------------------- datasets & loaders ----------------------
     if use_cache:
@@ -618,7 +621,7 @@ def train(
         focal_alpha=focal_alpha,
         dice_smooth=dice_smooth,
         samples_per_cls=samples_per_cls,  # NEW
-        cb_beta=0.9999,  # NEW - can be made a CLI arg if needed
+        cb_beta=cb_beta,
         focal_use_cb_alpha=focal_use_cb_alpha,
     )
     loss_fn = loss_fn.to(device)
