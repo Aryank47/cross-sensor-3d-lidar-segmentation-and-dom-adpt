@@ -39,13 +39,45 @@ def precompute_eclair(
     out_dir = out_root / split
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Precomputing {split} → {out_dir}")
-    for idx in tqdm(range(len(dataset)), desc=f"Precompute {split}"):
-        data = dataset[idx]
+    errors = []
+    n = len(dataset)
 
-        # Use a stable index-based name to preserve ordering exactly
-        tile_id = f"{idx:06d}"
-        torch.save(data, out_dir / f"{tile_id}.pt")
+    print(f"[precompute] {split}: {n} tiles", flush=True)
+
+    for idx in tqdm(range(n), desc=f"Precompute {split}"):
+        try:
+            data = dataset[idx]
+
+            # Choose a stable tile_id
+            if hasattr(data, "filename"):
+                tile_id = Path(str(data.filename)).stem
+            else:
+                tile_id = f"{idx:04d}"
+
+            out_path = out_dir / f"{tile_id}.pt"
+            print(
+                f"[precompute] {split} idx={idx} tile_id={tile_id} -> {out_path}",
+                flush=True,
+            )
+
+            torch.save(data, out_path)
+
+        except Exception as e:
+            msg = f"[precompute][ERROR] split={split} idx={idx} error={type(e).__name__}: {e}"
+            print(msg, file=sys.stderr, flush=True)
+            errors.append(msg)
+            # optional: break here if you don't want to continue
+            break
+
+    if errors:
+        err_log = out_root / f"precompute_{split}_errors.log"
+        with open(err_log, "w") as f:
+            for line in errors:
+                f.write(line + "\n")
+        # Fail the job so you notice
+        raise RuntimeError(
+            f"Precompute {split} failed with {len(errors)} errors. See {err_log}"
+        )
 
 
 if __name__ == "__main__":
