@@ -6,8 +6,30 @@ import laspy
 import numpy as np
 import torch
 from functional import compose_transforms_from_list
+from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from torch_geometric.transforms import Compose
+
+
+class CachedEclairTiles(Dataset):
+    """
+    Loads pre-transformed ECLAIR tiles from disk (.pt files saved by precompute_eclair).
+
+    Returns torch_geometric.data.Data objects ready to be batched by PyGDataLoader.
+    No transforms are applied here.
+    """
+
+    def __init__(self, cache_root: str, split: str = "train"):
+        self.root = Path(cache_root) / split
+        self.files = sorted(self.root.glob("*.pt"))
+        if not self.files:
+            raise RuntimeError(f"No cached tiles found in {self.root}")
+
+    def __len__(self) -> int:
+        return len(self.files)
+
+    def __getitem__(self, idx: int):
+        return torch.load(self.files[idx])
 
 
 class BaseLasDataset(torch.utils.data.Dataset):
@@ -16,31 +38,43 @@ class BaseLasDataset(torch.utils.data.Dataset):
 
     @staticmethod
     def _las2pyg(las: laspy.LasData, path: Path) -> Data:
-        gt_key = "classification" if "classification" in set(las.point_format.dimension_names) else "raw_classification"
+        gt_key = (
+            "classification"
+            if "classification" in set(las.point_format.dimension_names)
+            else "raw_classification"
+        )
         gt = las[gt_key]
         gt = getattr(gt, "array", gt)
         data = Data(
             xyz=torch.from_numpy(las.xyz.copy()),
-            intensity=torch.from_numpy(las.intensity.astype(np.int64)),            
-            classification = torch.from_numpy(np.asarray(gt).copy()).long(),
+            intensity=torch.from_numpy(las.intensity.astype(np.int64)),
+            classification=torch.from_numpy(np.asarray(gt).copy()).long(),
             return_number=torch.from_numpy(np.asarray(las.return_number)).long(),
-            number_of_returns=torch.from_numpy(np.asarray(las.number_of_returns)).long(),
+            number_of_returns=torch.from_numpy(
+                np.asarray(las.number_of_returns)
+            ).long(),
             edge_of_flight_line=torch.from_numpy(np.asarray(las.edge_of_flight_line)),
             instance_id=(
-                torch.from_numpy(np.asarray(las.instance).copy().astype(np.int64)).long()
+                torch.from_numpy(
+                    np.asarray(las.instance).copy().astype(np.int64)
+                ).long()
                 if hasattr(las, "instance")
-                else torch.full((len(las.return_number),), fill_value=-1, dtype=torch.long)
+                else torch.full(
+                    (len(las.return_number),), fill_value=-1, dtype=torch.long
+                )
             ),
-            rgb=torch.stack(
-                [
-                    torch.from_numpy(las.red.astype(np.int64)),
-                    torch.from_numpy(las.green.astype(np.int64)),
-                    torch.from_numpy(las.blue.astype(np.int64)),
-                ],
-                dim=-1,
-            ).long()
-            if hasattr(las, "red")
-            else None,
+            rgb=(
+                torch.stack(
+                    [
+                        torch.from_numpy(las.red.astype(np.int64)),
+                        torch.from_numpy(las.green.astype(np.int64)),
+                        torch.from_numpy(las.blue.astype(np.int64)),
+                    ],
+                    dim=-1,
+                ).long()
+                if hasattr(las, "red")
+                else None
+            ),
             filename=str(path),
         )
         return data
@@ -63,7 +97,9 @@ class EclairTiles(BaseLasDataset):
         with open(label_file, "r", encoding="utf-8") as f:
             all_tiles: List[Dict] = json.load(f)
         self.paths: List[Path] = [
-            self.root / "pointclouds" / rec["tile_name"] for rec in all_tiles if rec.get("split", "") == split
+            self.root / "pointclouds" / rec["tile_name"]
+            for rec in all_tiles
+            if rec.get("split", "") == split
         ]
 
     def __getitem__(self, idx: int) -> Data:
@@ -79,8 +115,7 @@ class EclairTiles(BaseLasDataset):
 
 
 class GenericLasFolder(BaseLasDataset):
-    """Scans a folder recursively for .las/.laz files. Use for DALES test if a JSON split isn't available.
-    """
+    """Scans a folder recursively for .las/.laz files. Use for DALES test if a JSON split isn't available."""
 
     def __init__(self, root: str, transforms):
         super().__init__(transforms)
@@ -101,5 +136,3 @@ class GenericLasFolder(BaseLasDataset):
 
     def __len__(self) -> int:
         return len(self.files)
-
-
