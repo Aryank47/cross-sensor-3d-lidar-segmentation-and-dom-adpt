@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import glob
 import json
 import math
 import os
@@ -763,13 +764,39 @@ def parse_args():
     return ap.parse_args()
 
 
+# def glob_paths(pattern: str) -> List[Path]:
+#     # Accept both direct file path and glob
+#     p = Path(pattern)
+#     if p.exists():
+#         return [p]
+#     # glob from parent if needed
+#     return sorted(Path().glob(pattern))
+
+
 def glob_paths(pattern: str) -> List[Path]:
-    # Accept both direct file path and glob
+    """
+    Supports:
+      - direct file path
+      - relative glob
+      - absolute glob (e.g. /scratch/.../*.las)
+    """
     p = Path(pattern)
+
+    # If user passed an exact existing path (file or directory)
     if p.exists():
-        return [p]
-    # glob from parent if needed
-    return sorted(Path().glob(pattern))
+        if p.is_file():
+            return [p]
+        # If it's a directory, return all LAS/LAZ inside (optional convenience)
+        return sorted(list(p.rglob("*.las")) + list(p.rglob("*.laz")))
+
+    # Otherwise treat as a glob (works for absolute and relative)
+    matches = glob.glob(pattern)
+    paths = sorted(Path(m) for m in matches)
+
+    if not paths:
+        raise FileNotFoundError(f"No files matched pattern: {pattern}")
+
+    return paths
 
 
 def main():
