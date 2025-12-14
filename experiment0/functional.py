@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import List
 
 import numpy as np
 import torch
@@ -69,32 +69,37 @@ class NormalizeFeatures(BaseTransform):
     def __call__(self, data: Data) -> Data:
         features = []
         if "intensity" in self.feature_names:
-            intensity = (data.intensity / np.iinfo("uint16").max - 0.5).reshape(-1, 1)
+            intensity = (data.intensity.float() / np.iinfo("uint16").max - 0.5).reshape(
+                -1, 1
+            )
             features.append(intensity)
         if "return_number" in self.feature_names:
             n_classes = 5
-            return_number = F.one_hot((data.return_number - 1).clamp(0, n_classes - 1).long(), num_classes=n_classes)
-            features.append(return_number)
+            rn = (data.return_number - 1).clamp(0, n_classes - 1).long()
+            rn = F.one_hot(rn, num_classes=n_classes).float()
+            features.append(rn)
         if "number_of_returns" in self.feature_names:
             n_classes = 5
-            number_of_returns = F.one_hot(
-                (data.number_of_returns - 1).clamp(0, n_classes - 1).long(), num_classes=n_classes
-            )
-            features.append(number_of_returns)
+            nor = (data.number_of_returns - 1).clamp(0, n_classes - 1).long()
+            nor = F.one_hot(nor, num_classes=n_classes).float()
+            features.append(nor)
         if "coordinates" in self.feature_names:
-            coordinates = data.pos
+            coordinates = data.pos.float()
             features.append(coordinates)
         # if "colors" in self.feature_names:
         #     rgb = (data.rgb / np.iinfo("uint16").max - 0.5).reshape(-1, 3)
         #     features.append(rgb)
         if "colors" in self.feature_names:
             if getattr(data, "rgb", None) is not None:
-                rgb = (data.rgb / np.iinfo("uint16").max - 0.5).reshape(-1, 3)
-                features.append(rgb)
+                rgb = data.rgb.float() / np.iinfo("uint16").max - 0.5
+                rgb = rgb.view(-1, 3)
             else:
-                # If colors requested but not present, fall back to zeros (keeps dim consistent).
-                zeros = torch.zeros((data.pos.shape[0], 3), dtype=torch.float32)
-                features.append(zeros)
+                rgb = torch.zeros((data.pos.shape[0], 3), dtype=torch.float32)
+            features.append(rgb)
+
+        if not features:
+            raise ValueError("NormalizeFeatures was called with empty feature list.")
+
         data.x = torch.cat(features, dim=-1).float()
         return data
 

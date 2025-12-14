@@ -188,7 +188,7 @@ def compute_scores(confusion, ignore_ids=None, label_set=None):
         for idx in label_set:
             if ignore_ids and idx in ignore_ids:
                 continue
-            if 0 <= idx < num_classes:  # ✅ safety guard
+            if 0 <= idx < num_classes:
                 base_mask[idx] = True
 
     # 2) mIoU: drop only classes where IoU itself is NaN
@@ -198,7 +198,13 @@ def compute_scores(confusion, ignore_ids=None, label_set=None):
     # 3) macroF1: treat NaN F1 as 0 for classes we care about
     f1_fixed = f1_pc.clone()
     f1_fixed[torch.isnan(f1_fixed)] = 0.0
-    valid_f1 = base_mask
+    # explicitly drop ignore_ids from macroF1
+    valid_f1 = base_mask.clone()
+    if ignore_ids:
+        for idx in ignore_ids:
+            if 0 <= idx < f1_fixed.numel():
+                valid_f1[idx] = False
+
     macroF1 = f1_fixed[valid_f1].mean().item() if valid_f1.any() else 0.0
 
     return {

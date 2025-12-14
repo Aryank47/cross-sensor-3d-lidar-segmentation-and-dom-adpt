@@ -1,4 +1,5 @@
 # precompute_eclair_cache.py
+import sys
 from pathlib import Path
 
 import torch
