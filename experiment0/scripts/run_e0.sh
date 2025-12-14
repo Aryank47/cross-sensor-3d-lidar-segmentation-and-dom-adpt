@@ -138,8 +138,8 @@ ECLAIR_DIR=${ECLAIR_DIR:-/data/eclair}
 DALES_DIR=${DALES_DIR:-/data/dales}
 OUTROOT=${OUTROOT:-runs/E0}
 CFG=./configs/train_e0.yaml
-EPOCHS=2
-EVAL_EVERY=1
+EPOCHS=80
+EVAL_EVERY=5
 
 VOXEL=0.15
 
