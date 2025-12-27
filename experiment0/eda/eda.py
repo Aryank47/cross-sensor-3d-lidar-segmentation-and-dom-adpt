@@ -112,7 +112,7 @@ def las_header_meta(path: Path) -> Dict:
             "offsets": list(map(float, h.offsets)),
             "mins": list(map(float, h.mins)),
             "maxs": list(map(float, h.maxs)),
-            "dim_names": list(f.point_format.dimension_names),
+            "dim_names": list(f.header.point_format.dimension_names),
         }
     return meta
 
