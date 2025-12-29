@@ -11,7 +11,6 @@
 #SBATCH --error=/scratch/m23csa510/e0_logs/e0_eval_dales_%j.err
 
 set -euo pipefail
-
 # --- Workaround: avoid breaking Lmod's Lua environment ---
 set +u
 unset LUA_PATH
@@ -41,6 +40,7 @@ CKPT="/scratch/m23csa510/e0_results/e0_eclair_repro_23777/checkpoints/best.pt"
 # Common mapping files
 MAP_ECLAIR_COMMON="${PROJECT_ROOT}/eclair_model_train/configs/mapping_eclair_to_common.yaml"
 MAP_DALES_COMMON="${PROJECT_ROOT}/eclair_model_train/configs/mapping_dales_to_common.yaml"
+MAP_PRED_TOCOMMON="${PROJECT_ROOT}/eclair_model_train/configs/train_id_to_common_id.yaml"
 
 # Output directory for DALES eval artifacts
 RUN_ROOT="/scratch/m23csa510/dales_eval_runs"
@@ -98,6 +98,21 @@ export ECLAIR_CACHE_ROOT="${CACHE_ROOT}"
 
 REF_JSON="${OUT_DIR}/intensity_ref_eclair_train.json"
 
+python - <<PY
+from pathlib import Path
+paths = [
+  Path("${CONFIG}"),
+  Path("${CKPT}"),
+  Path("${MAP_ECLAIR_COMMON}"),
+  Path("${MAP_DALES_COMMON}"),
+  Path("${MAP_PRED_TOCOMMON}"),
+  Path("${DALES_PATH}"),
+]
+for p in paths:
+  print("[check]", p, "exists=", p.exists())
+PY
+
+
 echo "=================================================="
 echo "[step] Compute ECLAIR intensity reference quantiles -> ${REF_JSON}"
 echo "=================================================="
@@ -109,10 +124,6 @@ python -m eclair_model_train.src.compute_intensity_reference \
   --allowed_review_categories approved rejected \
   --out "${REF_JSON}"
 
-# NOTE:
-# If you want APPROVED ONLY to match paper filtering, change to:
-# --allowed_review_categories approved
-
 # -----------------------------
 # 3) Run DALES eval (baseline + preproc) with comparison
 # -----------------------------
@@ -121,24 +132,40 @@ echo "[step] DALES eval baseline + preprocessed"
 echo "=================================================="
 export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:128,garbage_collection_threshold:0.6"
 
-python -m eclair_model_train.src.eval_dales_common \
+# python -m eclair_model_train.src.eval_dales_common \
+#   --config "${CONFIG}" \
+#   --ckpt "${CKPT}" \
+#   --dales_root "${DALES_PATH}" \
+#   --mapping_eclair_to_common "${MAP_ECLAIR_COMMON}" \
+#   --mapping_dales_to_common "${MAP_DALES_COMMON}" \
+#   --out_dir "${OUT_DIR}" \
+#   --run_both \
+#   --intensity_ref_json "${REF_JSON}" \
+#   --preproc_intensity_mode quantile_match \
+#   --use_height_xy_cap \
+#   --xy_cell_size_m 2.0 \
+#   --height_bins 5 \
+#   --caps_per_bin 4000 3000 2500 2500 2500 \
+#   --dales_patch_size_m 100 \
+#   --dales_patch_stride_m 100 \
+#   --dales_min_patch_points 2000 \
+#   --dales_max_patches_per_cloud 0
+
+
+srun --cpu-bind=cores python -m eclair_model_train.src.eval_dales_preproc_sweep \
   --config "${CONFIG}" \
-  --ckpt "${CKPT}" \
   --dales_root "${DALES_PATH}" \
-  --mapping_eclair_to_common "${MAP_ECLAIR_COMMON}" \
-  --mapping_dales_to_common "${MAP_DALES_COMMON}" \
+  --ckpt "${CKPT}" \
+  --mapping_dales_native_to_common "${MAP_DALES_COMMON}" \
+  --mapping_eclair_native_to_common "${MAP_ECLAIR_COMMON}" \
+  --include_slow_modes \
+  --eclair_intensity_ref_json "${REF_JSON}" \
+  --mapping_pred_to_common "${MAP_PRED_TOCOMMON}" \
   --out_dir "${OUT_DIR}" \
-  --run_both \
-  --intensity_ref_json "${REF_JSON}" \
-  --preproc_intensity_mode quantile_match \
-  --use_height_xy_cap \
-  --xy_cell_size_m 2.0 \
-  --height_bins 5 \
-  --caps_per_bin 4000 3000 2500 2500 2500 \
-  --dales_patch_size_m 100 \
-  --dales_patch_stride_m 100 \
-  --dales_min_patch_points 2000 \
-  --dales_max_patches_per_cloud 0
+  # --mode staged --max_runs 120 \
+  --plan decisive_returns \
+  --try_import_label_maps
+
 
 
 echo "=================================================="

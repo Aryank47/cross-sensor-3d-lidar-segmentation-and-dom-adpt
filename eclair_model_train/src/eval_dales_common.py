@@ -101,6 +101,10 @@ def run_eval(
     out_dir: Path,
     preproc: DalesPreprocConfig,
     device: torch.device,
+    dales_patch_size_m: float,
+    dales_patch_stride_m: float,
+    dales_min_patch_points: int,
+    dales_max_patches_per_cloud: int,
 ) -> Dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -126,6 +130,95 @@ def run_eval(
     patch_cfg = DalesPatchConfig(**cfg["data"]["patch"])
     feat_cfg = FeatureConfig(**cfg["data"]["features"])
 
+    # ---- DALES patching helpers (operate in voxel-coordinate space) ----
+    # In your pipeline: xyz_norm = xyz / coord_norm_factor; voxel_size is in norm units.
+    # Therefore meters_per_voxel = voxel_size * coord_norm_factor.
+    meters_per_voxel = float(patch_cfg.voxel_size) * float(patch_cfg.coord_norm_factor)
+    if meters_per_voxel <= 0:
+        raise RuntimeError(f"Invalid meters_per_voxel={meters_per_voxel}")
+
+    def _m_to_vox(m: float) -> int:
+        # ceil to be safe; minimum 1 voxel
+        v = int(np.ceil(float(m) / meters_per_voxel))
+        return max(1, v)
+
+    patch_size_vox = _m_to_vox(dales_patch_size_m)
+    stride_vox = _m_to_vox(dales_patch_stride_m)
+    print(
+        f"[dales] meters/voxel={meters_per_voxel:.3f}, patch_vox={patch_size_vox}, stride_vox={stride_vox}"
+    )
+
+    if stride_vox != patch_size_vox:
+        raise RuntimeError(
+            "Overlapping DALES patches (stride != patch_size) will double-count points "
+            "and corrupt IoU. Use stride==patch_size, or implement fusion."
+        )
+
+    def _iter_patch_index_lists_nonoverlap(coords_xyz_cpu: torch.Tensor):
+        """
+        Fast path for non-overlapping windows: stride == patch_size.
+        Returns list of 1D LongTensor indices for each patch.
+        coords_xyz_cpu: [N,3] CPU int coords (x,y,z) (without batch column).
+        """
+        x = coords_xyz_cpu[:, 0]
+        y = coords_xyz_cpu[:, 1]
+        xmin = int(x.min().item())
+        ymin = int(y.min().item())
+
+        # patch ids in a 2D grid
+        xi = ((x - xmin) // patch_size_vox).to(torch.int64)
+        yi = ((y - ymin) // patch_size_vox).to(torch.int64)
+        ny = int((((y.max().item()) - ymin) // patch_size_vox) + 1)
+        pid = xi * ny + yi  # [N]
+
+        order = torch.argsort(pid)
+        pid_sorted = pid[order]
+        uniq, counts = torch.unique_consecutive(pid_sorted, return_counts=True)
+
+        idx_lists = []
+        start = 0
+        for c in counts.tolist():
+            idx = order[start : start + c]
+            if idx.numel() >= dales_min_patch_points:
+                idx_lists.append(idx)
+            start += c
+
+        if dales_max_patches_per_cloud and dales_max_patches_per_cloud > 0:
+            idx_lists = idx_lists[: int(dales_max_patches_per_cloud)]
+        return idx_lists
+
+    def _iter_patch_index_lists_general(coords_xyz_cpu: torch.Tensor):
+        """
+        General path for overlapping/strided windows (slower).
+        Returns list of 1D LongTensor indices for each patch.
+        """
+        x = coords_xyz_cpu[:, 0]
+        y = coords_xyz_cpu[:, 1]
+        xmin, xmax = int(x.min().item()), int(x.max().item())
+        ymin, ymax = int(y.min().item()), int(y.max().item())
+
+        idx_lists = []
+        for sx in range(xmin, xmax + 1, stride_vox):
+            for sy in range(ymin, ymax + 1, stride_vox):
+                m = (
+                    (x >= sx)
+                    & (x < (sx + patch_size_vox))
+                    & (y >= sy)
+                    & (y < (sy + patch_size_vox))
+                )
+                if int(m.sum().item()) >= dales_min_patch_points:
+                    idx = torch.nonzero(m, as_tuple=False).squeeze(1).to(torch.int64)
+                    idx_lists.append(idx)
+                    if dales_max_patches_per_cloud and dales_max_patches_per_cloud > 0:
+                        if len(idx_lists) >= int(dales_max_patches_per_cloud):
+                            return idx_lists
+        return idx_lists
+
+    def _iter_patch_index_lists(coords_cpu: torch.Tensor):
+        # coords_cpu is [N,4] (b,x,y,z). We patch per-batch-item below.
+        # Here we assume coords_cpu passed is already filtered to a single batch item and we pass coords_xyz_cpu.
+        raise AssertionError("Use per-batch-item helper")
+
     # DALES loader
     ds = DalesTiles(
         dales_root=dales_root,
@@ -135,9 +228,11 @@ def run_eval(
         preproc=preproc,
         seed=int(cfg["run"]["seed"]) + 777,
     )
+    print(f"[dales] n_files={len(ds)} root={dales_root}")
+
     loader = torch.utils.data.DataLoader(
         ds,
-        batch_size=int(data_cfg.get("batch_size", 1)),
+        batch_size=1,
         shuffle=False,
         num_workers=int(data_cfg.get("num_workers", 4)),
         pin_memory=True,
@@ -157,27 +252,97 @@ def run_eval(
 
     amp = bool(cfg["run"].get("amp", True)) and device.type == "cuda"
 
-    for batch in loader:
-        coords = batch["coords"].to(device, non_blocking=True)
-        feats = batch["feats"].to(device, non_blocking=True)
-        gt_native = batch["labels"].to(device, non_blocking=True)  # DALES native
+    for file_i, batch in enumerate(loader, start=1):
+        if file_i % 10 == 0 or file_i == len(ds):
+            print(f"[dales] processed files {file_i}/{len(ds)}")
+        # KEEP ON CPU: avoid pushing an entire DALES cloud to GPU at once.
+        coords_cpu = batch["coords"]  # [N,4] int (b,x,y,z) on CPU
+        feats_cpu = batch["feats"]  # [N,C] float on CPU
+        gt_native_cpu = batch["labels"]  # [N] DALES native on CPU
+        total_patches = 0
+        # We still support batched coords via the batch column, but loader batch_size=1 => only b=0 typically.
+        batch_ids = coords_cpu[:, 0].to(torch.int64)
+        uniq_b = torch.unique(batch_ids)
 
-        st = ME.SparseTensor(feats, coordinates=coords, device=device)
+        for b in uniq_b.tolist():
+            m_b = batch_ids == int(b)
+            idx_b = torch.nonzero(m_b, as_tuple=False).squeeze(1).to(torch.int64)
 
-        with torch.autocast(device_type="cuda", enabled=amp):
-            out = model(st)
-            logits = out.F  # [N, 11]
-            pred_train = logits.argmax(dim=1)  # 0..10
+            coords_b = coords_cpu[idx_b]  # [Nb,4]
+            feats_b = feats_cpu[idx_b]  # [Nb,C]
+            gt_b = gt_native_cpu[idx_b]  # [Nb]
 
-        # map to common
-        pred_common = e_train_to_common_t[pred_train]  # [N]
-        gt_common = d_native_to_common_t[
-            gt_native.clamp(0, d_native_to_common_t.numel() - 1)
-        ]
+            # coords xyz (x,y,z) only, CPU
+            coords_xyz_b = coords_b[:, 1:4].to(torch.int32)
 
-        cm.update(pred_common, gt_common)
+            # Choose patch iterator
+            if stride_vox == patch_size_vox:
+                patch_idx_lists = _iter_patch_index_lists_nonoverlap(coords_xyz_b)
+            else:
+                patch_idx_lists = _iter_patch_index_lists_general(coords_xyz_b)
+
+            if len(patch_idx_lists) == 0:
+                # If nothing passes min points, fall back to using everything (may OOM, but avoids empty eval)
+                patch_idx_lists = [torch.arange(coords_b.size(0), dtype=torch.int64)]
+
+            for idx_p in patch_idx_lists:
+                total_patches += 1
+                # idx_p indexes into coords_b/feats_b/gt_b (CPU)
+                coords_p = coords_b[idx_p].clone()  # [Np,4]
+                feats_p = feats_b[idx_p]
+                gt_native_p = gt_b[idx_p]
+
+                # Re-base patch coords to start near 0 (matches training "local coords" behavior better)
+                # shift x,y,z independently; keep batch column = 0
+                coords_p[:, 0] = 0
+                mins = coords_p[:, 1:4].min(dim=0).values
+                coords_p[:, 1:4] = coords_p[:, 1:4] - mins
+
+                # Move only this patch to GPU
+                coords_gpu = coords_p.to(device=device, non_blocking=True)
+                feats_gpu = feats_p.to(device=device, non_blocking=True)
+
+                st = ME.SparseTensor(feats_gpu, coordinates=coords_gpu, device=device)
+
+                with torch.autocast(device_type="cuda", enabled=amp):
+                    out = model(st)
+                    logits = out.F  # [Np, 11]
+                    pred_train = logits.argmax(dim=1)  # 0..10
+
+                # map to common
+                pred_common = e_train_to_common_t[pred_train]  # [Np]
+                gt_common = d_native_to_common_t[
+                    gt_native_p.to(device=device, non_blocking=True).clamp(
+                        0, d_native_to_common_t.numel() - 1
+                    )
+                ]
+
+                cm.update(pred_common, gt_common)
+
+                # reduce fragmentation in long eval loops
+                del (
+                    st,
+                    out,
+                    logits,
+                    pred_train,
+                    coords_gpu,
+                    feats_gpu,
+                    pred_common,
+                    gt_common,
+                )
+                # if device.type == "cuda" and (patch_i % 20 == 0):
+                #     torch.cuda.empty_cache()
+            print(f"[dales] total_patches={total_patches}")
 
     iou, miou = cm.compute_iou()
+    preproc_dict = asdict(preproc)
+    for k in ("ref_quantiles", "ref_probs", "tgt_quantiles", "tgt_probs"):
+        if isinstance(preproc_dict.get(k), np.ndarray):
+            preproc_dict[k] = {
+                "len": int(preproc_dict[k].shape[0]),
+                "min": float(np.min(preproc_dict[k])),
+                "max": float(np.max(preproc_dict[k])),
+            }
 
     res = {
         "miou_common": miou,
@@ -192,7 +357,7 @@ def run_eval(
             "fence",
             "vehicle",
         ],
-        "preproc": asdict(preproc),
+        "preproc": preproc_dict,
     }
 
     (out_dir / "metrics_common.json").write_text(json.dumps(res, indent=2))
@@ -202,35 +367,56 @@ def run_eval(
 def compute_target_quantiles_from_dales(
     *,
     dales_root: str,
-    intensity_divisor: float,
     bins: int = 4096,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, float]:
     """
     Build target quantiles (in [0,1]) for DALES intensity distribution by histogram scan.
     """
-    from src.data_dales import _find_dales_files, _read_dales_las
+    from .data_dales import _find_dales_files, _read_dales_las
 
     files = _find_dales_files(dales_root)
-    hist = np.zeros((bins,), dtype=np.int64)
-
+    # pass-1: estimate robust max
+    maxv = 0.0
     for p in files:
         raw = _read_dales_las(p)
         inten = raw["intensity"]
         if inten is None:
             continue
-        x01 = (inten / float(intensity_divisor)).astype(np.float32, copy=False)
-        x01 = np.clip(x01, 0.0, 1.0)
-        idx = np.minimum((x01 * (bins - 1)).astype(np.int64), bins - 1)
+        inten = inten.astype(np.float32, copy=False)
+        maxv = max(maxv, float(np.percentile(inten, 99.9)))
+
+    # if already [0,1], divisor=1.0
+    divisor = 1.0 if maxv <= 1.0 + 1e-3 else maxv
+    hist = np.zeros((bins,), dtype=np.int64)
+    for p in files:
+        raw = _read_dales_las(p)
+        inten = raw["intensity"]
+        if inten is None:
+            continue
+        inten = inten.astype(np.float32, copy=False)
+        print("[debug] DALES inten dtype:", inten.dtype)
+        print(
+            "[debug] DALES inten min/max:", float(np.min(inten)), float(np.max(inten))
+        )
+        print(
+            "[debug] DALES inten p50/p99:",
+            float(np.percentile(inten, 50)),
+            float(np.percentile(inten, 99)),
+        )
+        intensity_scaled = np.clip(inten / float(divisor), 0.0, 1.0)
+        print("[debug] scaled max:", float(np.max(intensity_scaled)))
+        idx = np.minimum((intensity_scaled * (bins - 1)).astype(np.int64), bins - 1)
         hist += np.bincount(idx, minlength=bins)
 
     cdf = np.cumsum(hist).astype(np.float64)
     cdf /= max(1.0, cdf[-1])
 
-    probs = np.linspace(0.0, 1.0, 1001)
+    probs = np.linspace(0.0, 1.0, 1001).astype(np.float32)
     q_bins = np.searchsorted(cdf, probs, side="left")
     q_bins = np.clip(q_bins, 0, bins - 1)
     quantiles = (q_bins / float(bins - 1)).astype(np.float32)
-    return probs.astype(np.float32), quantiles
+
+    return probs.astype(np.float32), quantiles, float(divisor)
 
 
 def main():
@@ -241,6 +427,11 @@ def main():
     ap.add_argument("--mapping_eclair_to_common", required=True)
     ap.add_argument("--mapping_dales_to_common", required=True)
     ap.add_argument("--out_dir", required=True)
+    # DALES patching knobs (to prevent ME OOM)
+    ap.add_argument("--dales_patch_size_m", type=float, default=100.0)
+    ap.add_argument("--dales_patch_stride_m", type=float, default=100.0)
+    ap.add_argument("--dales_min_patch_points", type=int, default=2000)
+    ap.add_argument("--dales_max_patches_per_cloud", type=int, default=0)
 
     # preprocessing knobs
     ap.add_argument(
@@ -291,11 +482,22 @@ def main():
         out_dir=out_root / "baseline",
         preproc=baseline_cfg,
         device=device,
+        dales_patch_size_m=float(args.dales_patch_size_m),
+        dales_patch_stride_m=float(args.dales_patch_stride_m),
+        dales_min_patch_points=int(args.dales_min_patch_points),
+        dales_max_patches_per_cloud=int(args.dales_max_patches_per_cloud),
     )
 
     if args.run_both:
         feat_cfg = FeatureConfig(**cfg["data"]["features"])
         intensity_div = float(feat_cfg.intensity_divisor)
+        print("[dales] model intensity_divisor =", intensity_div)
+        print(
+            "[debug] use_intensity:",
+            feat_cfg.use_intensity,
+            "intensity_divisor:",
+            feat_cfg.intensity_divisor,
+        )
 
         pre = DalesPreprocConfig(
             intensity_mode=args.preproc_intensity_mode,
@@ -307,13 +509,20 @@ def main():
 
         if pre.intensity_mode == "quantile_match":
             ref_p, ref_q = _load_ref()
-            tgt_p, tgt_q = compute_target_quantiles_from_dales(
-                dales_root=args.dales_root, intensity_divisor=intensity_div
+            tgt_p, tgt_q, dales_div = compute_target_quantiles_from_dales(
+                dales_root=args.dales_root
             )
             pre.ref_probs = ref_p
             pre.ref_quantiles = ref_q
             pre.tgt_probs = tgt_p
             pre.tgt_quantiles = tgt_q
+            pre.intensity_divisor_override = dales_div
+            print(
+                "[dales] intensity_divisor_override =",
+                dales_div,
+                "tgt_q max =",
+                float(tgt_q.max()),
+            )
 
         results["preprocessed"] = run_eval(
             cfg=cfg,
@@ -324,6 +533,10 @@ def main():
             out_dir=out_root / "preprocessed",
             preproc=pre,
             device=device,
+            dales_patch_size_m=float(args.dales_patch_size_m),
+            dales_patch_stride_m=float(args.dales_patch_stride_m),
+            dales_min_patch_points=int(args.dales_min_patch_points),
+            dales_max_patches_per_cloud=int(args.dales_max_patches_per_cloud),
         )
 
         # comparison

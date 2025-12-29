@@ -1,0 +1,12 @@
+# train_id -> common_id
+0: 0 # native 1 (Unassigned) -> ignore
+1: 1 # native 2 Ground -> ground
+2: 2 # native 3 Vegetation -> vegetation
+3: 3 # native 4 Buildings -> buildings
+4: 0 # native 5 Noise -> ignore
+5: 4 # native 6 Transmission wires -> wires
+6: 4 # native 7 Distribution wires -> wires
+7: 5 # native 8 Poles -> poles
+8: 5 # native 9 Towers -> poles
+9: 6 # native 10 Fence -> fence
+10: 7 # native 11 Vehicle -> vehicle

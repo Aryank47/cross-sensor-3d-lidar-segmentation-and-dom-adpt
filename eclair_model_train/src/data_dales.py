@@ -45,6 +45,7 @@ class DalesPreprocConfig:
         2500,
         2500,
     )  # low->high (example)
+    intensity_divisor_override: Optional[float] = None
 
 
 def _find_dales_files(root: Union[str, Path]) -> List[Path]:
@@ -240,9 +241,18 @@ class DalesTiles(torch.utils.data.Dataset):
         ).astype(np.float32, copy=False)
 
         # intensity preprocessing happens in "scaled space" expected by FeatureConfig
-        intensity = raw["intensity"]
+        intensity = raw["intensity"].astype(np.float32, copy=False)
+        div = (
+            float(self.preproc.intensity_divisor_override)
+            if self.preproc.intensity_divisor_override
+            else float(self.feat_cfg.intensity_divisor)
+        )
+
         if intensity is not None and self.feat_cfg.use_intensity:
-            intensity_scaled = intensity / float(self.feat_cfg.intensity_divisor)
+            if intensity.max() <= 1.0 + 1e-3:
+                intensity_scaled = intensity  # already [0,1]
+            else:
+                intensity_scaled = intensity / div
 
             mode = (self.preproc.intensity_mode or "none").lower()
             if mode == "none":
