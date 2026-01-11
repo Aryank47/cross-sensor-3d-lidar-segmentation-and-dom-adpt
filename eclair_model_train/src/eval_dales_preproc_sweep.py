@@ -20,16 +20,12 @@ import yaml
 
 from .config_loader import load_yaml
 from .model import build_model
+from .utils import read_las_arrays_robust
 
 try:
     import MinkowskiEngine as ME
 except Exception as e:
     raise RuntimeError("MinkowskiEngine is required.") from e
-
-try:
-    import laspy
-except Exception as e:
-    raise RuntimeError("laspy is required.") from e
 
 
 # -------------------------
@@ -141,60 +137,86 @@ def iou_from_confusion(
 # -------------------------
 # DALES reading
 # -------------------------
-def read_dales_las(path: Path) -> Dict[str, np.ndarray]:
-    # NOTE: laspy.read loads all points; for very large tiles ensure memory is sufficient.
-    las = laspy.read(str(path))
+# def read_dales_las(path: Path) -> Dict[str, np.ndarray]:
+#     # NOTE: laspy.read loads all points; for very large tiles ensure memory is sufficient.
+#     las = laspy.read(str(path))
 
-    xyz = las.xyz.astype(np.float32, copy=False)
-    dims = set(las.point_format.dimension_names)
-    # intensity
-    if "intensity" in dims:
-        intensity = np.asarray(las["intensity"])
-        intensity = getattr(intensity, "array", intensity)
-        intensity = np.asarray(intensity).astype(np.float32, copy=False)
-    else:
-        intensity = np.zeros((xyz.shape[0],), dtype=np.float32)
+#     xyz = las.xyz.astype(np.float32, copy=False)
+#     dims = set(las.point_format.dimension_names)
+#     # intensity
+#     if "intensity" in dims:
+#         intensity = np.asarray(las["intensity"])
+#         intensity = getattr(intensity, "array", intensity)
+#         intensity = np.asarray(intensity).astype(np.float32, copy=False)
+#     else:
+#         intensity = np.zeros((xyz.shape[0],), dtype=np.float32)
+#     print(
+#         "DALES intensity stats:",
+#         float(intensity.min()),
+#         float(intensity.max()),
+#         float(np.median(intensity)),
+#     )
+
+#     # returns
+#     def _dim(name: str, default: int) -> np.ndarray:
+#         if name in dims:
+#             arr = las[name]
+#             arr = getattr(arr, "array", arr)
+#             return np.asarray(arr)
+#         return np.full((xyz.shape[0],), default, dtype=np.uint8)
+
+#     rn = _dim("return_number", 1).astype(np.int64, copy=False)
+
+#     nor = _dim("number_of_returns", 1).astype(np.int64, copy=False)
+#     # rn = (
+#     #     np.asarray(las.return_number).astype(np.int64, copy=False)
+#     #     if "return_number" in dims
+#     #     else np.ones((xyz.shape[0],), dtype=np.int64)
+#     # )
+#     # nor = (
+#     #     np.asarray(las.number_of_returns).astype(np.int64, copy=False)
+#     #     if "number_of_returns" in dims
+#     #     else np.ones((xyz.shape[0],), dtype=np.int64)
+#     # )
+
+#     # classification / GT
+#     gt_key = "classification" if "classification" in dims else "raw_classification"
+#     cls = las[gt_key]
+#     cls = getattr(cls, "array", cls)
+#     cls = np.asarray(cls).astype(np.int64, copy=False)
+
+#     return {
+#         "xyz": xyz,
+#         "intensity": intensity,
+#         "return_number": rn,
+#         "number_of_returns": nor,
+#         "cls": cls,
+#     }
+
+
+def read_dales_las(path: Path) -> Dict[str, np.ndarray]:
+    """
+    Robust reader wrapper for DALES inference.
+    Matches old output signature: keys = [xyz, intensity, return_number, number_of_returns, cls]
+    """
+    data = read_las_arrays_robust(path)
+
+    # Preserve original logging behavior
     print(
         "DALES intensity stats:",
-        float(intensity.min()),
-        float(intensity.max()),
-        float(np.median(intensity)),
+        float(data["intensity"].min()),
+        float(data["intensity"].max()),
+        float(np.median(data["intensity"])),
     )
-
-    # # returns
-    # def _dim(name: str, default: int) -> np.ndarray:
-    #     if name in set(las.point_format.dimension_names):
-    #         arr = las[name]
-    #         arr = getattr(arr, "array", arr)
-    #         return np.asarray(arr)
-    #     return np.full((xyz.shape[0],), default, dtype=np.uint8)
-
-    # rn = _dim("return_number", 1).astype(np.int64, copy=False)
-
-    # nor = _dim("number_of_returns", 1).astype(np.int64, copy=False)
-    rn = (
-        np.asarray(las.return_number).astype(np.int64, copy=False)
-        if "return_number" in dims
-        else np.ones((xyz.shape[0],), dtype=np.int64)
-    )
-    nor = (
-        np.asarray(las.number_of_returns).astype(np.int64, copy=False)
-        if "number_of_returns" in dims
-        else np.ones((xyz.shape[0],), dtype=np.int64)
-    )
-
-    # classification / GT
-    gt_key = "classification" if "classification" in dims else "raw_classification"
-    cls = las[gt_key]
-    cls = getattr(cls, "array", cls)
-    cls = np.asarray(cls).astype(np.int64, copy=False)
 
     return {
-        "xyz": xyz,
-        "intensity": intensity,
-        "return_number": rn,
-        "number_of_returns": nor,
-        "cls": cls,
+        "xyz": data["xyz"],
+        "intensity": data["intensity"],
+        "return_number": data["return_number"],
+        "number_of_returns": data["number_of_returns"],
+        "cls": data[
+            "native_labels"
+        ],  # <--- Renamed 'native_labels' to 'cls' to match your old code
     }
 
 
@@ -363,6 +385,29 @@ class PreprocSpec:
     def to_id(self) -> str:
         payload = json.dumps(dataclasses.asdict(self), sort_keys=True).encode("utf-8")
         return hashlib.md5(payload).hexdigest()[:10]
+
+
+def _canon(v):
+    # Canonicalize floats to avoid 0.04 vs 0.04000000000000001 mismatches
+    if isinstance(v, float):
+        return round(v, 8)
+    if isinstance(v, dict):
+        return {k: _canon(v[k]) for k in sorted(v.keys())}
+    if isinstance(v, list):
+        return [_canon(x) for x in v]
+    return v
+
+
+def spec_key_from_dict(d: Dict) -> Tuple:
+    # Stable tuple key over ALL spec fields
+    items = []
+    for k in sorted(d.keys()):
+        items.append((k, _canon(d[k])))
+    return tuple(items)
+
+
+def spec_key_from_spec(s: PreprocSpec) -> Tuple:
+    return spec_key_from_dict(dataclasses.asdict(s))
 
 
 # -------------------------
@@ -783,8 +828,8 @@ def infer_with_tta(
     Returns pred_train per point (N,) and alignment stats for the *unrotated* geometry.
     """
     # local coords like training
-    xyz_local = xyz_local.astype(np.float32, copy=False)
-    xyz_local = xyz_local - xyz_local.min(axis=0, keepdims=True)
+    xyz_centered = xyz_local - xyz_local.min(axis=0, keepdims=True)
+    xyz_local = xyz_centered.astype(np.float32, copy=False)
 
     # normalized coords like training (+ z anisotropic scaling)
     xyz_norm = (xyz_local / float(spec.coord_norm_factor)).astype(
@@ -1215,8 +1260,8 @@ def make_run_plan(base: PreprocSpec, mode: str, max_runs: int) -> List[PreprocSp
         ("proxy_z", {}),
         ("minmax_z", {}),
         # SLOW/OPTIONAL: only include if enabled externally
-        # ("proxy_linearity", {}),
-        # ("quantile_match", {}),  # only valid if has_intensity_ref=True
+        ("proxy_linearity", {}),
+        ("quantile_match", {}),  # only valid if has_intensity_ref=True
     ]
     returns_pool = [
         ("as_is", {}),
@@ -1228,11 +1273,11 @@ def make_run_plan(base: PreprocSpec, mode: str, max_runs: int) -> List[PreprocSp
     voxel_pool = [0.8, 1.0, 1.2]  # scale voxel_size
     zscale_pool = [0.8, 1.0, 1.2]
     voxfeat_pool = [
-        # ("sample_first", {}),
+        ("sample_first", {}),
         ("sample_random", {}),
         ("sample_max_intensity", {}),
         # SLOW/OPTIONAL: only include if enabled externally
-        # ("sample_max_linearity", {}),
+        ("sample_max_linearity", {}),
         ("mean_all", {}),
         ("mean_thin", {"mean_thin_p": 0.7}),
     ]
@@ -1341,6 +1386,321 @@ def make_run_plan(base: PreprocSpec, mode: str, max_runs: int) -> List[PreprocSp
     return uniq[:max_runs]
 
 
+def make_decisive_returns_plan_full(
+    base: PreprocSpec,
+    *,
+    c: float,
+    has_ref: bool,
+    include_slow: bool,
+) -> List[PreprocSpec]:
+    """
+    High-signal plan intended for comparing new checkpoints.
+    ~32 runs (plus quantile_match + slow modes if enabled).
+    """
+    runs: List[PreprocSpec] = []
+
+    def add(s: PreprocSpec) -> None:
+        runs.append(s)
+
+    # -------------------------
+    # Group A: Baselines / sanity
+    # -------------------------
+    add(base)
+    add(dataclasses.replace(base, returns_mode="drop"))
+    add(dataclasses.replace(base, returns_mode="uniform"))
+    add(dataclasses.replace(base, returns_mode="const1"))
+
+    add(dataclasses.replace(base, voxel_feat_mode="mean_all"))
+    add(dataclasses.replace(base, voxel_feat_mode="mean_all", returns_mode="drop"))
+
+    add(dataclasses.replace(base, voxel_feat_mode="mean_thin", mean_thin_p=0.7))
+    add(dataclasses.replace(base, voxel_feat_mode="sample_max_intensity"))
+
+    add(dataclasses.replace(base, tta_mode="rot4"))
+    add(dataclasses.replace(base, tta_mode="rot4", voxel_feat_mode="mean_all"))
+
+    # -------------------------
+    # Group B: Intensity robustness
+    # -------------------------
+    add(dataclasses.replace(base, intensity_mode="constant", intensity_constant=c))
+    add(
+        dataclasses.replace(
+            base, intensity_mode="constant", intensity_constant=c, returns_mode="drop"
+        )
+    )
+
+    add(
+        dataclasses.replace(
+            base,
+            intensity_mode="constant",
+            intensity_constant=c,
+            voxel_feat_mode="mean_all",
+        )
+    )
+    add(
+        dataclasses.replace(
+            base,
+            intensity_mode="constant",
+            intensity_constant=c,
+            voxel_feat_mode="mean_all",
+            returns_mode="drop",
+        )
+    )
+
+    add(
+        dataclasses.replace(
+            base,
+            intensity_mode="constant",
+            intensity_constant=c,
+            voxel_feat_mode="mean_all",
+            tta_mode="rot4",
+        )
+    )
+    add(
+        dataclasses.replace(
+            base,
+            intensity_mode="constant",
+            intensity_constant=c,
+            voxel_feat_mode="mean_all",
+            tta_mode="rot4",
+            returns_mode="drop",
+        )
+    )
+
+    add(
+        dataclasses.replace(
+            base,
+            intensity_mode="constant",
+            intensity_constant=c,
+            voxel_feat_mode="sample_max_intensity",
+        )
+    )
+
+    add(dataclasses.replace(base, intensity_mode="zero", voxel_feat_mode="mean_all"))
+    add(dataclasses.replace(base, intensity_mode="proxy_z", voxel_feat_mode="mean_all"))
+    add(
+        dataclasses.replace(base, intensity_mode="minmax_z", voxel_feat_mode="mean_all")
+    )
+
+    if has_ref:
+        add(
+            dataclasses.replace(
+                base, intensity_mode="quantile_match", voxel_feat_mode="mean_all"
+            )
+        )
+        add(
+            dataclasses.replace(
+                base,
+                intensity_mode="quantile_match",
+                voxel_feat_mode="mean_all",
+                tta_mode="rot4",
+            )
+        )
+        add(
+            dataclasses.replace(
+                base,
+                intensity_mode="quantile_match",
+                voxel_feat_mode="mean_all",
+                tta_mode="rot4",
+                returns_mode="drop",
+            )
+        )
+
+    # -------------------------
+    # Group C: Geometry sweeps around "best recipe"
+    # -------------------------
+    best = dataclasses.replace(
+        base,
+        intensity_mode="constant",
+        intensity_constant=c,
+        voxel_feat_mode="mean_all",
+        tta_mode="rot4",
+    )
+    best_drop = dataclasses.replace(best, returns_mode="drop")
+
+    # returns ablation on best
+    for rm in ("as_is", "drop", "uniform", "const1"):
+        add(dataclasses.replace(best, returns_mode=rm))
+
+    # voxel size tweaks
+    for vm in (0.8, 1.2):
+        add(dataclasses.replace(best, voxel_size=base.voxel_size * vm))
+        add(dataclasses.replace(best_drop, voxel_size=base.voxel_size * vm))
+
+    # coord norm tweaks
+    for cm in (0.8, 1.2):
+        add(dataclasses.replace(best, coord_norm_factor=base.coord_norm_factor * cm))
+
+    # z anisotropy tweaks
+    for zs in (0.8, 1.2):
+        add(dataclasses.replace(best, z_scale=zs))
+        add(dataclasses.replace(best_drop, z_scale=zs))
+
+    # -------------------------
+    # Group D: Optional slow structural modes
+    # -------------------------
+    if include_slow:
+        add(
+            dataclasses.replace(
+                base,
+                intensity_mode="proxy_linearity",
+                voxel_feat_mode="sample_max_linearity",
+                tta_mode="none",
+            )
+        )
+        add(
+            dataclasses.replace(
+                base,
+                intensity_mode="proxy_linearity",
+                voxel_feat_mode="sample_max_linearity",
+                tta_mode="rot4",
+            )
+        )
+
+    # De-dup deterministically by canonical spec
+    seen = set()
+    uniq: List[PreprocSpec] = []
+    for s in runs:
+        k = spec_key_from_spec(s)
+        if k in seen:
+            continue
+        uniq.append(s)
+        seen.add(k)
+
+    return uniq
+
+
+def make_decisive_returns_plan_minimal(
+    base: PreprocSpec,
+    *,
+    c: float,
+    has_ref: bool,
+) -> List[PreprocSpec]:
+    """
+    Minimal decisive plan: ~12-16 runs.
+    Goal: fast checkpoint comparison without missing the main failure modes.
+    """
+    runs: List[PreprocSpec] = []
+
+    def add(s: PreprocSpec) -> None:
+        runs.append(s)
+
+    # 1) Baseline
+    add(base)
+
+    # 2) Baseline returns ablation (most common DALES generalization failure)
+    add(dataclasses.replace(base, returns_mode="drop"))
+
+    # 3) Best-known recipe (+ returns drop variant)
+    best = dataclasses.replace(
+        base,
+        intensity_mode="constant",
+        intensity_constant=c,
+        voxel_feat_mode="mean_all",
+        tta_mode="rot4",
+    )
+    add(best)
+    add(dataclasses.replace(best, returns_mode="drop"))
+
+    # 4) Constant intensity with training-like voxel rep (tests: only intensity mismatch)
+    add(
+        dataclasses.replace(
+            base,
+            intensity_mode="constant",
+            intensity_constant=c,
+            voxel_feat_mode="sample_first",
+        )
+    )
+    add(
+        dataclasses.replace(
+            base,
+            intensity_mode="constant",
+            intensity_constant=c,
+            voxel_feat_mode="sample_first",
+            returns_mode="drop",
+        )
+    )
+
+    # 5) Remove intensity entirely (tests: intensity collapse / corruption)
+    add(dataclasses.replace(base, intensity_mode="zero", voxel_feat_mode="mean_all"))
+
+    # 6) Two geometry-proxy intensities (tests: z-span/domain shift)
+    add(dataclasses.replace(base, intensity_mode="proxy_z", voxel_feat_mode="mean_all"))
+    add(
+        dataclasses.replace(base, intensity_mode="minmax_z", voxel_feat_mode="mean_all")
+    )
+
+    # 7) Voxel rep stress tests (thin structures)
+    add(
+        dataclasses.replace(
+            base,
+            intensity_mode="constant",
+            intensity_constant=c,
+            voxel_feat_mode="sample_max_intensity",
+        )
+    )
+    add(
+        dataclasses.replace(
+            base,
+            intensity_mode="constant",
+            intensity_constant=c,
+            voxel_feat_mode="mean_thin",
+            mean_thin_p=0.7,
+        )
+    )
+
+    # 8) rot4 on baseline (sanity: view invariance helps even without other changes)
+    add(dataclasses.replace(base, tta_mode="rot4"))
+
+    # 9) Quantile match only if ref exists (optional but very high-signal)
+    if has_ref:
+        add(
+            dataclasses.replace(
+                base, intensity_mode="quantile_match", voxel_feat_mode="mean_all"
+            )
+        )
+        add(
+            dataclasses.replace(
+                base,
+                intensity_mode="quantile_match",
+                voxel_feat_mode="mean_all",
+                tta_mode="rot4",
+            )
+        )
+
+    # De-dup deterministically
+    seen = set()
+    uniq: List[PreprocSpec] = []
+    for s in runs:
+        k = spec_key_from_spec(s)
+        if k in seen:
+            continue
+        uniq.append(s)
+        seen.add(k)
+
+    return uniq
+
+
+def make_decisive_plan(
+    base: PreprocSpec,
+    *,
+    c: float,
+    has_ref: bool,
+    decisive_size: str,
+    include_slow: bool,
+) -> List[PreprocSpec]:
+    if decisive_size == "minimal":
+        # Slow modes deliberately excluded in minimal; they’re expensive and not required for checkpoint triage.
+        return make_decisive_returns_plan_minimal(base, c=c, has_ref=has_ref)
+
+    if decisive_size == "full":
+        return make_decisive_returns_plan_full(
+            base, c=c, has_ref=has_ref, include_slow=include_slow
+        )
+
+    raise ValueError(f"Unknown decisive_size: {decisive_size}")
+
+
 # -------------------------
 # Main
 # -------------------------
@@ -1402,6 +1762,11 @@ def main():
         action="store_true",
         help="Include slow modes (proxy_linearity / sample_max_linearity). Default: off.",
     )
+    ap.add_argument(
+        "--pending_specs_json",
+        default=None,
+        help="Optional path to pending_specs.json. If set, run ONLY these specs (resume mode).",
+    )
 
     # mapping derivation knobs
     ap.add_argument(
@@ -1433,9 +1798,15 @@ def main():
     )
     ap.add_argument(
         "--plan",
-        default="sweep",
-        choices=["sweep", "decisive4"],
-        help="Which run plan to execute. sweep=default make_run_plan, decisive4=only the 4 ablations.",
+        required=True,
+        choices=["sweep", "decisive_returns"],
+        help="Which run plan to execute. sweep=default make_run_plan, decisive_returns only the ablations.",
+    )
+    ap.add_argument(
+        "--decisive_size",
+        default="minimal",
+        choices=["minimal", "full"],
+        help="Size of the decisive plan. minimal=~12-16 runs, full=~32-37 runs.",
     )
 
     args = ap.parse_args()
@@ -1620,85 +1991,105 @@ def main():
         min_occ_vox=1000,
         has_intensity_ref=bool(has_ref),
     )
+
+    # -----------------------------
+    # Resume mode: run only pending run_ids, but keep the ORIGINAL plan ordering/indices
+    # -----------------------------
+    pending_dicts = None
+    if args.pending_specs_json is not None:
+        pending_path = Path(args.pending_specs_json)
+        pending_dicts = json.loads(pending_path.read_text())
+        master.info(
+            f"[plan] RESUME pending-only from {pending_path} n_specs={len(pending_dicts)}"
+        )
+
     if args.plan == "decisive_returns":
         c = float(
             base.intensity_constant
         )  # ECLAIR median if REF_JSON is provided; else default
-        plan = [
-            # 1) Baseline
-            dataclasses.replace(
-                base,
-                intensity_mode="as_is",
-                voxel_feat_mode="sample_first",
-                tta_mode="none",
-            ),
-            # 1b) Baseline with returns removed
-            dataclasses.replace(
-                base,
-                intensity_mode="as_is",
-                voxel_feat_mode="sample_first",
-                tta_mode="none",
-                returns_mode="drop",
-            ),
-            # 2) Constant intensity (ECLAIR median), training-like voxel rep
-            dataclasses.replace(
-                base,
-                intensity_mode="constant",
-                intensity_constant=c,
-                voxel_feat_mode="sample_first",
-                tta_mode="none",
-            ),
-            # 2b) run_007 style, returns removed  ✅ IMPORTANT ADD
-            dataclasses.replace(
-                base,
-                intensity_mode="constant",
-                intensity_constant=c,
-                voxel_feat_mode="sample_first",
-                tta_mode="none",
-                returns_mode="drop",
-            ),
-            # 3) Constant + mean_all
-            dataclasses.replace(
-                base,
-                intensity_mode="constant",
-                intensity_constant=c,
-                voxel_feat_mode="mean_all",
-                tta_mode="none",
-            ),
-            # 4) Constant + mean_all + rot4 (best)
-            dataclasses.replace(
-                base,
-                intensity_mode="constant",
-                intensity_constant=c,
-                voxel_feat_mode="mean_all",
-                tta_mode="rot4",
-            ),
-            # 4b) Best with returns removed
-            dataclasses.replace(
-                base,
-                intensity_mode="constant",
-                intensity_constant=c,
-                voxel_feat_mode="mean_all",
-                tta_mode="rot4",
-                returns_mode="drop",
-            ),
-            dataclasses.replace(
-                base,
-                intensity_mode="constant",
-                intensity_constant=c,
-                voxel_feat_mode="sample_first",
-                tta_mode="none",
-                returns_mode="drop",
-            ),
-            dataclasses.replace(
-                base,
-                intensity_mode="constant",
-                intensity_constant=c,
-                voxel_feat_mode="mean_all",
-                tta_mode="none",
-                returns_mode="drop",
-            ),
-        ]
+        # plan = [
+        #     # 1) Baseline
+        #     dataclasses.replace(
+        #         base,
+        #         intensity_mode="as_is",
+        #         voxel_feat_mode="sample_first",
+        #         tta_mode="none",
+        #     ),
+        #     # 1b) Baseline with returns removed
+        #     dataclasses.replace(
+        #         base,
+        #         intensity_mode="as_is",
+        #         voxel_feat_mode="sample_first",
+        #         tta_mode="none",
+        #         returns_mode="drop",
+        #     ),
+        #     # 2) Constant intensity (ECLAIR median), training-like voxel rep
+        #     dataclasses.replace(
+        #         base,
+        #         intensity_mode="constant",
+        #         intensity_constant=c,
+        #         voxel_feat_mode="sample_first",
+        #         tta_mode="none",
+        #     ),
+        #     # 2b) run_007 style, returns removed  ✅ IMPORTANT ADD
+        #     dataclasses.replace(
+        #         base,
+        #         intensity_mode="constant",
+        #         intensity_constant=c,
+        #         voxel_feat_mode="sample_first",
+        #         tta_mode="none",
+        #         returns_mode="drop",
+        #     ),
+        #     # 3) Constant + mean_all
+        #     dataclasses.replace(
+        #         base,
+        #         intensity_mode="constant",
+        #         intensity_constant=c,
+        #         voxel_feat_mode="mean_all",
+        #         tta_mode="none",
+        #     ),
+        #     # 4) Constant + mean_all + rot4 (best)
+        #     dataclasses.replace(
+        #         base,
+        #         intensity_mode="constant",
+        #         intensity_constant=c,
+        #         voxel_feat_mode="mean_all",
+        #         tta_mode="rot4",
+        #     ),
+        #     # 4b) Best with returns removed
+        #     dataclasses.replace(
+        #         base,
+        #         intensity_mode="constant",
+        #         intensity_constant=c,
+        #         voxel_feat_mode="mean_all",
+        #         tta_mode="rot4",
+        #         returns_mode="drop",
+        #     ),
+        #     dataclasses.replace(
+        #         base,
+        #         intensity_mode="constant",
+        #         intensity_constant=c,
+        #         voxel_feat_mode="sample_first",
+        #         tta_mode="none",
+        #         returns_mode="drop",
+        #     ),
+        #     dataclasses.replace(
+        #     base,
+        #     intensity_mode="constant",
+        #     intensity_constant=c,
+        #     voxel_feat_mode="mean_all",
+        #     tta_mode="none",
+        #     returns_mode="drop",
+        # ),
+        # ]
+
+        plan = make_decisive_plan(
+            base,
+            c=c,
+            has_ref=has_ref,
+            decisive_size=args.decisive_size,
+            include_slow=bool(args.include_slow_modes),
+        )
     else:
         # Build plan, then gate invalid/slow modes deterministically
         plan = make_run_plan(base, mode=args.mode, max_runs=args.max_runs)
@@ -1716,11 +2107,61 @@ def main():
             gated.append(s)
         plan = gated[: args.max_runs]
 
-    master.info(f"[plan] mode={args.mode} n_runs={len(plan)} device={device.type}")
+    if args.plan == "decisive_returns":
+        master.info(
+            f"[plan] decisive_size={args.decisive_size} n_runs={len(plan)} device={device.type}"
+        )
+    else:
+        master.info(f"[plan] mode={args.mode} n_runs={len(plan)} device={device.type}")
     master.info(f"[paths] dales_root={droot} ckpt={args.ckpt}")
     master.info(
         f"[baseline] coord_norm_factor={base.coord_norm_factor} voxel_size={base.voxel_size} returns_k={base.returns_k}"
     )
+
+    pending_set = None
+    if pending_dicts is not None:
+        # Build plan index: canonical spec -> run_id
+        plan_index: Dict[Tuple, str] = {}
+        collisions = 0
+        for s in plan:
+            k = spec_key_from_spec(s)
+            rid = s.to_id()
+            if k in plan_index and plan_index[k] != rid:
+                collisions += 1
+            plan_index[k] = rid
+
+        if collisions:
+            master.warning(
+                f"[resume] plan_index had {collisions} canonical collisions (unexpected, but continuing)."
+            )
+
+        pending_set = set()
+        missing = []
+        for d in pending_dicts:
+            k = spec_key_from_dict(d)
+            rid = plan_index.get(k)
+            if rid is None:
+                missing.append(d)
+            else:
+                pending_set.add(rid)
+
+        master.info(
+            f"[resume] pending_matched={len(pending_set)} pending_missing={len(missing)}"
+        )
+
+        # SANITY CHECK: log missing specs loudly (do not silently proceed)
+        if missing:
+            master.error(
+                "[resume] Some pending specs did NOT match the current plan. "
+                "This usually means your sweep generation changed, or spec fields differ."
+            )
+            # Print compact view
+            for i, md in enumerate(missing, 1):
+                master.error(f"[resume][missing {i}] {md}")
+            raise RuntimeError(
+                "Pending specs do not match the generated plan. "
+                "Fix plan drift or regenerate pending_specs.json from this exact code version."
+            )
 
     # run sweep
     results: Dict[str, Dict] = {}
@@ -1733,6 +2174,11 @@ def main():
             pass
 
         run_id = spec.to_id()
+
+        # In resume mode, only execute pending run_ids, but preserve original i (folder numbering)
+        if pending_set is not None and run_id not in pending_set:
+            continue
+
         run_dir = out_root / f"run_{i:03d}_{run_id}"
         logger = setup_logger(run_dir, f"preproc_sweep.{run_id}", level=logging.INFO)
         (run_dir / "spec.json").write_text(
@@ -1776,6 +2222,26 @@ def main():
         if device.type == "cuda":
             torch.cuda.empty_cache()
         gc.collect()
+
+    # -----------------------------
+    # IMPORTANT: Always rebuild "results" from disk before final aggregation.
+    # This makes resume mode write combined results.csv/json for ALL completed runs.
+    # -----------------------------
+    results = {}
+    done = 0
+    for rd in sorted(out_root.glob("run_[0-9][0-9][0-9]_*")):
+        mp = rd / "metrics.json"
+        if not mp.exists():
+            continue
+        try:
+            res = json.loads(mp.read_text())
+            rid = rd.name.split("_")[-1]
+            results[rid] = {"failed": False, **res}
+            done += 1
+        except Exception:
+            continue
+
+    master.info(f"[reload] completed_from_disk={done}")
 
     # compute deltas vs baseline (FULL scope + FILTERED scope separately)
     baseline = results.get(baseline_id)

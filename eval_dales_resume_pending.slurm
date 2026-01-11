@@ -35,7 +35,7 @@ CONFIG="${PROJECT_ROOT}/eclair_model_train/configs/e0_eclair.yaml"
 
 # Best checkpoint from ECLAIR training
 # CHANGE THIS to your actual best.pt path
-CKPT="/scratch/m23csa510/e0_results/e0_eclair_repro_24123/checkpoints/best.pt"
+CKPT="/scratch/m23csa510/e0_results/e0_eclair_repro_23978/checkpoints/best.pt"
 
 # Common mapping files
 MAP_ECLAIR_COMMON="${PROJECT_ROOT}/eclair_model_train/configs/mapping_eclair_to_common.yaml"
@@ -45,7 +45,7 @@ MAP_PRED_TOCOMMON="${PROJECT_ROOT}/eclair_model_train/configs/train_id_to_common
 # Output directory for DALES eval artifacts
 RUN_ROOT="/scratch/m23csa510/dales_eval_runs"
 RUN_ID="dales_common_${DALES_SPLIT}_$(date +%Y%m%d_%H%M%S)_${SLURM_JOB_ID}"
-OUT_DIR="${RUN_ROOT}/${RUN_ID}"
+OUT_DIR="/scratch/m23csa510/dales_eval_runs/dales_common_all_20251230_175739_24022"
 
 mkdir -p "${OUT_DIR}"
 
@@ -163,9 +163,9 @@ srun --cpu-bind=cores python -m eclair_model_train.src.eval_dales_preproc_sweep 
   --mapping_pred_to_common "${MAP_PRED_TOCOMMON}" \
   --out_dir "${OUT_DIR}" \
   --mode staged --max_runs 120 \
-  --plan decisive_returns \
-  --decisive_size minimal \
-  --try_import_label_maps
+  --plan sweep \
+  --try_import_label_maps \
+  # --pending_specs_json /scratch/m23csa510/dales_eval_runs/dales_common_all_20251230_175739_24022/pending_specs.json
 
 # --plan decisive_returns \
 

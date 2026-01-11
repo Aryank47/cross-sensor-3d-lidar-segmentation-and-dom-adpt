@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from .features import FeatureConfig, build_features
+from .utils import read_las_arrays_robust
 
 
 @dataclass
@@ -59,43 +60,52 @@ def _find_dales_files(root: Union[str, Path]) -> List[Path]:
     return files
 
 
+# def _read_dales_las(path: Path) -> Dict[str, np.ndarray]:
+#     import laspy
+
+#     las = laspy.read(str(path))
+
+#     def _dim(name: str) -> Optional[np.ndarray]:
+#         if name in set(las.point_format.dimension_names):
+#             arr = las[name]
+#             return getattr(arr, "array", arr)
+#         return None
+
+#     xyz = las.xyz.astype(np.float32, copy=True)
+
+#     intensity = _dim("intensity")
+#     return_number = _dim("return_number")
+#     number_of_returns = _dim("number_of_returns")
+
+#     # DALES labels are usually in "classification"
+#     gt = _dim("classification")
+#     if gt is None:
+#         gt = _dim("raw_classification")
+#     if gt is None:
+#         raise RuntimeError(f"Missing classification labels in {path}")
+
+#     return {
+#         "xyz": xyz,
+#         "intensity": intensity.astype(np.float32) if intensity is not None else None,
+#         "return_number": (
+#             return_number.astype(np.int64) if return_number is not None else None
+#         ),
+#         "number_of_returns": (
+#             number_of_returns.astype(np.int64)
+#             if number_of_returns is not None
+#             else None
+#         ),
+#         "native_labels": gt.astype(np.int64),
+#     }
+
+
 def _read_dales_las(path: Path) -> Dict[str, np.ndarray]:
-    import laspy
-
-    las = laspy.read(str(path))
-
-    def _dim(name: str) -> Optional[np.ndarray]:
-        if name in set(las.point_format.dimension_names):
-            arr = las[name]
-            return getattr(arr, "array", arr)
-        return None
-
-    xyz = las.xyz.astype(np.float32, copy=True)
-
-    intensity = _dim("intensity")
-    return_number = _dim("return_number")
-    number_of_returns = _dim("number_of_returns")
-
-    # DALES labels are usually in "classification"
-    gt = _dim("classification")
-    if gt is None:
-        gt = _dim("raw_classification")
-    if gt is None:
-        raise RuntimeError(f"Missing classification labels in {path}")
-
-    return {
-        "xyz": xyz,
-        "intensity": intensity.astype(np.float32) if intensity is not None else None,
-        "return_number": (
-            return_number.astype(np.int64) if return_number is not None else None
-        ),
-        "number_of_returns": (
-            number_of_returns.astype(np.int64)
-            if number_of_returns is not None
-            else None
-        ),
-        "native_labels": gt.astype(np.int64),
-    }
+    """
+    Robust reader wrapper for DALES training.
+    """
+    # The robust reader returns keys: xyz, intensity, return_number, number_of_returns, native_labels
+    # This matches your old _read_dales_las output structure perfectly.
+    return read_las_arrays_robust(path)
 
 
 def _quantile_match(

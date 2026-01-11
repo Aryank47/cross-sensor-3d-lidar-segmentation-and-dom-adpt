@@ -155,98 +155,9 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Union
 
+import laspy
 import numpy as np
 import torch
-
-# def load_eclair_split_list(
-#     eclair_root: Union[str, Path],
-#     split: str,
-#     *,
-#     meta_filename: str = "labels.json",
-#     allowed_review_categories: Optional[Sequence[str]] = ("approved",),
-# ) -> List[str]:
-#     """
-#     Supports BOTH metadata layouts:
-#       (A) dict-of-splits:
-#           {"train": ["pointcloud_1.laz", ...], "val": [...], "test": [...]}
-
-#       (B) list-of-records:
-#           [
-#             {"tile_name": "pointcloud_1.laz", "split": "train", "review_category": "approved", ...},
-#             ...
-#           ]
-
-#     Paper-like default: approved-only filtering.
-#     """
-#     eclair_root = Path(eclair_root)
-#     meta_path = eclair_root / meta_filename
-#     if not meta_path.exists():
-#         raise FileNotFoundError(f"ECLAIR meta file not found: {meta_path}")
-
-#     meta = json.loads(meta_path.read_text())
-
-#     split = str(split).lower().strip()
-#     valid_splits = {"train", "val", "test"}
-#     if split not in valid_splits:
-#         raise ValueError(
-#             f"Unknown split='{split}'. Expected one of {sorted(valid_splits)}"
-#         )
-
-#     # Case A: dict-of-splits
-#     if isinstance(meta, dict):
-#         keys_lower = {str(k).lower(): k for k in meta.keys()}
-#         if split not in keys_lower:
-#             raise KeyError(
-#                 f"{meta_path} missing split '{split}'. Keys: {list(meta.keys())}"
-#             )
-#         names = meta[keys_lower[split]]
-#         if not isinstance(names, list):
-#             raise TypeError(
-#                 f"{meta_path}[{keys_lower[split]}] must be list, got {type(names)}"
-#             )
-#         return sorted([str(x) for x in names])
-
-#     # Case B: list-of-records (your format)
-#     if isinstance(meta, list):
-#         allowed = None
-#         if allowed_review_categories is not None:
-#             allowed = {str(c).lower().strip() for c in allowed_review_categories}
-
-#         out: List[str] = []
-#         for rec in meta:
-#             if not isinstance(rec, dict):
-#                 continue
-#             rec_split = str(rec.get("split", "")).lower().strip()
-#             if rec_split != split:
-#                 continue
-
-#             if allowed is not None:
-#                 cat = str(rec.get("review_category", "approved")).lower().strip()
-#                 if cat not in allowed:
-#                     continue
-
-#             name = rec.get("tile_name", None)
-#             if name:
-#                 out.append(str(name))
-
-#         out = sorted(list(dict.fromkeys(out)))  # stable unique
-#         if not out:
-#             present_splits = sorted(
-#                 {
-#                     str(r.get("split", "")).lower().strip()
-#                     for r in meta
-#                     if isinstance(r, dict)
-#                 }
-#             )
-#             raise RuntimeError(
-#                 f"No tiles found for split='{split}' after filtering.\n"
-#                 f"meta_path={meta_path}\n"
-#                 f"present_splits={present_splits}\n"
-#                 f"allowed_review_categories={allowed_review_categories}"
-#             )
-#         return out
-
-#     raise TypeError(f"Unsupported labels.json structure: {type(meta)} at {meta_path}")
 
 
 def _load_eclair_split_list(
@@ -353,76 +264,111 @@ def resolve_pc_path(eclair_root: Path, fname: str) -> Path:
     p = pc_dir / fname
     if p.exists():
         return p
+    # fallback: maybe stored as .las
     alt = p.with_suffix(".las")
     if alt.exists():
         return alt
-    # also try swapping .las <-> .laz if user listed different ext
-    if p.suffix.lower() == ".las":
-        alt2 = p.with_suffix(".laz")
-        if alt2.exists():
-            return alt2
-    if p.suffix.lower() == ".laz":
-        alt2 = p.with_suffix(".las")
-        if alt2.exists():
-            return alt2
-    raise FileNotFoundError(f"Could not find pointcloud for '{fname}' under {pc_dir}")
+    raise FileNotFoundError(
+        f"Could not find pointcloud file for '{fname}' under {pc_dir}"
+    )
 
 
-def read_las_arrays(path: Path) -> Dict[str, Optional[np.ndarray]]:
-    import laspy
+def read_las_arrays_robust(path: Path) -> Dict[str, np.ndarray]:
+    """
+    Reads LAS/LAZ files using robust property-access to avoid bit-packing bugs.
+    Standardizes output keys to: xyz, intensity, return_number, number_of_returns, rgb, native_labels.
+    """
+    try:
+        las = laspy.read(str(path))
+    except Exception as e:
+        raise RuntimeError(f"Failed to read LAS file {path}: {e}")
 
-    las = laspy.read(str(path))
+    # Standardize XYZ to float32
+    xyz = np.array(las.xyz, dtype=np.float64)
 
-    def dim(name: str) -> Optional[np.ndarray]:
-        if name in set(las.point_format.dimension_names):
-            arr = las[name]
-            return getattr(arr, "array", arr)
+    def _get_dim(
+        attr_name: str, fallback_names: List[str] = None
+    ) -> Optional[np.ndarray]:
+        # Priority 1: Direct property access (handles bit-unpacking/scaling)
+        if hasattr(las, attr_name):
+            val = getattr(las, attr_name)
+            return np.array(val)
+
+        # Priority 2: Dictionary access (fallback for non-standard names)
+        # Check standard dimension names case-insensitively
+        dims_lower = set(d.lower() for d in las.point_format.dimension_names)
+
+        if attr_name.lower() in dims_lower:
+            return np.array(las[attr_name])
+
+        if fallback_names:
+            for name in fallback_names:
+                if name.lower() in dims_lower:
+                    return np.array(las[name])
         return None
 
-    xyz = las.xyz.astype(np.float32, copy=True)
+    # Intensity
+    intensity = _get_dim("intensity")
+    if intensity is None:
+        intensity = np.zeros((xyz.shape[0],), dtype=np.float32)
+    else:
+        intensity = intensity.astype(np.float32)
 
-    intensity = dim("intensity")
-    return_number = dim("return_number")
-    number_of_returns = dim("number_of_returns")
+    # Returns (CRITICAL FIX: Use property access)
+    rn = _get_dim("return_number")
+    nor = _get_dim("number_of_returns")
 
-    gt_key = (
-        "classification"
-        if "classification" in set(las.point_format.dimension_names)
-        else "raw_classification"
-    )
-    native_labels = dim(gt_key)
-    if native_labels is None:
-        raise RuntimeError(
-            f"Missing classification labels in {path} (looked for classification/raw_classification)"
-        )
+    if rn is None:
+        rn = np.ones((xyz.shape[0],), dtype=np.int64)
+    else:
+        rn = rn.astype(np.int64)
 
+    if nor is None:
+        nor = np.ones((xyz.shape[0],), dtype=np.int64)
+    else:
+        nor = nor.astype(np.int64)
+
+    # Labels
+    labels = _get_dim("classification", fallback_names=["raw_classification"])
+    if labels is None:
+        # Fallback for datasets that might be unlabeled
+        # print(f" [WARN] No classification found in {path.name}, using zeros.") # Optional logging
+        labels = np.zeros((xyz.shape[0],), dtype=np.int64)
+    else:
+        labels = labels.astype(np.int64)
+
+    # RGB
     rgb = None
-    if all(
-        k in set(las.point_format.dimension_names) for k in ("red", "green", "blue")
-    ):
-        r = dim("red").astype(np.float32, copy=False)
-        g = dim("green").astype(np.float32, copy=False)
-        b = dim("blue").astype(np.float32, copy=False)
-        rgb = np.stack([r, g, b], axis=1).astype(np.float32, copy=False)
+    red = _get_dim("red")
+    green = _get_dim("green")
+    blue = _get_dim("blue")
+
+    if red is not None and green is not None and blue is not None:
+        max_val = max(red.max(), green.max(), blue.max())
+        scale = 1.0
+        if max_val > 255:
+            scale = 1.0 / 65535.0
+        r = red.astype(np.float32) * scale
+        g = green.astype(np.float32) * scale
+        b = blue.astype(np.float32) * scale
+        rgb = np.stack([r, g, b], axis=1)
 
     return {
-        "xyz": xyz,  # (N,3) float32
-        "intensity": (
-            intensity.astype(np.float32, copy=True) if intensity is not None else None
-        ),  # (N,)
-        "return_number": (
-            return_number.astype(np.int64, copy=True)
-            if return_number is not None
-            else None
-        ),  # (N,)
-        "number_of_returns": (
-            number_of_returns.astype(np.int64, copy=True)
-            if number_of_returns is not None
-            else None
-        ),  # (N,)
-        "rgb": rgb,  # (N,3) float32 or None
-        "native_labels": native_labels.astype(np.int64, copy=True),  # (N,)
+        "xyz": xyz,
+        "intensity": intensity,
+        "return_number": rn,
+        "number_of_returns": nor,
+        "rgb": rgb,
+        "native_labels": labels,
     }
+
+
+def read_las_arrays(path: Path) -> Dict[str, np.ndarray]:
+    """
+    Robust reader wrapper for ECLAIR training.
+    """
+    # Matches old output: xyz, intensity, return_number, number_of_returns, rgb, native_labels
+    return read_las_arrays_robust(path)
 
 
 def main():

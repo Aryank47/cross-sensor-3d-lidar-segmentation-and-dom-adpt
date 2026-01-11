@@ -14,6 +14,7 @@ from torch_geometric.data import Data
 from .augment import AugmentConfig, augment_xyz
 from .features import FeatureConfig, build_features
 from .label_maps import eclair_native_to_train_ids
+from .utils import read_las_arrays_robust
 
 
 @dataclass
@@ -136,63 +137,71 @@ def _resolve_pc_path(eclair_root: Path, fname: str) -> Path:
     )
 
 
+# def _read_las_arrays(path: Path) -> Dict[str, np.ndarray]:
+#     import laspy
+
+#     # laspy.read loads all points in memory; ok for ECLAIR tiles
+#     las = laspy.read(str(path))
+
+#     # xyz float64 -> float32
+#     xyz = las.xyz.astype(np.float32, copy=True)
+
+#     def _dim(name: str) -> Optional[np.ndarray]:
+#         if name in set(las.point_format.dimension_names):
+#             arr = las[name]
+#             # laspy sometimes returns a SubFieldView
+#             return getattr(arr, "array", arr)
+#         return None
+
+#     intensity = _dim("intensity")
+#     return_number = _dim("return_number")
+#     number_of_returns = _dim("number_of_returns")
+
+#     # ECLAIR labels can be in 'classification' or 'raw_classification' depending on export
+#     gt_key = (
+#         "classification"
+#         if "classification" in set(las.point_format.dimension_names)
+#         else "raw_classification"
+#     )
+#     native_labels = _dim(gt_key)
+
+#     rgb = None
+#     if all(
+#         k in set(las.point_format.dimension_names) for k in ("red", "green", "blue")
+#     ):
+#         r = _dim("red").astype(np.float32)
+#         g = _dim("green").astype(np.float32)
+#         b = _dim("blue").astype(np.float32)
+#         # ECLAIR sometimes stores 16-bit colors; we will scale later if enabled.
+#         rgb = np.stack([r, g, b], axis=1)
+
+#     if native_labels is None:
+#         raise RuntimeError(
+#             f"Missing classification labels in {path} (looked for 'classification' or 'raw_classification')"
+#         )
+
+#     return {
+#         "xyz": xyz,
+#         "intensity": intensity.astype(np.float32) if intensity is not None else None,
+#         "return_number": (
+#             return_number.astype(np.int64) if return_number is not None else None
+#         ),
+#         "number_of_returns": (
+#             number_of_returns.astype(np.int64)
+#             if number_of_returns is not None
+#             else None
+#         ),
+#         "rgb": rgb,
+#         "native_labels": native_labels.astype(np.int64),
+#     }
+
+
 def _read_las_arrays(path: Path) -> Dict[str, np.ndarray]:
-    import laspy
-
-    # laspy.read loads all points in memory; ok for ECLAIR tiles
-    las = laspy.read(str(path))
-
-    # xyz float64 -> float32
-    xyz = las.xyz.astype(np.float32, copy=True)
-
-    def _dim(name: str) -> Optional[np.ndarray]:
-        if name in set(las.point_format.dimension_names):
-            arr = las[name]
-            # laspy sometimes returns a SubFieldView
-            return getattr(arr, "array", arr)
-        return None
-
-    intensity = _dim("intensity")
-    return_number = _dim("return_number")
-    number_of_returns = _dim("number_of_returns")
-
-    # ECLAIR labels can be in 'classification' or 'raw_classification' depending on export
-    gt_key = (
-        "classification"
-        if "classification" in set(las.point_format.dimension_names)
-        else "raw_classification"
-    )
-    native_labels = _dim(gt_key)
-
-    rgb = None
-    if all(
-        k in set(las.point_format.dimension_names) for k in ("red", "green", "blue")
-    ):
-        r = _dim("red").astype(np.float32)
-        g = _dim("green").astype(np.float32)
-        b = _dim("blue").astype(np.float32)
-        # ECLAIR sometimes stores 16-bit colors; we will scale later if enabled.
-        rgb = np.stack([r, g, b], axis=1)
-
-    if native_labels is None:
-        raise RuntimeError(
-            f"Missing classification labels in {path} (looked for 'classification' or 'raw_classification')"
-        )
-
-    return {
-        "xyz": xyz,
-        "intensity": intensity.astype(np.float32) if intensity is not None else None,
-        "return_number": (
-            return_number.astype(np.int64) if return_number is not None else None
-        ),
-        "number_of_returns": (
-            number_of_returns.astype(np.int64)
-            if number_of_returns is not None
-            else None
-        ),
-        "rgb": rgb,
-        "native_labels": native_labels.astype(np.int64),
-    }
+    """
+    Robust reader wrapper for ECLAIR training.
+    """
+    # Matches old output: xyz, intensity, return_number, number_of_returns, rgb, native_labels
+    return read_las_arrays_robust(path)
 
 
 class EclairTiles(Dataset):
@@ -282,7 +291,7 @@ class EclairTiles(Dataset):
                     return np.asarray(x)
 
                 out = {
-                    "xyz": to_np(xyz).astype(np.float32, copy=False),
+                    "xyz": to_np(xyz).astype(np.float64, copy=False),
                     "native_labels": to_np(native_labels).astype(np.int64, copy=False),
                     "intensity": to_np(getattr(obj, "intensity", None)),
                     "return_number": to_np(getattr(obj, "return_number", None)),
@@ -308,7 +317,7 @@ class EclairTiles(Dataset):
             # Case B: new raw-cache dict (the script above writes this)
             if isinstance(obj, dict) and "xyz" in obj and "native_labels" in obj:
                 # these are usually numpy arrays already, just ensure dtypes
-                xyz = obj["xyz"].astype(np.float32, copy=False)
+                xyz = obj["xyz"].astype(np.float64, copy=False)
                 y = obj["native_labels"].astype(np.int64, copy=False)
                 intensity = obj.get("intensity", None)
                 rn = obj.get("return_number", None)
@@ -356,7 +365,10 @@ class EclairTiles(Dataset):
             xyz = augment_xyz(xyz, self.aug_cfg, rng)
 
         # Normalize coordinates before quantization
-        # xyz_norm = xyz.astype(np.float32) / float(self.patch_cfg.coord_norm_factor)
+        xyz_norm = (xyz / float(self.patch_cfg.coord_norm_factor)).astype(
+            np.float32, copy=False
+        )
+        xyz_norm = np.ascontiguousarray(xyz_norm, dtype=np.float32)
 
         # Labels: native -> contiguous train ids (ignore undefined)
         y = eclair_native_to_train_ids(
@@ -380,11 +392,6 @@ class EclairTiles(Dataset):
         # feats_t = torch.from_numpy(feats_u).float()
         # labels_t = torch.from_numpy(y_u).long()
 
-        # Normalize coordinates before quantization
-        xyz_norm = xyz.astype(np.float32, copy=False) / float(
-            self.patch_cfg.coord_norm_factor
-        )
-        xyz_norm = np.ascontiguousarray(xyz_norm, dtype=np.float32)
         feats = build_features(
             xyz_local=(
                 xyz_norm if self.feat_cfg.include_coords else xyz_norm

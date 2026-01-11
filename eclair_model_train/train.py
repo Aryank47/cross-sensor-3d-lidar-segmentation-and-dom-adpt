@@ -1,14 +1,11 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
-import math
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import MinkowskiEngine as ME
 import torch
-import torch.nn.functional as F
 from src.augment import AugmentConfig
 from src.config_loader import load_yaml
 from src.data_eclair import EclairTiles, PatchConfig, minkowski_collate_fn
