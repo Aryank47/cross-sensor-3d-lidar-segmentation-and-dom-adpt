@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
-#SBATCH --time=08:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=/scratch/m23csa510/e0_logs/e0_eval_dales_%j.out
 #SBATCH --error=/scratch/m23csa510/e0_logs/e0_eval_dales_%j.err
 

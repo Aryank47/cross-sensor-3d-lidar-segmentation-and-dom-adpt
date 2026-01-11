@@ -11,12 +11,26 @@ ECLAIR_CLASS_NAMES_11 = [
     "Vegetation",
     "Buildings",
     "Noise",
-    "Trans. wires",
-    "Dist. wires",
-    "Dist. poles",
-    "Trans. towers",
+    "Transmission wires",
+    "Distribution wires",
+    "Poles",
+    "Transmission towers",
     "Fence",
-    "Vehicles",
+    "Vehicle",
+]
+
+# DALES has 9 semantic classes (native label ids).
+# Fill these with your repo’s naming convention if you already have one elsewhere.
+DALES_CLASS_NAMES_9 = [
+    "ground",
+    "vegetation",
+    "cars",
+    "trucks",
+    "powerlines",
+    "poles",
+    "fences",
+    "buildings",
+    "unknown_or_other",
 ]
 
 

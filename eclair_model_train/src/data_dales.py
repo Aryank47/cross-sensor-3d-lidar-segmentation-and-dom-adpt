@@ -1,16 +1,40 @@
 # src/data_dales.py
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+
+# add near imports
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import MinkowskiEngine as ME
 import numpy as np
 import torch
 
 from .features import FeatureConfig, build_features
-from .utils import read_las_arrays_robust
+from .utils import atomic_save_torch, read_las_arrays_robust
+
+
+def _build_label_lut(
+    mapping: Mapping[int, int],
+    *,
+    ignore_index: int,
+    max_label: int = 255,
+) -> np.ndarray:
+    """
+    Build a LUT so mapping is O(1) and vectorized:
+      lut[native_label] -> train_label or ignore_index
+    Any label not present in mapping will become ignore_index by default.
+    """
+    lut = np.full((max_label + 1,), int(ignore_index), dtype=np.int64)
+    for k, v in mapping.items():
+        kk = int(k)
+        vv = int(v)
+        if 0 <= kk <= max_label:
+            lut[kk] = vv
+    return lut
 
 
 @dataclass
@@ -47,6 +71,11 @@ class DalesPreprocConfig:
         2500,
     )  # low->high (example)
     intensity_divisor_override: Optional[float] = None
+    # ---- Memory safety ----
+    # Hard cap on number of unique voxels per sample AFTER sparse_quantize.
+    # If exceeded, we randomly subsample voxels (label-preserving, label-free).
+    # This prevents Minkowski UNet OOM on huge DALES files.
+    max_voxels: Optional[int] = 200000
 
 
 def _find_dales_files(root: Union[str, Path]) -> List[Path]:
@@ -58,45 +87,6 @@ def _find_dales_files(root: Union[str, Path]) -> List[Path]:
     if not files:
         raise RuntimeError(f"No .las/.laz files found under: {root}")
     return files
-
-
-# def _read_dales_las(path: Path) -> Dict[str, np.ndarray]:
-#     import laspy
-
-#     las = laspy.read(str(path))
-
-#     def _dim(name: str) -> Optional[np.ndarray]:
-#         if name in set(las.point_format.dimension_names):
-#             arr = las[name]
-#             return getattr(arr, "array", arr)
-#         return None
-
-#     xyz = las.xyz.astype(np.float32, copy=True)
-
-#     intensity = _dim("intensity")
-#     return_number = _dim("return_number")
-#     number_of_returns = _dim("number_of_returns")
-
-#     # DALES labels are usually in "classification"
-#     gt = _dim("classification")
-#     if gt is None:
-#         gt = _dim("raw_classification")
-#     if gt is None:
-#         raise RuntimeError(f"Missing classification labels in {path}")
-
-#     return {
-#         "xyz": xyz,
-#         "intensity": intensity.astype(np.float32) if intensity is not None else None,
-#         "return_number": (
-#             return_number.astype(np.int64) if return_number is not None else None
-#         ),
-#         "number_of_returns": (
-#             number_of_returns.astype(np.int64)
-#             if number_of_returns is not None
-#             else None
-#         ),
-#         "native_labels": gt.astype(np.int64),
-#     }
 
 
 def _read_dales_las(path: Path) -> Dict[str, np.ndarray]:
@@ -210,6 +200,82 @@ def _height_xy_cap(
     return xyz_m[keep], feats[keep], labels[keep]
 
 
+def _stable_json(obj: object) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _sha1_hex(x: bytes) -> str:
+    return hashlib.sha1(x).hexdigest()
+
+
+def _hash_np(a: Optional[np.ndarray]) -> Optional[str]:
+    if a is None:
+        return None
+    aa = np.ascontiguousarray(a)
+    return _sha1_hex(aa.view(np.uint8).tobytes())
+
+
+def _cache_key_for_dales(
+    *,
+    path: Path,
+    patch_cfg: DalesPatchConfig,
+    feat_cfg: FeatureConfig,
+    preproc: DalesPreprocConfig,
+    cache_key_extra: Optional[str],
+    ignore_index: int,
+    label_map: Optional[Dict[int, int]],
+) -> str:
+    """
+    Stable cache key for a DALES file given feature/voxelization/preproc settings.
+    NOTE: includes preproc array *digests* (not full arrays) to keep key compact.
+    """
+    key_obj = {
+        "v": "dales_cache_v1",
+        "path": str(path.resolve()),
+        "patch": {
+            "make_local_coords": bool(patch_cfg.make_local_coords),
+            "coord_norm_factor": float(patch_cfg.coord_norm_factor),
+            "voxel_size": float(patch_cfg.voxel_size),
+        },
+        "features": {
+            "use_intensity": bool(feat_cfg.use_intensity),
+            "intensity_divisor": float(feat_cfg.intensity_divisor),
+            "returns_onehot_k": int(feat_cfg.returns_onehot_k),
+            "use_rgb": bool(feat_cfg.use_rgb),
+            "include_coords": bool(feat_cfg.include_coords),
+        },
+        "preproc": {
+            "intensity_mode": str(preproc.intensity_mode),
+            "intensity_constant": float(preproc.intensity_constant),
+            "intensity_divisor_override": (
+                None
+                if preproc.intensity_divisor_override is None
+                else float(preproc.intensity_divisor_override)
+            ),
+            "use_height_xy_cap": bool(preproc.use_height_xy_cap),
+            "xy_cell_size_m": float(preproc.xy_cell_size_m),
+            "height_bins": int(preproc.height_bins),
+            "caps_per_bin": [int(x) for x in preproc.caps_per_bin],
+            "ref_quantiles_sha1": _hash_np(preproc.ref_quantiles),
+            "ref_probs_sha1": _hash_np(preproc.ref_probs),
+            "tgt_quantiles_sha1": _hash_np(preproc.tgt_quantiles),
+            "tgt_probs_sha1": _hash_np(preproc.tgt_probs),
+        },
+        "extra": cache_key_extra,
+        "labels": {
+            "ignore_index": int(ignore_index),
+            "label_policy": "native_to_train_lut",
+        },
+        "label_map": (
+            None
+            if label_map is None
+            else dict(sorted((int(k), int(v)) for k, v in label_map.items()))
+        ),
+    }
+    s = json.dumps(key_obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _sha1_hex(s)[:24]
+
+
 class DalesTiles(torch.utils.data.Dataset):
     """
     Each LAS/LAZ file is treated as one sample (tile/patch).
@@ -225,20 +291,84 @@ class DalesTiles(torch.utils.data.Dataset):
         ignore_index: int = -100,
         preproc: Optional[DalesPreprocConfig] = None,
         seed: int = 1234,
+        use_cache: bool = True,
+        cache_root: Optional[str | Path] = None,
+        cache_subdir: str = "dales",
+        cache_key_extra: Optional[str] = None,
+        require_cache: bool = False,
+        write_cache: bool = False,
+        split_name: Optional[str] = None,
+        files: Optional[List[Path]] = None,
+        label_map: Optional[Dict[int, int]] = None,
     ):
         self.root = Path(dales_root)
-        self.files = _find_dales_files(self.root)
+        if files is not None:
+            # Caller explicitly provides split file list
+            self.files = list(files)
+        else:
+            # Default: recursively find LAS/LAZ under root
+            self.files = _find_dales_files(self.root)
         self.patch_cfg = patch_cfg
         self.feat_cfg = feat_cfg
         self.ignore_index = ignore_index
         self.preproc = preproc or DalesPreprocConfig()
         self.rng = np.random.default_rng(seed)
+        self.use_cache = bool(use_cache)
+        self.cache_root = Path(cache_root) if cache_root is not None else None
+        self.cache_subdir = str(cache_subdir)
+        self.cache_key_extra = cache_key_extra
+        self.require_cache = bool(require_cache)
+        self.write_cache = bool(write_cache)
+        self.split_name = split_name
+        self.label_lut = None
+        self.label_map = (
+            None
+            if label_map is None
+            else {int(k): int(v) for k, v in label_map.items()}
+        )
+        if label_map is not None:
+            self.label_lut = _build_label_lut(
+                label_map, ignore_index=self.ignore_index, max_label=255
+            )
+
+        if self.use_cache and self.cache_root is None:
+            raise ValueError(
+                "DalesTiles: use_cache=True requires cache_root to be set."
+            )
+
+        if self.use_cache:
+            base = self.cache_root / self.cache_subdir
+            if self.split_name:
+                base = base / self.split_name
+            base.mkdir(parents=True, exist_ok=True)
+            self._cache_dir = base
+        else:
+            self._cache_dir = None
 
     def __len__(self) -> int:
         return len(self.files)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         path = self.files[idx]
+
+        # Cache fast-path
+        cache_path: Optional[Path] = None
+        if self.use_cache:
+            key = _cache_key_for_dales(
+                path=path,
+                patch_cfg=self.patch_cfg,
+                feat_cfg=self.feat_cfg,
+                preproc=self.preproc,
+                cache_key_extra=self.cache_key_extra,
+                ignore_index=self.ignore_index,
+                label_map=self.label_map,
+            )
+            cache_path = self._cache_dir / f"{key}.pt"
+            if cache_path.exists():
+                return torch.load(cache_path, map_location="cpu")
+            if self.require_cache:
+                raise RuntimeError(f"[DALES cache missing] {cache_path}")
+
         raw = _read_dales_las(path)
 
         xyz = raw["xyz"]
@@ -320,9 +450,72 @@ class DalesTiles(torch.utils.data.Dataset):
         q = np.ascontiguousarray(q, dtype=np.int32)  # important for ME
         _, unique_idx = ME.utils.sparse_quantize(q, return_index=True)
 
+        # ---- OOM guard: cap #voxels ----
+        max_vox = self.preproc.max_voxels
+        if max_vox is not None:
+            max_vox = int(max_vox)
+            if unique_idx.shape[0] > max_vox:
+                # deterministic-ish per file: use dataset RNG
+                rng = np.random.default_rng(self.seed + (hash(path.name) & 0xFFFFFFFF))
+                sel = rng.choice(unique_idx.shape[0], size=max_vox, replace=False)
+                sel.sort()  # stable order
+                unique_idx = unique_idx[sel]
+
         q_u = q[unique_idx]
         feats_u = feats[unique_idx]
-        y_u = raw["native_labels"][unique_idx].astype(np.int64, copy=False)
+        # y_u = raw["native_labels"][unique_idx].astype(np.int64, copy=False)
+        # # -------------------------
+        # # DALES label normalization
+        # # -------------------------
+        # # DALES commonly uses:
+        # #   0 = unlabeled / unclassified
+        # #   1..8 = the 8 semantic classes (ground..veg)
+        # #
+        # # We want training IDs:
+        # #   ignore_index for unlabeled
+        # #   0..7 for the 8 semantic classes
+        # #
+        # # Steps:
+        # #   (1) map 0 -> ignore_index
+        # #   (2) map 1..8 -> 0..7 (shift by -1)
+        # ignore = int(self.ignore_index)
+
+        # # safety: anything outside 0..8 -> ignore
+        # invalid = (y_u < 0) | (y_u > 8)
+        # if np.any(invalid):
+        #     y_u = y_u.copy()
+        #     y_u[invalid] = ignore
+
+        # # 0 -> ignore
+        # if ignore != 0:
+        #     y_u = y_u.copy()  # because we'll mutate
+        #     y_u[y_u == 0] = ignore
+
+        # # shift 1..8 -> 0..7 (only for non-ignored)
+        # mask = y_u != ignore
+        # y_u[mask] = y_u[mask] - 1
+
+        y_native = raw["native_labels"][unique_idx].astype(np.int64, copy=False)
+
+        if self.label_lut is not None:
+            # Map native -> train_id (and ignore)
+            y_safe = np.clip(y_native, 0, 255).astype(np.int64, copy=False)
+            y_u = self.label_lut[y_safe]
+        else:
+            # If no mapping provided, default to ignoring unknown and shifting 1..8 -> 0..7
+            # NOTE: This default assumes train order matches native order, which is NOT your case
+            # because buildings=8 is in the middle of your class order.
+            # So: better to REQUIRE mapping for DALES runs.
+            raise RuntimeError("DALES label_map is required for this 8-class setup.")
+
+        valid = y_u != self.ignore_index
+        if np.any(valid):
+            mn = int(y_u[valid].min())
+            mx = int(y_u[valid].max())
+            if mn < 0 or mx >= 8:
+                raise RuntimeError(
+                    f"DALES label mapping out of range: min={mn}, max={mx}"
+                )
 
         # OPTIONAL: label-free thinning that tries to reduce low-height clutter
         if self.preproc.use_height_xy_cap:
@@ -350,13 +543,35 @@ class DalesTiles(torch.utils.data.Dataset):
         coords_t = torch.from_numpy(q_u).int()
         feats_t = torch.from_numpy(np.ascontiguousarray(feats_u)).float()
         labels_t = torch.from_numpy(np.ascontiguousarray(y_u)).long()
-
-        return {
+        # DEBUG: confirm actual voxel count after cap
+        if idx == 0:
+            print(
+                f"[DALES] file={path.name} voxels_after_cap={unique_idx.shape[0]}",
+                flush=True,
+            )
+            u, c = np.unique(y_u, return_counts=True)
+            print(
+                "[DALES labels mapped] unique:",
+                list(zip(u.tolist(), c.tolist()))[:20],
+                flush=True,
+            )
+        out = {
             "coords": coords_t,
             "feats": feats_t,
-            "labels": labels_t,  # DALES native labels (0..8)
+            "labels": labels_t,  # train labels: ignore_index or [0..7]
             "path": str(path),
         }
+
+        # Cache write (ONLY for precompute jobs; do not enable in multi-worker training)
+        if self.use_cache and (cache_path is not None) and self.write_cache:
+            # atomic write avoids partial files under multi-worker dataloaders
+            try:
+                atomic_save_torch(out, cache_path)
+            except Exception:
+                # best-effort: never break training due to cache write issues
+                pass
+
+        return out
 
 
 def minkowski_collate_dales(

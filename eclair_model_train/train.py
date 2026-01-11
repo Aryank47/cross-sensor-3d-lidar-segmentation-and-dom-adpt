@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import random
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import MinkowskiEngine as ME
 import torch
 from src.augment import AugmentConfig
 from src.config_loader import load_yaml
+from src.data_dales import (
+    DalesPatchConfig,
+    DalesPreprocConfig,
+    DalesTiles,
+    _find_dales_files,
+    minkowski_collate_dales,
+)
 from src.data_eclair import EclairTiles, PatchConfig, minkowski_collate_fn
 from src.dist import DistEnv, all_reduce_sum, init_distributed, is_main_process
-from src.features import FeatureConfig
+from src.features import FeatureConfig, infer_in_channels
 from src.label_maps import ECLAIR_CLASS_NAMES_11
 from src.losses import FocalLoss, FocalLossConfig
 from src.metrics import ConfusionMatrix
@@ -28,64 +36,188 @@ from torch.utils.data import DataLoader
 
 def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
     data = cfg["data"]
-    eclair_cfg = cfg.get("eclair", {})
-    meta_filename = eclair_cfg.get("meta_filename", "labels.json")
-    train_cats = eclair_cfg.get("train_review_categories", None)  # None = no filtering
-    val_cats = eclair_cfg.get("val_review_categories", ["approved"])
-    test_cats = eclair_cfg.get("test_review_categories", ["approved"])
-    patch_cfg = PatchConfig(**data["patch"])
-    aug_cfg = AugmentConfig(**data["aug"])
+    dataset = str(data.get("dataset", "eclair")).lower()
+
     feat_cfg = FeatureConfig(**data["features"])
+
+    # -------------------------
+    # Feature-stack sanity check (prevents silent channel bugs)
+    # -------------------------
+    expected_c = infer_in_channels(feat_cfg)
+    model_c = int(cfg["model"]["in_channels"])
+    if model_c != expected_c:
+        raise ValueError(
+            f"model.in_channels={model_c} but inferred={expected_c} "
+            f"from data.features.(For Option-A returns-only with k=5 "
+            f"=> expected 10.)"
+        )
 
     ls = data["label_space"]
     ignore_index = int(ls["ignore_index"])
-    undefined_id = int(ls["eclair_undefined_id"])
 
-    train_ds = EclairTiles(
-        eclair_root=data["eclair_root"],
-        split="train",
-        is_train=True,
-        patch_cfg=patch_cfg,
-        aug_cfg=aug_cfg,
-        feat_cfg=feat_cfg,
-        ignore_index=ignore_index,
-        undefined_id=undefined_id,
-        use_cache=bool(data.get("use_cache", True)),
-        cache_root=data.get("cache_root", None),
-        seed=int(cfg["run"]["seed"]),
-        meta_filename=meta_filename,
-        allowed_review_categories=train_cats,
-    )
-    val_ds = EclairTiles(
-        eclair_root=data["eclair_root"],
-        split="val",
-        is_train=False,
-        patch_cfg=patch_cfg,
-        aug_cfg=aug_cfg,  # aug_cfg ignored when is_train=False
-        feat_cfg=feat_cfg,
-        ignore_index=ignore_index,
-        undefined_id=undefined_id,
-        use_cache=bool(data.get("use_cache", True)),
-        cache_root=data.get("cache_root", None),
-        seed=int(cfg["run"]["seed"]) + 1,
-        meta_filename=meta_filename,
-        allowed_review_categories=val_cats,
-    )
-    test_ds = EclairTiles(
-        eclair_root=data["eclair_root"],
-        split="test",
-        is_train=False,
-        patch_cfg=patch_cfg,
-        aug_cfg=aug_cfg,
-        feat_cfg=feat_cfg,
-        ignore_index=ignore_index,
-        undefined_id=undefined_id,
-        use_cache=bool(data.get("use_cache", True)),
-        cache_root=data.get("cache_root", None),
-        seed=int(cfg["run"]["seed"]) + 2,
-        meta_filename=meta_filename,
-        allowed_review_categories=test_cats,
-    )
+    if dataset == "eclair":
+        eclair_cfg = cfg.get("eclair", {})
+        meta_filename = eclair_cfg.get("meta_filename", "labels.json")
+        train_cats = eclair_cfg.get(
+            "train_review_categories", None
+        )  # None = no filtering
+        val_cats = eclair_cfg.get("val_review_categories", ["approved"])
+        test_cats = eclair_cfg.get("test_review_categories", ["approved"])
+
+        patch_cfg = PatchConfig(**data["patch"])
+        aug_cfg = AugmentConfig(**data["aug"])
+        undefined_id = int(ls["eclair_undefined_id"])
+
+        train_ds = EclairTiles(
+            eclair_root=data["eclair_root"],
+            split="train",
+            is_train=True,
+            patch_cfg=patch_cfg,
+            aug_cfg=aug_cfg,
+            feat_cfg=feat_cfg,
+            ignore_index=ignore_index,
+            undefined_id=undefined_id,
+            use_cache=bool(data.get("use_cache", True)),
+            cache_root=data.get("cache_root", None),
+            seed=int(cfg["run"]["seed"]),
+            meta_filename=meta_filename,
+            allowed_review_categories=train_cats,
+        )
+        val_ds = EclairTiles(
+            eclair_root=data["eclair_root"],
+            split="val",
+            is_train=False,
+            patch_cfg=patch_cfg,
+            aug_cfg=aug_cfg,  # aug_cfg ignored when is_train=False
+            feat_cfg=feat_cfg,
+            ignore_index=ignore_index,
+            undefined_id=undefined_id,
+            use_cache=bool(data.get("use_cache", True)),
+            cache_root=data.get("cache_root", None),
+            seed=int(cfg["run"]["seed"]) + 1,
+            meta_filename=meta_filename,
+            allowed_review_categories=val_cats,
+        )
+        test_ds = EclairTiles(
+            eclair_root=data["eclair_root"],
+            split="test",
+            is_train=False,
+            patch_cfg=patch_cfg,
+            aug_cfg=aug_cfg,
+            feat_cfg=feat_cfg,
+            ignore_index=ignore_index,
+            undefined_id=undefined_id,
+            use_cache=bool(data.get("use_cache", True)),
+            cache_root=data.get("cache_root", None),
+            seed=int(cfg["run"]["seed"]) + 2,
+            meta_filename=meta_filename,
+            allowed_review_categories=test_cats,
+        )
+
+        collate = minkowski_collate_fn
+
+    elif dataset == "dales":
+        # DALES has train/ and test/ only in your setup.
+        # We create val by splitting train deterministically unless a val root
+        # is provided.
+        label_map = data.get("dales_label_map_native_to_train", None)
+        # ensure keys are ints if YAML loads them as ints anyway; safe:
+        if label_map is not None:
+            label_map = {int(k): int(v) for k, v in label_map.items()}
+
+        dales_train_root = Path(data["dales_train_root"])
+        dales_test_root = Path(data["dales_test_root"])
+        dales_val_root = (
+            Path(data["dales_val_root"]) if "dales_val_root" in data else None
+        )
+
+        patch_cfg = DalesPatchConfig(**data["patch"])
+        preproc_cfg = DalesPreprocConfig(**data.get("preproc", {}))
+
+        # cache (recommended)
+        use_cache = bool(data.get("use_cache", True))
+        cache_root = data.get("cache_root", None)
+        cache_subdir = data.get("cache_subdir", "dales_dropI")
+        cache_key_extra = data.get("cache_key_extra", None)
+
+        if dales_val_root is not None and dales_val_root.exists():
+            train_files = _find_dales_files(dales_train_root)
+            val_files = _find_dales_files(dales_val_root)
+        else:
+            all_train = _find_dales_files(dales_train_root)
+            # If DALES test is ~20% of data, val-from-train should
+            # be 0.10/0.80 = 0.125.
+            val_frac = float(data.get("val_fraction_from_train", 0.125))
+            rng = random.Random(int(cfg["run"]["seed"]) + 777)
+            all_train = sorted(all_train)
+            rng.shuffle(all_train)
+            n_val = max(1, int(round(len(all_train) * val_frac)))
+            val_files = all_train[:n_val]
+            train_files = all_train[n_val:]
+
+        test_files = _find_dales_files(dales_test_root)
+
+        train_ds = DalesTiles(
+            dales_root=dales_train_root,
+            files=train_files,
+            patch_cfg=patch_cfg,
+            feat_cfg=feat_cfg,
+            ignore_index=ignore_index,
+            preproc=preproc_cfg,
+            seed=int(cfg["run"]["seed"]),
+            use_cache=use_cache,
+            cache_root=cache_root,
+            cache_subdir=str(cache_subdir),
+            cache_key_extra=cache_key_extra,
+            require_cache=False,
+            write_cache=True,
+            split_name="train",
+            label_map=label_map,
+        )
+        val_ds = DalesTiles(
+            dales_root=dales_train_root,
+            files=val_files,
+            patch_cfg=patch_cfg,
+            feat_cfg=feat_cfg,
+            ignore_index=ignore_index,
+            preproc=preproc_cfg,
+            seed=int(cfg["run"]["seed"]) + 1,
+            use_cache=use_cache,
+            cache_root=cache_root,
+            cache_subdir=str(cache_subdir),
+            cache_key_extra=cache_key_extra,
+            require_cache=False,
+            write_cache=True,
+            split_name="val",
+            label_map=label_map,
+        )
+        test_ds = DalesTiles(
+            dales_root=dales_test_root,
+            files=test_files,
+            patch_cfg=patch_cfg,
+            feat_cfg=feat_cfg,
+            ignore_index=ignore_index,
+            preproc=preproc_cfg,
+            seed=int(cfg["run"]["seed"]) + 2,
+            use_cache=use_cache,
+            cache_root=cache_root,
+            cache_subdir=str(cache_subdir),
+            cache_key_extra=cache_key_extra,
+            require_cache=False,
+            write_cache=True,
+            split_name="test",
+            label_map=label_map,
+        )
+
+        # NOTE: caching is handled inside DalesTiles only if you add the
+        # cache params as in my earlier patch; if you want that,
+        # tell me and I’ll diff it cleanly against your current
+        # src/data_dales.py version.
+
+        collate = minkowski_collate_dales
+
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
 
     # Distributed samplers (optional)
     if dist_env.enabled:
@@ -107,7 +239,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
         batch_size=int(data["batch_size"]),
         num_workers=int(data["num_workers"]),
         pin_memory=True,
-        collate_fn=minkowski_collate_fn,
+        collate_fn=collate,
         persistent_workers=int(data["num_workers"]) > 0,
     )
 
@@ -232,6 +364,7 @@ def evaluate(
         "macro_f1": res.macro_f1,
         "per_class_iou": res.per_class_iou,
         "per_class_f1": res.per_class_f1,
+        "miou_valid": res.miou_valid,
     }
 
 
@@ -288,7 +421,26 @@ def train(cfg_path: str):
     epochs = int(cfg.get("epochs", 80)) if "epochs" in cfg else 80
 
     # Logger fields
-    class_names = ECLAIR_CLASS_NAMES_11
+    dataset = str(cfg["data"].get("dataset", "eclair")).lower()
+    ls = cfg["data"]["label_space"]
+    num_classes = int(ls["num_classes"])
+
+    # Prefer explicit class_names from config; else use ECLAIR defaults;
+    # else fallback generic.
+    class_names: List[str]
+    if "class_names" in ls and ls["class_names"] is not None:
+        class_names = list(ls["class_names"])
+    elif dataset == "eclair":
+        class_names = list(ECLAIR_CLASS_NAMES_11)
+    else:
+        class_names = [f"class_{i}" for i in range(num_classes)]
+
+    if len(class_names) != num_classes:
+        raise ValueError(
+            f"len(class_names)={len(class_names)} != num_classes={num_classes}. "
+            f"Fix data.label_space.class_names or num_classes."
+        )
+
     fields = [
         "epoch",
         "lr",
@@ -453,7 +605,9 @@ def train(cfg_path: str):
         if is_main_process(dist_env):
             print(
                 f"[epoch {epoch:03d}] train_loss={train_loss:.4f} "
-                f"val_miou={val_metrics['miou']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} "
+                f"val_miou={val_metrics['miou']:.4f}"
+                f" val_miou_valid={val_metrics['miou_valid']:.4f}"
+                f"val_macro_f1={val_metrics['macro_f1']:.4f} "
                 f"best={best_val_miou:.4f} time={format_seconds(epoch_s)}"
             )
 
@@ -473,7 +627,7 @@ def train(cfg_path: str):
     if is_main_process(dist_env):
         save_json(out_dir / "test_metrics.json", test_metrics)
         print(
-            f"[TEST] loss={test_metrics['loss']:.4f} mIoU={test_metrics['miou']:.4f} macroF1={test_metrics['macro_f1']:.4f}"
+            f"[TEST] loss={test_metrics['loss']:.4f} mIoU={test_metrics['miou']:.4f} macroF1={test_metrics['macro_f1']:.4f} miou_valid={test_metrics['miou_valid']:.4f}"
         )
 
 
