@@ -35,7 +35,8 @@ CONFIG="${PROJECT_ROOT}/eclair_model_train/configs/e0_eclair.yaml"
 
 # Best checkpoint from ECLAIR training
 # CHANGE THIS to your actual best.pt path
-CKPT="/scratch/m23csa510/e0_results/e0_eclair_repro_24123/checkpoints/best.pt"
+CKPT="/scratch/m23csa510/e0_results/e0_eclair_repro_24880/checkpoints/best.pt"
+CKPT_DALES="/scratch/m23csa510/e0_results/e0_dales_train_24930/checkpoints/best.pt"
 
 # Common mapping files
 MAP_ECLAIR_COMMON="${PROJECT_ROOT}/eclair_model_train/configs/mapping_eclair_to_common.yaml"

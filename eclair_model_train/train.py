@@ -1,3 +1,4 @@
+# /eclair_model_train/train.py
 from __future__ import annotations
 
 import argparse
@@ -9,13 +10,8 @@ import MinkowskiEngine as ME
 import torch
 from src.augment import AugmentConfig
 from src.config_loader import load_yaml
-from src.data_dales import (
-    DalesPatchConfig,
-    DalesPreprocConfig,
-    DalesTiles,
-    _find_dales_files,
-    minkowski_collate_dales,
-)
+from src.data_dales import (DalesPatchConfig, DalesPreprocConfig, DalesTiles,
+                            _find_dales_files, minkowski_collate_dales)
 from src.data_eclair import EclairTiles, PatchConfig, minkowski_collate_fn
 from src.dist import DistEnv, all_reduce_sum, init_distributed, is_main_process
 from src.features import FeatureConfig, infer_in_channels
@@ -23,14 +19,8 @@ from src.label_maps import ECLAIR_CLASS_NAMES_11
 from src.losses import FocalLoss, FocalLossConfig
 from src.metrics import ConfusionMatrix
 from src.model import build_model
-from src.utils import (
-    CSVLogger,
-    atomic_save_torch,
-    format_seconds,
-    save_json,
-    set_seed,
-    unwrap_model,
-)
+from src.utils import (CSVLogger, atomic_save_torch, format_seconds, save_json,
+                       set_seed, unwrap_model)
 from torch.utils.data import DataLoader
 
 
@@ -283,17 +273,52 @@ def build_scheduler(cfg: Dict[str, Any], optimizer: torch.optim.Optimizer):
     raise ValueError(f"Unknown scheduler: {name}")
 
 
+# def build_loss(cfg: Dict[str, Any]):
+#     loss_cfg = cfg["loss"]
+#     name = loss_cfg["name"].lower()
+#     ignore_index = int(cfg["data"]["label_space"]["ignore_index"])
+#     if name == "focal":
+#         fl_cfg = FocalLossConfig(
+#             gamma=float(loss_cfg.get("gamma", 2.0)),
+#             alpha=None,
+#             ignore_index=ignore_index,
+#         )
+#         return FocalLoss(fl_cfg)
+#     raise ValueError(f"Unknown loss: {name}")
+
+
 def build_loss(cfg: Dict[str, Any]):
     loss_cfg = cfg["loss"]
     name = loss_cfg["name"].lower()
     ignore_index = int(cfg["data"]["label_space"]["ignore_index"])
+
     if name == "focal":
+        alpha_raw = loss_cfg.get("alpha", None)
+        alpha_tensor = None
+
+        if alpha_raw is not None:
+            # Allow YAML list/tuple; treat null as None
+            if isinstance(alpha_raw, (list, tuple)):
+                num_classes = int(cfg["data"]["label_space"]["num_classes"])
+                if len(alpha_raw) != num_classes:
+                    raise ValueError(
+                        f"loss.alpha length {len(alpha_raw)} != "
+                        f"num_classes={num_classes}"
+                    )
+                alpha_tensor = torch.tensor(alpha_raw, dtype=torch.float32)
+            else:
+                raise TypeError(
+                    f"loss.alpha must be a list/tuple of floats or null; "
+                    f"got type {type(alpha_raw)}"
+                )
+
         fl_cfg = FocalLossConfig(
             gamma=float(loss_cfg.get("gamma", 2.0)),
-            alpha=None,
+            alpha=alpha_tensor,
             ignore_index=ignore_index,
         )
         return FocalLoss(fl_cfg)
+
     raise ValueError(f"Unknown loss: {name}")
 
 

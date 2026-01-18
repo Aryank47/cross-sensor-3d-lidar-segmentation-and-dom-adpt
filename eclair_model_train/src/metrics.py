@@ -1,7 +1,8 @@
+# /src/metrics.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import List
 
 import torch
 
@@ -62,7 +63,6 @@ class ConfusionMatrix:
 
         miou = float(iou.mean().item())
         macro_f1 = float(f1.mean().item())
-        valid_iou = denom_iou > 0
         gt_present = (tp + fn) > 0
         miou_valid = float(iou[gt_present].mean().item()) if gt_present.any() else 0.0
 

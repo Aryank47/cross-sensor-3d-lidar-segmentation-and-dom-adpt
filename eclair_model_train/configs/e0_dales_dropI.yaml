@@ -1,4 +1,4 @@
-epochs: 80
+epochs: 180
 
 run:
   name: e0_dales_dropI
@@ -30,7 +30,6 @@ data:
   # Optional: if you later create a val folder, uncomment:
   # dales_val_root: ${DALES_VAL_ROOT}
 
-  # If test/ is ~20% already, val-from-train fraction should be 0.10/0.80 = 0.125
   val_fraction_from_train: 0.10
 
   num_workers: 4
@@ -46,12 +45,15 @@ data:
   patch:
     make_local_coords: true
     coord_norm_factor: 10.0
-    voxel_size: 0.05
+    voxel_size: 0.02
 
   preproc:
     intensity_mode: none
     use_height_xy_cap: false
-    max_voxels: 180000
+    max_voxels: 220000
+    # NEW: enable class-aware cap
+    class_aware_max_voxels: true
+    rare_class_ids: [2, 3, 5, 6, 7]
 
   features:
     use_intensity: false
@@ -94,4 +96,15 @@ sched:
 loss:
   name: focal
   gamma: 2.0
-  alpha: null
+  # Per-class alpha (sum-normalized to ~8) to emphasize rare classes
+  # order matches label_space.class_names:
+  #   ground, vegetation, cars, trucks, buildings, poles, power_lines, fences
+  alpha:
+    - 0.53   # ground
+    - 0.53   # vegetation
+    - 1.07   # cars
+    - 1.60   # trucks
+    - 0.53   # buildings
+    - 1.60   # poles
+    - 1.07   # power_lines
+    - 1.07   # fences
