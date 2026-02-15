@@ -1,3 +1,4 @@
+# configs/train_id_to_common_id.yaml(for ECLAIR)
 # train_id -> common_id
 0: 0 # native 1 (Unassigned) -> ignore
 1: 1 # native 2 Ground -> ground

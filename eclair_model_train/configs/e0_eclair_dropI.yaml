@@ -13,6 +13,7 @@
 #
 # NOTE: the paper does not specify numeric augmentation ranges or scheduler gamma in the text extract.
 # We expose them as config so you can tune to exactly match the reported mIoU.
+# ECLAIR: training on classes 1..11; native 0 (Undefined) mapped to ignore_index.
 
 epochs: 80
 

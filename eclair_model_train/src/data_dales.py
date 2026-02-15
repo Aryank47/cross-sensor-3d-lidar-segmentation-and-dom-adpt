@@ -5,6 +5,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+
 # add near imports
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -46,9 +47,7 @@ class DalesPatchConfig:
 @dataclass
 class DalesPreprocConfig:
     # intensity preprocessing (label-free)
-    intensity_mode: str = (
-        "none"  # none | quantile_match | robust_standardize | constant
-    )
+    intensity_mode: str = "none"  # none | quantile_match | robust_standardize | constant
     intensity_constant: float = 0.5  # used if mode == constant
     # quantile match uses reference quantiles + target quantiles
     # both are arrays over probs in [0..1]
@@ -174,9 +173,7 @@ def _height_xy_cap(
         cap = int(caps_per_bin[b]) if b < len(caps_per_bin) else int(caps_per_bin[-1])
 
         # group by XY cell
-        keys = (x_cell[idx].astype(np.int64) << 32) ^ (
-            y_cell[idx].astype(np.int64) & 0xFFFFFFFF
-        )
+        keys = (x_cell[idx].astype(np.int64) << 32) ^ (y_cell[idx].astype(np.int64) & 0xFFFFFFFF)
         # shuffle within bin for random selection
         perm = rng.permutation(idx.size)
         idx_shuf = idx[perm]
@@ -256,9 +253,7 @@ def _cache_key_for_dales(
             "intensity_mode": str(preproc.intensity_mode),
             "intensity_constant": float(preproc.intensity_constant),
             "intensity_divisor_override": (
-                None
-                if preproc.intensity_divisor_override is None
-                else float(preproc.intensity_divisor_override)
+                None if preproc.intensity_divisor_override is None else float(preproc.intensity_divisor_override)
             ),
             "use_height_xy_cap": bool(preproc.use_height_xy_cap),
             "xy_cell_size_m": float(preproc.xy_cell_size_m),
@@ -274,11 +269,7 @@ def _cache_key_for_dales(
             "ignore_index": int(ignore_index),
             "label_policy": "native_to_train_lut",
         },
-        "label_map": (
-            None
-            if label_map is None
-            else dict(sorted((int(k), int(v)) for k, v in label_map.items()))
-        ),
+        "label_map": (None if label_map is None else dict(sorted((int(k), int(v)) for k, v in label_map.items()))),
     }
     s = json.dumps(key_obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return _sha1_hex(s)[:24]
@@ -330,20 +321,12 @@ class DalesTiles(torch.utils.data.Dataset):
         self.write_cache = bool(write_cache)
         self.split_name = split_name
         self.label_lut = None
-        self.label_map = (
-            None
-            if label_map is None
-            else {int(k): int(v) for k, v in label_map.items()}
-        )
+        self.label_map = None if label_map is None else {int(k): int(v) for k, v in label_map.items()}
         if label_map is not None:
-            self.label_lut = _build_label_lut(
-                label_map, ignore_index=self.ignore_index, max_label=255
-            )
+            self.label_lut = _build_label_lut(label_map, ignore_index=self.ignore_index, max_label=255)
 
         if self.use_cache and self.cache_root is None:
-            raise ValueError(
-                "DalesTiles: use_cache=True requires cache_root to be set."
-            )
+            raise ValueError("DalesTiles: use_cache=True requires cache_root to be set.")
 
         if self.use_cache:
             base = self.cache_root / self.cache_subdir
@@ -385,9 +368,7 @@ class DalesTiles(torch.utils.data.Dataset):
             xyz = xyz - xyz.min(axis=0, keepdims=True)
 
         # normalize coords for voxelization like ECLAIR pipeline
-        xyz_norm = (
-            xyz.astype(np.float32) / float(self.patch_cfg.coord_norm_factor)
-        ).astype(np.float32, copy=False)
+        xyz_norm = (xyz.astype(np.float32) / float(self.patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
 
         # intensity preprocessing happens in "scaled space" expected by FeatureConfig
         intensity = raw["intensity"].astype(np.float32, copy=False)
@@ -423,9 +404,7 @@ class DalesTiles(torch.utils.data.Dataset):
                     or self.preproc.tgt_quantiles is None
                     or self.preproc.tgt_probs is None
                 ):
-                    raise RuntimeError(
-                        "quantile_match requires ref_quantiles/ref_probs and tgt_quantiles/tgt_probs"
-                    )
+                    raise RuntimeError("quantile_match requires ref_quantiles/ref_probs and tgt_quantiles/tgt_probs")
                 intensity_scaled = _quantile_match(
                     intensity_scaled,
                     self.preproc.ref_quantiles,
@@ -434,14 +413,10 @@ class DalesTiles(torch.utils.data.Dataset):
                     self.preproc.tgt_probs,
                 )
             else:
-                raise ValueError(
-                    f"Unknown intensity_mode: {self.preproc.intensity_mode}"
-                )
+                raise ValueError(f"Unknown intensity_mode: {self.preproc.intensity_mode}")
 
             # clip to [0,1] range
-            intensity_scaled = np.clip(intensity_scaled, 0.0, 1.0).astype(
-                np.float32, copy=False
-            )
+            intensity_scaled = np.clip(intensity_scaled, 0.0, 1.0).astype(np.float32, copy=False)
         else:
             intensity_scaled = None
 
@@ -570,7 +545,7 @@ class DalesTiles(torch.utils.data.Dataset):
         #     "labels": labels_t,  # train labels: ignore_index or [0..7]
         #     "path": str(path),
         # }
-        
+
         feats = build_features(
             xyz_local=xyz_norm,
             intensity=intensity_scaled,
@@ -628,9 +603,7 @@ class DalesTiles(torch.utils.data.Dataset):
                         # everything fits, no extra downsampling needed
                         keep_local = idx_all
                     else:
-                        common_sample = rng.choice(
-                            common_idx, size=remaining, replace=False
-                        )
+                        common_sample = rng.choice(common_idx, size=remaining, replace=False)
                         keep_local = np.concatenate([rare_idx, common_sample])
 
                 keep_local.sort()
@@ -656,15 +629,11 @@ class DalesTiles(torch.utils.data.Dataset):
             mn = int(y_u[valid].min())
             mx = int(y_u[valid].max())
             if mn < 0 or mx >= 8:
-                raise RuntimeError(
-                    f"DALES label mapping out of range: min={mn}, max={mx}"
-                )
+                raise RuntimeError(f"DALES label mapping out of range: min={mn}, max={mx}")
 
         # OPTIONAL: label-free thinning in XYxZ grid
         if self.preproc.use_height_xy_cap:
-            xyz_u_m = (
-                xyz_norm[unique_idx] * float(self.patch_cfg.coord_norm_factor)
-            ).astype(np.float32, copy=False)
+            xyz_u_m = (xyz_norm[unique_idx] * float(self.patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
             xyz_u_m, feats_u, y_u = _height_xy_cap(
                 xyz_u_m,
                 feats_u,
@@ -675,12 +644,8 @@ class DalesTiles(torch.utils.data.Dataset):
                 rng=self.rng,
             )
             # recompute q_u consistent with thinned xyz_u_m
-            xyz_u_norm = (xyz_u_m / float(self.patch_cfg.coord_norm_factor)).astype(
-                np.float32, copy=False
-            )
-            q_u = np.floor(xyz_u_norm / float(self.patch_cfg.voxel_size)).astype(
-                np.int32
-            )
+            xyz_u_norm = (xyz_u_m / float(self.patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
+            q_u = np.floor(xyz_u_norm / float(self.patch_cfg.voxel_size)).astype(np.int32)
             q_u = np.ascontiguousarray(q_u, dtype=np.int32)
 
         coords_t = torch.from_numpy(q_u).int()
@@ -726,8 +691,6 @@ def minkowski_collate_dales(
     feats_list = [b["feats"] for b in batch]
     labels_list = [b["labels"] for b in batch]
 
-    coords, feats, labels = ME.utils.sparse_collate(
-        coords_list, feats_list, labels_list
-    )
+    coords, feats, labels = ME.utils.sparse_collate(coords_list, feats_list, labels_list)
     paths = [b["path"] for b in batch]
     return {"coords": coords, "feats": feats, "labels": labels, "paths": paths}

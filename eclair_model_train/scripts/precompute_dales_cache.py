@@ -1,3 +1,4 @@
+# scripts/precompute_dales_cache.py
 from __future__ import annotations
 
 import argparse
@@ -6,12 +7,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from src.config_loader import load_yaml
-from src.data_dales import (
-    DalesPatchConfig,
-    DalesPreprocConfig,
-    DalesTiles,
-    _find_dales_files,
-)
+from src.data_dales import DalesPatchConfig, DalesPreprocConfig, DalesTiles, _find_dales_files
 from src.features import FeatureConfig
 
 
@@ -71,9 +67,7 @@ def _precompute_one(
     # Simple single-process loop is the most robust.
     # If you want parallelism, run multiple jobs or increase num_workers
     # in a DataLoader with a no-op collate; but this is safe everywhere.
-    print(
-        f"[precompute] split={split_name} n_files={len(ds)} cache_dir={ds._cache_dir}"
-    )
+    print(f"[precompute] split={split_name} n_files={len(ds)} cache_dir={ds._cache_dir}")
     for i in range(len(ds)):
         _ = ds[i]
         if (i + 1) % 50 == 0:

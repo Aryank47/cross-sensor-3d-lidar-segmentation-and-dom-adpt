@@ -1,0 +1,10 @@
+# configs/train_id_to_common_dales.yaml
+
+0: 1 # ground        -> ground
+1: 2 # vegetation    -> vegetation
+2: 7 # cars          -> vehicle
+3: 7 # trucks        -> vehicle
+4: 3 # buildings     -> buildings
+5: 5 # poles         -> poles
+6: 4 # power_lines   -> wires
+7: 6 # fences        -> fence

@@ -6,6 +6,7 @@ from typing import List, Optional
 
 import numpy as np
 
+# This is actually the 11 semantic classes excluding Undefined.
 ECLAIR_CLASS_NAMES_11 = [
     "Unassigned",
     "Ground",
@@ -21,7 +22,6 @@ ECLAIR_CLASS_NAMES_11 = [
 ]
 
 # DALES has 9 semantic classes (native label ids).
-# Fill these with your repo’s naming convention if you already have one elsewhere.
 DALES_CLASS_NAMES_9 = [
     "ground",
     "vegetation",
