@@ -10,8 +10,7 @@ import MinkowskiEngine as ME
 import torch
 from src.augment import AugmentConfig
 from src.config_loader import load_yaml
-from src.data_dales import (DalesPatchConfig, DalesPreprocConfig, DalesTiles,
-                            _find_dales_files, minkowski_collate_dales)
+from src.data_dales import DalesPatchConfig, DalesPreprocConfig, DalesTiles, _find_dales_files, minkowski_collate_dales
 from src.data_eclair import EclairTiles, PatchConfig, minkowski_collate_fn
 from src.dist import DistEnv, all_reduce_sum, init_distributed, is_main_process
 from src.features import FeatureConfig, infer_in_channels
@@ -19,8 +18,7 @@ from src.label_maps import ECLAIR_CLASS_NAMES_11
 from src.losses import FocalLoss, FocalLossConfig
 from src.metrics import ConfusionMatrix
 from src.model import build_model
-from src.utils import (CSVLogger, atomic_save_torch, format_seconds, save_json,
-                       set_seed, unwrap_model)
+from src.utils import CSVLogger, atomic_save_torch, format_seconds, save_json, set_seed, unwrap_model
 from torch.utils.data import DataLoader
 
 
@@ -44,18 +42,17 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
 
     ls = data["label_space"]
     ignore_index = int(ls["ignore_index"])
+    aug_cfg = AugmentConfig(**data["aug"])
 
     if dataset == "eclair":
         eclair_cfg = cfg.get("eclair", {})
         meta_filename = eclair_cfg.get("meta_filename", "labels.json")
-        train_cats = eclair_cfg.get(
-            "train_review_categories", None
-        )  # None = no filtering
+        train_cats = eclair_cfg.get("train_review_categories", None)  # None = no filtering
         val_cats = eclair_cfg.get("val_review_categories", ["approved"])
         test_cats = eclair_cfg.get("test_review_categories", ["approved"])
 
         patch_cfg = PatchConfig(**data["patch"])
-        aug_cfg = AugmentConfig(**data["aug"])
+
         undefined_id = int(ls["eclair_undefined_id"])
 
         train_ds = EclairTiles(
@@ -110,6 +107,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
         # DALES has train/ and test/ only in your setup.
         # We create val by splitting train deterministically unless a val root
         # is provided.
+        dales_aug_config = AugmentConfig(enabled=False)
         label_map = data.get("dales_label_map_native_to_train", None)
         # ensure keys are ints if YAML loads them as ints anyway; safe:
         if label_map is not None:
@@ -117,9 +115,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
 
         dales_train_root = Path(data["dales_train_root"])
         dales_test_root = Path(data["dales_test_root"])
-        dales_val_root = (
-            Path(data["dales_val_root"]) if "dales_val_root" in data else None
-        )
+        dales_val_root = Path(data["dales_val_root"]) if "dales_val_root" in data else None
 
         patch_cfg = DalesPatchConfig(**data["patch"])
         preproc_cfg = DalesPreprocConfig(**data.get("preproc", {}))
@@ -152,6 +148,8 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             files=train_files,
             patch_cfg=patch_cfg,
             feat_cfg=feat_cfg,
+            is_train=True,
+            aug_cfg=dales_aug_config,
             ignore_index=ignore_index,
             preproc=preproc_cfg,
             seed=int(cfg["run"]["seed"]),
@@ -169,6 +167,8 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             files=val_files,
             patch_cfg=patch_cfg,
             feat_cfg=feat_cfg,
+            is_train=False,
+            aug_cfg=dales_aug_config,
             ignore_index=ignore_index,
             preproc=preproc_cfg,
             seed=int(cfg["run"]["seed"]) + 1,
@@ -186,6 +186,8 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             files=test_files,
             patch_cfg=patch_cfg,
             feat_cfg=feat_cfg,
+            is_train=False,
+            aug_cfg=dales_aug_config,
             ignore_index=ignore_index,
             preproc=preproc_cfg,
             seed=int(cfg["run"]["seed"]) + 2,
@@ -211,15 +213,9 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
 
     # Distributed samplers (optional)
     if dist_env.enabled:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(
-            train_ds, shuffle=True
-        )
-        val_sampler = torch.utils.data.distributed.DistributedSampler(
-            val_ds, shuffle=False
-        )
-        test_sampler = torch.utils.data.distributed.DistributedSampler(
-            test_ds, shuffle=False
-        )
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_ds, shuffle=True)
+        val_sampler = torch.utils.data.distributed.DistributedSampler(val_ds, shuffle=False)
+        test_sampler = torch.utils.data.distributed.DistributedSampler(test_ds, shuffle=False)
     else:
         train_sampler = None
         val_sampler = None
@@ -240,12 +236,8 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
         drop_last=True,
         **dl_kwargs,
     )
-    val_loader = DataLoader(
-        val_ds, shuffle=False, sampler=val_sampler, drop_last=False, **dl_kwargs
-    )
-    test_loader = DataLoader(
-        test_ds, shuffle=False, sampler=test_sampler, drop_last=False, **dl_kwargs
-    )
+    val_loader = DataLoader(val_ds, shuffle=False, sampler=val_sampler, drop_last=False, **dl_kwargs)
+    test_loader = DataLoader(test_ds, shuffle=False, sampler=test_sampler, drop_last=False, **dl_kwargs)
     return train_loader, val_loader, test_loader
 
 
@@ -267,9 +259,7 @@ def build_scheduler(cfg: Dict[str, Any], optimizer: torch.optim.Optimizer):
     if name == "step":
         step_size = int(sched.get("step_size_epochs", 10))
         gamma = float(sched.get("gamma", 0.5))
-        return torch.optim.lr_scheduler.StepLR(
-            optimizer, step_size=step_size, gamma=gamma
-        )
+        return torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
     raise ValueError(f"Unknown scheduler: {name}")
 
 
@@ -301,16 +291,10 @@ def build_loss(cfg: Dict[str, Any]):
             if isinstance(alpha_raw, (list, tuple)):
                 num_classes = int(cfg["data"]["label_space"]["num_classes"])
                 if len(alpha_raw) != num_classes:
-                    raise ValueError(
-                        f"loss.alpha length {len(alpha_raw)} != "
-                        f"num_classes={num_classes}"
-                    )
+                    raise ValueError(f"loss.alpha length {len(alpha_raw)} != " f"num_classes={num_classes}")
                 alpha_tensor = torch.tensor(alpha_raw, dtype=torch.float32)
             else:
-                raise TypeError(
-                    f"loss.alpha must be a list/tuple of floats or null; "
-                    f"got type {type(alpha_raw)}"
-                )
+                raise TypeError(f"loss.alpha must be a list/tuple of floats or null; " f"got type {type(alpha_raw)}")
 
         fl_cfg = FocalLossConfig(
             gamma=float(loss_cfg.get("gamma", 2.0)),
@@ -411,9 +395,7 @@ def train(cfg_path: str):
         torch.distributed.barrier()  # ensure dirs exist before others proceed
 
     set_seed(int(run["seed"]) + (dist_env.rank if dist_env.enabled else 0))
-    device = torch.device(
-        f"cuda:{dist_env.local_rank}" if torch.cuda.is_available() else "cpu"
-    )
+    device = torch.device(f"cuda:{dist_env.local_rank}" if torch.cuda.is_available() else "cpu")
 
     amp = bool(run.get("amp", True))
 
@@ -534,9 +516,7 @@ def train(cfg_path: str):
             if global_step % int(run.get("log_every_steps", 50)) == 0:
                 lr = optimizer.param_groups[0]["lr"]
                 if is_main_process(dist_env):
-                    print(
-                        f"[epoch {epoch:03d} step {step:05d}] loss={loss.item():.4f} lr={lr:.2e}"
-                    )
+                    print(f"[epoch {epoch:03d} step {step:05d}] loss={loss.item():.4f} lr={lr:.2e}")
 
         # flush leftover grads if dataloader size not divisible by grad_accum
         if (len(train_loader) % grad_accum) != 0:
@@ -555,9 +535,7 @@ def train(cfg_path: str):
         train_loss = train_loss_sum / max(1, train_n_sum)
 
         # ---- Eval ----
-        do_eval = (epoch % int(run.get("eval_every_epochs", 1)) == 0) or (
-            epoch == epochs
-        )
+        do_eval = (epoch % int(run.get("eval_every_epochs", 1)) == 0) or (epoch == epochs)
         if do_eval:
             val_metrics = evaluate(
                 model=model,
@@ -585,16 +563,12 @@ def train(cfg_path: str):
 
         save_every = int(run.get("save_every_epochs", 5))
 
-        if is_main_process(dist_env) and (
-            epoch % save_every == 0 or epoch == epochs or is_best
-        ):
+        if is_main_process(dist_env) and (epoch % save_every == 0 or epoch == epochs or is_best):
             state = {
                 "epoch": epoch,
                 "model_state": unwrap_model(model).state_dict(),
                 "optimizer_state": optimizer.state_dict(),
-                "scheduler_state": (
-                    None if scheduler is None else scheduler.state_dict()
-                ),
+                "scheduler_state": (None if scheduler is None else scheduler.state_dict()),
                 "scaler_state": scaler.state_dict(),
                 "cfg": cfg,
                 "best_val_miou": best_val_miou,

@@ -6,6 +6,7 @@ import random
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from src.augment import AugmentConfig
 from src.config_loader import load_yaml
 from src.data_dales import DalesPatchConfig, DalesPreprocConfig, DalesTiles, _find_dales_files
 from src.features import FeatureConfig
@@ -39,6 +40,7 @@ def _precompute_one(
     dales_root: Path,
     patch_cfg: DalesPatchConfig,
     feat_cfg: FeatureConfig,
+    aug_cfg: AugmentConfig,
     preproc_cfg: DalesPreprocConfig,
     ignore_index: int,
     seed: int,
@@ -52,6 +54,7 @@ def _precompute_one(
         files=files,
         patch_cfg=patch_cfg,
         feat_cfg=feat_cfg,
+        is_train=False,
         ignore_index=ignore_index,
         preproc=preproc_cfg,
         seed=seed,
@@ -62,6 +65,7 @@ def _precompute_one(
         require_cache=False,
         write_cache=True,
         split_name=split_name,
+        aug_cfg=aug_cfg,
     )
 
     # Simple single-process loop is the most robust.
@@ -125,6 +129,7 @@ def main() -> None:
         dales_root=dales_train_root,
         patch_cfg=patch_cfg,
         feat_cfg=feat_cfg,
+        aug_cfg=AugmentConfig(enabled=False),  # no augmentation for precompute
         preproc_cfg=preproc_cfg,
         ignore_index=ignore_index,
         seed=seed,
@@ -139,6 +144,7 @@ def main() -> None:
         dales_root=dales_train_root,
         patch_cfg=patch_cfg,
         feat_cfg=feat_cfg,
+        aug_cfg=AugmentConfig(enabled=False),  # no augmentation for precompute
         preproc_cfg=preproc_cfg,
         ignore_index=ignore_index,
         seed=seed + 1,
@@ -153,6 +159,7 @@ def main() -> None:
         dales_root=dales_test_root,
         patch_cfg=patch_cfg,
         feat_cfg=feat_cfg,
+        aug_cfg=AugmentConfig(enabled=False),  # no augmentation for precompute
         preproc_cfg=preproc_cfg,
         ignore_index=ignore_index,
         seed=seed + 2,

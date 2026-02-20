@@ -21,19 +21,6 @@ ECLAIR_CLASS_NAMES_11 = [
     "Vehicle",
 ]
 
-# DALES has 9 semantic classes (native label ids).
-DALES_CLASS_NAMES_9 = [
-    "ground",
-    "vegetation",
-    "cars",
-    "trucks",
-    "powerlines",
-    "poles",
-    "fences",
-    "buildings",
-    "unknown_or_other",
-]
-
 
 @dataclass(frozen=True)
 class LabelSpace:

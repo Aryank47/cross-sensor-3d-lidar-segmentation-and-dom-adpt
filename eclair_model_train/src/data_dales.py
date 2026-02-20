@@ -5,14 +5,13 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-
-# add near imports
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import MinkowskiEngine as ME
 import numpy as np
 import torch
 
+from .augment import AugmentConfig, augment_xyz
 from .features import FeatureConfig, build_features
 from .utils import atomic_save_torch, read_las_arrays_robust
 
@@ -205,10 +204,6 @@ def _height_xy_cap(
     return xyz_m[keep], feats[keep], labels[keep]
 
 
-def _stable_json(obj: object) -> str:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
-
-
 def _sha1_hex(x: bytes) -> str:
     return hashlib.sha1(x).hexdigest()
 
@@ -287,6 +282,8 @@ class DalesTiles(torch.utils.data.Dataset):
         dales_root: str | Path,
         patch_cfg: DalesPatchConfig,
         feat_cfg: FeatureConfig,
+        aug_cfg: AugmentConfig,
+        is_train: bool,
         ignore_index: int = -100,
         preproc: Optional[DalesPreprocConfig] = None,
         seed: int = 1234,
@@ -309,6 +306,7 @@ class DalesTiles(torch.utils.data.Dataset):
             self.files = _find_dales_files(self.root)
         self.patch_cfg = patch_cfg
         self.feat_cfg = feat_cfg
+        self.aug_cfg = aug_cfg
         self.ignore_index = ignore_index
         self.preproc = preproc or DalesPreprocConfig()
         self.rng = np.random.default_rng(seed)
@@ -336,6 +334,7 @@ class DalesTiles(torch.utils.data.Dataset):
             self._cache_dir = base
         else:
             self._cache_dir = None
+        self.is_train = is_train
 
     def __len__(self) -> int:
         return len(self.files)
@@ -357,8 +356,9 @@ class DalesTiles(torch.utils.data.Dataset):
             )
             cache_path = self._cache_dir / f"{key}.pt"
             if cache_path.exists():
+                print("[DEBUG CACHE] LOADING FROM CACHE:", cache_path)
                 return torch.load(cache_path, map_location="cpu")
-            if self.require_cache:
+            if self.require_cache and not cache_path.exists():
                 raise RuntimeError(f"[DALES cache missing] {cache_path}")
 
         raw = _read_dales_las(path)
@@ -366,6 +366,17 @@ class DalesTiles(torch.utils.data.Dataset):
         xyz = raw["xyz"]
         if self.patch_cfg.make_local_coords:
             xyz = xyz - xyz.min(axis=0, keepdims=True)
+
+        # Deterministic RNG per sample for reproducible augmentation (while still random across epochs).
+        # We mix in global RNG state to vary each epoch naturally.
+        sample_seed = int(self.rng.integers(0, 2**31 - 1))
+        rng = np.random.default_rng(sample_seed)
+
+        print("[DEBUG AUG] before: xyz.shape=", xyz.shape, " xyz[:5]=", xyz[:5])
+        if self.is_train:
+            print("[DEBUG AUG] applying augmentation with config:", self.aug_cfg)
+            xyz = augment_xyz(xyz, self.aug_cfg, rng)
+        print("[DEBUG AUG] after: xyz_aug.shape=", xyz.shape, " xyz_aug[:5]=", xyz[:5])
 
         # normalize coords for voxelization like ECLAIR pipeline
         xyz_norm = (xyz.astype(np.float32) / float(self.patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
@@ -578,6 +589,7 @@ class DalesTiles(torch.utils.data.Dataset):
         # OOM guard: class-aware voxel cap (optional)
         # -------------------------
         max_vox = self.preproc.max_voxels
+        print("[DEBUG VOXEL CAP] before: total voxels", n_vox, " max_vox=", max_vox)
         if (max_vox is not None) and (n_vox > int(max_vox)):
             max_vox = int(max_vox)
 
@@ -617,6 +629,7 @@ class DalesTiles(torch.utils.data.Dataset):
         else:
             # no cap or no need to cap: use all voxels
             pass
+        print("[DEBUG VOXEL CAP] after: voxels", unique_idx.shape[0])
 
         # Final ME-ready arrays after any cap
         q_u = q[unique_idx]

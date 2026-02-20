@@ -1,3 +1,4 @@
+# /src/eval_dales_preproc_sweep_wo_intensity.py
 from __future__ import annotations
 
 import argparse
@@ -9,10 +10,11 @@ import json
 import logging
 import math
 import random
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -43,6 +45,59 @@ def _maybe_autocast(enabled: bool):
     return _torch_autocast(enabled=enabled)
 
 
+def _cfg_digest(cfg: dict) -> dict:
+    """Keep only fields that must match between train-time cfg and eval-time cfg."""
+    d = {}
+    # model contract
+    d["model.in_channels"] = cfg.get("model", {}).get("in_channels")
+    d["model.out_channels"] = cfg.get("model", {}).get("out_channels")
+    d["model.D"] = cfg.get("model", {}).get("D")
+
+    # dataset/label-space contract
+    data = cfg.get("data", {})
+    d["data.dataset"] = data.get("dataset")
+    ls = data.get("label_space", {})
+    d["label_space.num_classes"] = ls.get("num_classes")
+    d["label_space.ignore_index"] = ls.get("ignore_index")
+    d["label_space.class_names"] = ls.get("class_names")
+
+    # feature contract (anything that changes channel semantics)
+    feat = data.get("features", {})
+    d["features.use_intensity"] = feat.get("use_intensity")
+    d["features.returns_onehot_k"] = feat.get("returns_onehot_k")
+    d["features.use_rgb"] = feat.get("use_rgb")
+    d["features.include_coords"] = feat.get("include_coords")
+    return d
+
+
+def _assert_cfg_matches_ckpt(eval_cfg: dict, ckpt: dict):
+    train_cfg = ckpt.get("cfg", None)
+    if train_cfg is None:
+        print("[warn] ckpt has no 'cfg' – cannot verify config/label-space contract.")
+        return
+
+    # ckpt['cfg'] might be OmegaConf; try to coerce
+    if not isinstance(train_cfg, dict):
+        try:
+            # OmegaConf supports .to_container(resolve=True)
+            train_cfg = train_cfg.to_container(resolve=True)
+        except Exception:
+            pass
+    if not isinstance(train_cfg, dict):
+        print(f"[warn] ckpt['cfg'] is {type(train_cfg)} – cannot verify contract.")
+        return
+
+    a = _cfg_digest(eval_cfg)
+    b = _cfg_digest(train_cfg)
+
+    mismatches = {k: (a.get(k), b.get(k)) for k in sorted(set(a) | set(b)) if a.get(k) != b.get(k)}
+
+    if mismatches:
+        print("\n[ERROR] Eval config does NOT match checkpoint train config for critical fields:")
+        print(json.dumps(mismatches, indent=2, default=str))
+        raise SystemExit(2)
+
+
 # -------------------------
 # Logging utilities
 # -------------------------
@@ -70,6 +125,85 @@ def set_all_seeds(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+# -------------------------
+# Train-space LUT loader (native -> train) from checkpoint cfg
+# -------------------------
+def load_native_to_train_from_ckpt(
+    ckpt_path: str,
+    logger: logging.Logger,
+) -> Tuple[np.ndarray, int, Optional[int], bool, Tuple[int, ...]]:
+    """
+    Returns:
+      lut_native_to_train: (256,) int64
+      train_ignore_index: int
+      train_max_voxels: Optional[int]
+      train_class_aware_max_voxels: bool
+      rare_class_ids: Tuple[int,...]
+
+    We try to read from ckpt["cfg"]["data"] using common key patterns.
+    """
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    cfg_raw = ckpt.get("cfg", None)
+    cfg = _to_plain_dict_cfg(cfg_raw)
+    if cfg is None:
+        raise RuntimeError("Checkpoint has no usable 'cfg' dict; cannot derive native->train LUT.")
+
+    data = cfg.get("data", {})
+    if not isinstance(data, dict):
+        raise RuntimeError("Checkpoint cfg['data'] missing or not a dict; cannot derive LUT.")
+
+    ls = data.get("label_space", {}) if isinstance(data.get("label_space", {}), dict) else {}
+    train_ignore_index = int(ls.get("ignore_index", -100))
+
+    # preproc knobs (optional)
+    pre = data.get("preproc", {}) if isinstance(data.get("preproc", {}), dict) else {}
+    train_max_voxels = pre.get("max_voxels", None)
+    train_max_voxels = int(train_max_voxels) if train_max_voxels is not None else None
+    train_class_aware_max_voxels = bool(pre.get("class_aware_max_voxels", False))
+    rare_class_ids = tuple(int(x) for x in pre.get("rare_class_ids", [2, 3, 5, 6, 7]))
+
+    # Mapping dict search (most specific first)
+    cand = None
+    direct_keys = [
+        "dales_label_map_native_to_train",
+        "label_map_native_to_train",
+        "native_label_map_to_train",
+        "native_to_train",
+    ]
+    for k in direct_keys:
+        v = data.get(k, None)
+        if isinstance(v, dict) and v:
+            cand = v
+            logger.info(f"[trainmap] using cfg.data.{k} for native->train LUT ({len(v)} entries)")
+            break
+
+    # Also allow nested label_maps
+    if cand is None:
+        lm = data.get("label_maps", None)
+        if isinstance(lm, dict):
+            for k, v in lm.items():
+                if not isinstance(v, dict) or not v:
+                    continue
+                if re.search(r"native.*train", str(k)):
+                    cand = v
+                    logger.info(f"[trainmap] using cfg.data.label_maps.{k} for native->train LUT ({len(v)} entries)")
+                    break
+
+    if cand is None:
+        raise RuntimeError(
+            "Could not find native->train label map in checkpoint cfg. "
+            "Expected something like cfg.data.dales_label_map_native_to_train (or similar)."
+        )
+
+    lut = np.full((256,), train_ignore_index, dtype=np.int64)
+    for k, v in cand.items():
+        kk = int(k)
+        if 0 <= kk < 256:
+            lut[kk] = int(v)
+
+    return lut, train_ignore_index, train_max_voxels, train_class_aware_max_voxels, rare_class_ids
 
 
 # -------------------------
@@ -114,6 +248,104 @@ def build_pred_to_common_from_eclair_map(
     return pred_to_common
 
 
+def infer_ckpt_domain(ckpt_path: str, *, out_channels: Optional[int] = None, logger: Optional[logging.Logger] = None) -> str:
+    """
+    Best-effort detection of the *source domain* the checkpoint was trained on.
+    We need this only to pick the correct native->common LUT (DALES vs ECLAIR).
+    """
+    domain = "unknown"
+    try:
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        cfg = ckpt.get("cfg", {})
+        data = cfg.get("data", {}) if isinstance(cfg, dict) else {}
+        if isinstance(data, dict):
+            # Strong signals (explicit label map keys)
+            if "dales_label_map_native_to_train" in data:
+                domain = "dales"
+            elif "eclair_label_map_native_to_train" in data:
+                domain = "eclair"
+            else:
+                # Weaker signals (dataset name or paths)
+                ds = str(data.get("dataset", "")).lower()
+                if "dales" in ds:
+                    domain = "dales"
+                elif "eclair" in ds:
+                    domain = "eclair"
+    except Exception:
+        pass
+
+    # Heuristic fallback based on class count if still unknown
+    if domain == "unknown" and out_channels is not None:
+        if int(out_channels) == 8:
+            domain = "dales"
+        elif int(out_channels) == 11:
+            domain = "eclair"
+
+    if logger is not None:
+        logger.info(f"[ckpt] inferred_source_domain={domain} (out_channels={out_channels})")
+    return domain
+
+
+def build_pred_to_common_from_ckpt_lut(
+    *,
+    native_to_train_lut: np.ndarray,  # (256,) source native -> train id
+    native_to_common_lut: np.ndarray,  # (256,) source native -> common id
+    out_channels: int,
+    train_ignore_index: int,
+    logger: logging.Logger,
+) -> np.ndarray:
+    """
+    Derive pred_to_common (train_id -> common_id) from the checkpoint's native->train LUT.
+
+    Steps:
+      1) invert native->train into train->native (first-hit wins)
+      2) compose with native->common to get train->common
+    """
+    train_to_native = np.full((out_channels,), -1, dtype=np.int64)
+    for nid in range(int(native_to_train_lut.shape[0])):
+        tid = int(native_to_train_lut[nid])
+        if tid == int(train_ignore_index):
+            continue
+        if tid < 0 or tid >= out_channels:
+            continue
+        if train_to_native[tid] != -1 and train_to_native[tid] != nid:
+            logger.warning(f"[map] train_id {tid} maps to multiple native ids ({train_to_native[tid]}, {nid}); keeping first.")
+            continue
+        train_to_native[tid] = nid
+
+    pred_to_common = np.zeros((out_channels,), dtype=np.int64)  # default common ignore=0
+    for tid in range(out_channels):
+        nid = int(train_to_native[tid])
+        if nid == -1:
+            pred_to_common[tid] = 0
+        else:
+            pred_to_common[tid] = int(native_to_common_lut[nid])
+
+    logger.info(f"[map] pred_to_common(train->common)={pred_to_common.tolist()}")
+    return pred_to_common
+
+
+def _sha1_file(path: str, chunk_bytes: int = 8 << 20) -> str:
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(chunk_bytes)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+def _strip_module_prefix(state_dict: dict) -> dict:
+    # Handles DDP checkpoints that save keys as "module.xxx"
+    if not state_dict:
+        return state_dict
+
+    if any(k.startswith("module.") for k in state_dict.keys()):
+        return {k[len("module.") :]: v for k, v in state_dict.items()}
+    return state_dict
+
+
 # -------------------------
 # Metrics
 # -------------------------
@@ -136,15 +368,31 @@ def confusion_from_labels(
     return cm.reshape((num_classes, num_classes))
 
 
-def iou_from_confusion(cm: np.ndarray, ignore_index: int = 0) -> Tuple[float, List[float]]:
+def iou_from_confusion(
+    cm: np.ndarray,
+    ignore_index: Optional[int] = 0,
+    *,
+    ignore_empty: bool = False,  # if True, exclude classes with denom==0 from mIoU
+) -> Tuple[float, List[float]]:
     tp = np.diag(cm).astype(np.float64)
     fp = cm.sum(axis=0).astype(np.float64) - tp
     fn = cm.sum(axis=1).astype(np.float64) - tp
-    denom = tp + fp + fn + 1e-12
-    iou = (tp / denom).tolist()
-    valid = [i for i in range(cm.shape[0]) if i != ignore_index]
-    miou = float(np.mean([iou[i] for i in valid])) if valid else float("nan")
-    return miou, iou
+
+    denom = tp + fp + fn  # note: no epsilon here
+    iou = np.divide(tp, np.maximum(denom, 1e-12))
+
+    if ignore_empty:
+        iou = iou.copy()
+        iou[denom == 0] = np.nan
+
+    if ignore_index is not None:
+        if not (0 <= ignore_index < cm.shape[0]):
+            raise ValueError(f"ignore_index={ignore_index} out of range for cm shape {cm.shape}")
+        iou = iou.copy()
+        iou[ignore_index] = np.nan
+
+    miou = float(np.nanmean(iou))
+    return miou, iou.tolist()
 
 
 def read_dales_las(path: Path) -> Dict[str, np.ndarray]:
@@ -155,12 +403,12 @@ def read_dales_las(path: Path) -> Dict[str, np.ndarray]:
     data = read_las_arrays_robust(path)
 
     # Preserve original logging behavior
-    print(
-        "DALES intensity stats:",
-        float(data["intensity"].min()),
-        float(data["intensity"].max()),
-        float(np.median(data["intensity"])),
-    )
+    # print(
+    #     "DALES intensity stats:",
+    #     float(data["intensity"].min()),
+    #     float(data["intensity"].max()),
+    #     float(np.median(data["intensity"])),
+    # )
 
     return {
         "xyz": data["xyz"],
@@ -329,6 +577,20 @@ def _canon(v):
     return v
 
 
+def _parse_csv_floats(s: str) -> List[float]:
+    """
+    Parse a comma-separated list of floats, e.g. "0.02,0.03,0.04".
+    Empty tokens are ignored.
+    """
+    out: List[float] = []
+    for part in s.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        out.append(float(p))
+    return out
+
+
 def spec_key_from_dict(d: Dict) -> Tuple:
     # Stable tuple key over ALL spec fields
     items = []
@@ -392,6 +654,44 @@ def spec_uses_linearity(spec: PreprocSpec) -> bool:
 # -------------------------
 
 
+def _cap_unique_idx_class_aware(
+    *,
+    unique_idx: np.ndarray,  # [Nv] indices into patch arrays
+    gt_train: np.ndarray,  # [N] train ids per point (incl ignore_index)
+    max_voxels: int,
+    class_aware: bool,
+    rare_ids: list[int],
+    ignore_index: int,
+    seed: int = 1337,
+) -> np.ndarray:
+    Nv = int(unique_idx.shape[0])
+    if max_voxels <= 0 or Nv <= max_voxels:
+        return unique_idx
+
+    rng = np.random.default_rng(seed)
+
+    if not class_aware:
+        return rng.choice(unique_idx, size=max_voxels, replace=False)
+
+    # class-aware: always keep all rare-class voxels (up to budget),
+    # then fill remaining with uniform random from the rest.
+    gt_u = gt_train[unique_idx]  # [Nv]
+    rare_mask = np.isin(gt_u, np.array(rare_ids, dtype=gt_u.dtype)) & (gt_u != ignore_index)
+
+    rare_idx = unique_idx[rare_mask]
+    nonrare_idx = unique_idx[~rare_mask]
+
+    if rare_idx.size >= max_voxels:
+        return rng.choice(rare_idx, size=max_voxels, replace=False)
+
+    remaining = max_voxels - int(rare_idx.size)
+    if nonrare_idx.size <= remaining:
+        return np.concatenate([rare_idx, nonrare_idx], axis=0)
+
+    fill = rng.choice(nonrare_idx, size=remaining, replace=False)
+    return np.concatenate([rare_idx, fill], axis=0)
+
+
 def build_point_features_returns_only(
     rn: np.ndarray,
     nor: np.ndarray,
@@ -433,29 +733,77 @@ def build_point_features_returns_only(
     return feats_points
 
 
-def voxelize_with_inverse(
-    xyz_norm: np.ndarray,
-    voxel_size: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Returns:
-      - q_u (M,3) unique voxel coords (int32)
-      - unique_idx (M,) indices of representative points (training-like)
-      - inv (N,) mapping each point -> voxel index in [0..M-1]
-    """
-    q = np.floor(xyz_norm / float(voxel_size)).astype(np.int32, copy=False)
+# def voxelize_with_inverse(
+#     xyz_norm: np.ndarray,
+#     voxel_size: float,
+# ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+#     """
+#     Returns:
+#       - q_u (M,3) unique voxel coords (int32)
+#       - unique_idx (M,) indices of representative points (training-like)
+#       - inv (N,) mapping each point -> voxel index in [0..M-1]
+#     """
+#     q = np.floor(xyz_norm / float(voxel_size)).astype(np.int32, copy=False)
+#     q = np.ascontiguousarray(q, dtype=np.int32)
+#     q_t = torch.from_numpy(q).int().contiguous()
+#     # ME returns:
+#     #   - unique coords tensor (unused here)
+#     #   - unique indices into original points
+#     #   - inverse map point->unique index
+#     _, unique_idx_t, inv_t = ME.utils.sparse_quantize(q_t, return_index=True, return_inverse=True)
+#     unique_idx = unique_idx_t.cpu().numpy().astype(np.int64, copy=False)
+#     inv = inv_t.cpu().numpy().astype(np.int64, copy=False)
+#     q_u = q[unique_idx]
+#     q_u = np.ascontiguousarray(q_u, dtype=np.int32)
+#     return q_u, unique_idx, inv
+
+
+def voxelize_with_inverse(xyz_norm: np.ndarray, voxel_size: float, *, logger: Optional[logging.Logger] = None):
+    q = np.floor(xyz_norm / voxel_size).astype(np.int32, copy=False)
     q = np.ascontiguousarray(q, dtype=np.int32)
-    q_t = torch.from_numpy(q).int().contiguous()
-    # ME returns:
-    #   - unique coords tensor (unused here)
-    #   - unique indices into original points
-    #   - inverse map point->unique index
-    _, unique_idx_t, inv_t = ME.utils.sparse_quantize(q_t, return_index=True, return_inverse=True)
-    unique_idx = unique_idx_t.cpu().numpy().astype(np.int64, copy=False)
+
+    # IMPORTANT: keep coords on CPU for ME utils
+    q_t = torch.from_numpy(q).int().contiguous()  # CPU tensor
+
+    # sparse_quantize returns (unique_coords, unique_idx, inverse)
+    q_u_t, unique_idx_t, inv_t = ME.utils.sparse_quantize(q_t, return_index=True, return_inverse=True)
+
+    q_u = q_u_t.cpu().numpy().astype(np.int32, copy=False)
     inv = inv_t.cpu().numpy().astype(np.int64, copy=False)
-    q_u = q[unique_idx]
-    q_u = np.ascontiguousarray(q_u, dtype=np.int32)
-    return q_u, unique_idx, inv
+
+    # ---- HARD sanity: inv maps points -> q_u row order ----
+    if q.shape[0] > 0:
+        jj = np.random.randint(0, q.shape[0], size=min(2048, q.shape[0]))
+        if not np.all(q_u[inv[jj]] == q[jj]):
+            raise RuntimeError("voxelize_with_inverse sanity failed: inv does not map points -> q_u ordering.")
+
+    # ---- Build a unique_idx aligned to q_u using inv (stable, deterministic) ----
+    # Sort by voxel id; mergesort preserves original point order within each voxel id.
+    order = np.argsort(inv, kind="mergesort")
+    inv_sorted = inv[order]
+    # first index for each voxel id in ascending voxel-id order
+    first_pos = np.concatenate(([0], np.flatnonzero(inv_sorted[1:] != inv_sorted[:-1]) + 1))
+    unique_idx_from_inv = order[first_pos].astype(np.int64, copy=False)
+
+    # Expect one representative per q_u row
+    if unique_idx_from_inv.shape[0] != q_u.shape[0]:
+        raise RuntimeError(
+            f"unique_idx_from_inv size mismatch: got {unique_idx_from_inv.shape[0]} expected {q_u.shape[0]} "
+            "(inv/q_u inconsistency)"
+        )
+
+    # ---- HARD invariant: q[unique_idx] must equal q_u row-wise ----
+    q_from_unique = q[unique_idx_from_inv]
+    if not np.array_equal(q_from_unique, q_u):
+        raise RuntimeError(
+            "Voxel feature/coord alignment failed: q[unique_idx_from_inv] != q_u. "
+            "This would corrupt SparseTensor(feature,row) pairing."
+        )
+
+    if logger is not None:
+        logger.info(f"[vox] N={q.shape[0]} M={q_u.shape[0]} inv_max={int(inv.max()) if inv.size else -1}")
+
+    return q_u, unique_idx_from_inv, inv
 
 
 def build_voxel_features_returns_only(
@@ -530,6 +878,44 @@ def build_voxel_features_returns_only(
 # -------------------------
 # Model loading (no hallucination)
 # -------------------------
+
+
+def load_model_state_or_die(model: torch.nn.Module, ckpt: dict, logger) -> None:
+    # Your ckpt uses "model_state"
+    cand_keys = ["model_state", "model_state_dict", "state_dict", "model", "net"]
+
+    sd = None
+    for k in cand_keys:
+        v = ckpt.get(k, None)
+        if isinstance(v, dict) and len(v) > 0:
+            sd = v
+            logger.info(f"[ckpt] using state dict from key='{k}' with {len(sd)} tensors")
+            break
+
+    if sd is None:
+        raise RuntimeError(f"Could not find model state dict in ckpt keys: {list(ckpt.keys())}")
+
+    sd = _strip_module_prefix(sd)
+
+    # STRICT load: fail if mismatch
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    if missing or unexpected:
+        # Make it loud: this indicates arch mismatch or wrong checkpoint.
+        raise RuntimeError(
+            f"State dict mismatch.\n"
+            f"  missing ({len(missing)}): {missing[:20]}\n"
+            f"  unexpected ({len(unexpected)}): {unexpected[:20]}"
+        )
+    logger.info("[ckpt] load_state_dict OK (exact match)")
+
+    # Fingerprint a parameter for sanity
+    with torch.no_grad():
+        w = next(iter(model.parameters()))
+        logger.info(
+            f"[ckpt] first_param: shape={tuple(w.shape)} mean={w.float().mean().item():.6g} std={w.float().std().item():.6g}"
+        )
+
+
 def load_model_from_config(
     *,
     config_path: str,
@@ -552,11 +938,14 @@ def load_model_from_config(
 
     # ---- Load checkpoint state dict ----
     state = torch.load(ckpt_path, map_location="cpu")
+    _assert_cfg_matches_ckpt(cfg, state)
+    print("[ok] cfg↔ckpt contract verified.")
     if isinstance(state, dict) and "model_state" in state:
         sd = state["model_state"]
     else:
         sd = state
 
+    sd = _strip_module_prefix(sd)
     # ---- Infer in_channels from conv0 kernel in the checkpoint ----
     conv_key = None
     for k in sd.keys():
@@ -604,6 +993,45 @@ def load_model_from_config(
 # -------------------------
 # Infer logits per point (keeps eval set fixed!)
 # -------------------------
+
+
+def _reorder_logits_to_match_coords(out: ME.SparseTensor, coords_in: torch.Tensor, *, device: torch.device) -> torch.Tensor:
+    """
+    Return out.F reordered so rows align with coords_in row order.
+    Works regardless of coords_in being on CPU or CUDA.
+    Uses byte-wise row keys (collision-free) on CPU.
+    """
+    cin = coords_in.detach().cpu().to(torch.int32).contiguous().numpy()  # (N,4)
+    cout = out.C.detach().cpu().to(torch.int32).contiguous().numpy()  # (N,4)
+
+    if cout.shape[0] != cin.shape[0]:
+        raise RuntimeError(f"Coord count mismatch: out={cout.shape[0]} in={cin.shape[0]}")
+
+    # Build collision-free row keys via raw bytes view
+    def rowkey(a: np.ndarray) -> np.ndarray:
+        a2 = np.ascontiguousarray(a)
+        return a2.view(np.dtype((np.void, a2.dtype.itemsize * a2.shape[1]))).reshape(-1)
+
+    k_in = rowkey(cin)
+    k_out = rowkey(cout)
+
+    idx_sort = np.argsort(k_out, kind="mergesort")
+    k_out_sorted = k_out[idx_sort]
+
+    pos = np.searchsorted(k_out_sorted, k_in)
+    if pos.size != k_in.size:
+        raise RuntimeError("searchsorted failed unexpectedly during coord alignment")
+
+    # Verify exact match
+    if np.any(k_out_sorted[pos] != k_in):
+        raise RuntimeError("Failed to align out.C to input coords (row-key mismatch).")
+
+    idx_out = idx_sort[pos]  # numpy indices into out.F rows
+    idx_out_t = torch.from_numpy(idx_out.astype(np.int64, copy=False)).to(device)
+
+    return out.F[idx_out_t]
+
+
 @torch.inference_mode()
 def infer_patch_logits_per_point(
     model: torch.nn.Module,
@@ -619,7 +1047,8 @@ def infer_patch_logits_per_point(
     """
     Returns logits per ORIGINAL point (N,C) as a torch.Tensor on `device`.
     """
-    q_u, unique_idx, inv = voxelize_with_inverse(xyz_norm, spec.voxel_size)
+    q_u, unique_idx, inv = voxelize_with_inverse(xyz_norm, spec.voxel_size, logger=logger)
+
     feats_vox = build_voxel_features_returns_only(
         feats_points=feats_points,
         inv=inv,
@@ -637,11 +1066,25 @@ def infer_patch_logits_per_point(
     coords_t = torch.from_numpy(np.ascontiguousarray(coords, dtype=np.int32)).int().to(device)
     feats_t = torch.from_numpy(np.ascontiguousarray(feats_vox, dtype=np.float32)).float().to(device)
 
+    # if amp and device.type == "cuda":
+    #     feats_t = feats_t.half()
+
     st = ME.SparseTensor(features=feats_t, coordinates=coords_t, device=device)
     # Use CUDA AMP autocast wrapper; when `amp` is False or autocast unavailable this is a no-op.
     with _maybe_autocast(amp):
         out = model(st)
-        logits_vox = out.F  # (M,C) on device
+
+    # Robust alignment: prefer ME native coordinate query if available
+    logits_vox = None
+    if hasattr(out, "features_at_coordinates"):
+        try:
+            logits_vox = out.features_at_coordinates(coords_t)
+        except Exception:
+            logits_vox = None
+
+    if logits_vox is None:
+        # Fallback: reorder via explicit coord matching
+        logits_vox = _reorder_logits_to_match_coords(out, coords_t, device=device)
 
     inv_t = torch.from_numpy(inv).long().to(device)
     logits_pts = logits_vox[inv_t]  # (N,C)
@@ -746,6 +1189,213 @@ def infer_with_tta(
         return pred_train, stats
 
     raise ValueError(f"Unknown tta_mode: {spec.tta_mode}")
+
+
+def _is_oom_exception(e: BaseException) -> bool:
+    msg = str(e).lower()
+    return ("out of memory" in msg) or ("cudaerrormemoryallocation" in msg) or ("std::bad_alloc" in msg)
+
+
+def _split_quadrants(xyz: np.ndarray) -> List[np.ndarray]:
+    # xyz is patch-local array (N,3)
+    x = xyz[:, 0]
+    y = xyz[:, 1]
+    xm = float(np.median(x))
+    ym = float(np.median(y))
+
+    q1 = (x <= xm) & (y <= ym)
+    q2 = (x > xm) & (y <= ym)
+    q3 = (x <= xm) & (y > ym)
+    q4 = (x > xm) & (y > ym)
+
+    masks = [q1, q2, q3, q4]
+    return [np.nonzero(m)[0] for m in masks if np.any(m)]
+
+
+def infer_with_tta_adaptive(
+    *,
+    model: torch.nn.Module,
+    xyz_patch: np.ndarray,
+    rn: np.ndarray,
+    nor: np.ndarray,
+    spec: PreprocSpec,
+    device: torch.device,
+    logger: logging.Logger,
+    amp: bool,
+    max_depth: int = 2,
+    _depth: int = 0,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """
+    Attempt patch inference; if OOM, split into quadrants and recurse.
+    Returns pred_train aligned to xyz_patch row order.
+    """
+    try:
+        return infer_with_tta(
+            model=model,
+            xyz_local=xyz_patch,
+            rn=rn,
+            nor=nor,
+            spec=spec,
+            device=device,
+            logger=logger,
+            amp=amp,
+        )
+    except (MemoryError, RuntimeError) as e:
+        if not _is_oom_exception(e) or device.type != "cuda" or _depth >= max_depth:
+            raise
+
+        logger.warning(f"[oom] patch inference OOM at depth={_depth} n={xyz_patch.shape[0]} -> splitting")
+        # best effort cleanup before retry
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
+
+        parts = _split_quadrants(xyz_patch)
+        pred = np.empty((xyz_patch.shape[0],), dtype=np.int64)
+
+        # Aggregate stats loosely (not super important for correctness)
+        stats_sum: Dict[str, float] = {}
+        stats_n = 0
+
+        for sub_idx in parts:
+            p_sub, s_sub = infer_with_tta_adaptive(
+                model=model,
+                xyz_patch=xyz_patch[sub_idx],
+                rn=rn[sub_idx],
+                nor=nor[sub_idx],
+                spec=spec,
+                device=device,
+                logger=logger,
+                amp=amp,
+                max_depth=max_depth,
+                _depth=_depth + 1,
+            )
+            pred[sub_idx] = p_sub
+            stats_n += 1
+            for k, v in s_sub.items():
+                stats_sum[k] = stats_sum.get(k, 0.0) + float(v)
+
+        stats_avg = {k: (v / max(1, stats_n)) for k, v in stats_sum.items()}
+        return pred, stats_avg
+
+
+# @torch.no_grad()
+# def infer_trainstyle_voxels(
+#     *,
+#     model: torch.nn.Module,
+#     xyz_patch: np.ndarray,  # [N,3] meters
+#     rn: np.ndarray,  # [N]
+#     nor: np.ndarray,  # [N]
+#     spec,  # PreprocSpec
+#     device: torch.device,
+#     amp: bool,
+#     # ---- OPTIONAL: to match training voxel cap exactly ----
+#     gt_train_point: Optional[np.ndarray] = None,  # [N] train ids (or ignore)
+#     train_ignore_index: int = -100,
+#     max_voxels: Optional[int] = None,
+#     class_aware_max_voxels: bool = False,
+#     rare_class_ids: Tuple[int, ...] = (2, 3, 5, 6, 7),
+#     seed: int = 1234,
+#     gt_train: np.ndarray | None = None,
+#     class_aware: bool = False,
+#     rare_ids: list[int] | None = None,
+# ) -> tuple[np.ndarray, np.ndarray]:
+#     """
+#     Returns:
+#       pred_vox:   [Nv] int64 predictions in train-id space (0..T-1)
+#       unique_idx: [Nv] indices of representative points chosen by sparse_quantize (after any cap)
+#     """
+#     if model.training:
+#         raise RuntimeError("Model must be in eval() during evaluation.")
+
+#     # Always eval for inference stability
+#     model.eval()
+#     torch.set_grad_enabled(False)
+
+#     xyz_patch = np.asarray(xyz_patch)
+#     if xyz_patch.ndim != 2 or xyz_patch.shape[1] != 3:
+#         raise ValueError(f"xyz_patch must be [N,3], got {xyz_patch.shape}")
+
+#     N = xyz_patch.shape[0]
+#     if N == 0:
+#         return np.zeros((0,), dtype=np.int64), np.zeros((0,), dtype=np.int64)
+
+#     # Match training: local coords
+#     xyz_local = xyz_patch - xyz_patch.min(axis=0, keepdims=True)
+
+#     # Match training: normalize coords for voxelization
+#     xyz_norm = (xyz_local / float(spec.coord_norm_factor)).astype(np.float32, copy=False)
+
+#     # Match training: quantize
+#     q = np.floor(xyz_norm / float(spec.voxel_size)).astype(np.int32, copy=False)
+#     q = np.ascontiguousarray(q, dtype=np.int32)
+
+#     _, unique_idx = ME.utils.sparse_quantize(q, return_index=True)
+#     unique_idx = np.asarray(unique_idx)
+#     q_t = torch.from_numpy(q).int().contiguous()
+#     _, unique_idx_t = ME.utils.sparse_quantize(q_t, return_index=True)
+#     unique_idx = unique_idx_t.cpu().numpy().astype(np.int64, copy=False)
+
+#     if unique_idx.size == 0:
+#         return np.zeros((0,), dtype=np.int64), unique_idx
+
+#     # Optional cap (single, consistent path)
+#     if max_voxels is not None and unique_idx.size > int(max_voxels):
+#         if class_aware_max_voxels and gt_train_point is not None:
+#             unique_idx = _cap_unique_idx_class_aware(
+#                 unique_idx=unique_idx,
+#                 gt_train=np.asarray(gt_train_point),
+#                 max_voxels=int(max_voxels),
+#                 class_aware=True,
+#                 rare_ids=list(rare_class_ids),
+#                 ignore_index=int(train_ignore_index),
+#                 seed=int(seed),
+#             )
+#         else:
+#             rng = np.random.default_rng(int(seed))
+#             unique_idx = rng.choice(unique_idx, size=int(max_voxels), replace=False)
+
+#     # Feature stack (returns-only)
+#     unique_idx = np.asarray(unique_idx, dtype=np.int64)
+
+#     k = int(spec.returns_k)
+
+#     rn = np.asarray(rn).astype(np.int64, copy=False)
+#     nor = np.asarray(nor).astype(np.int64, copy=False)
+
+#     # Many LAS pipelines can include 0 or >k; one-hot expects 1..k
+#     rn = np.clip(rn, 1, k)
+#     nor = np.clip(nor, 1, k)
+
+#     feats_points = build_point_features_returns_only(rn=rn, nor=nor, spec=spec)
+
+#     q_u = q[unique_idx]
+#     feats_u = feats_points[unique_idx]
+
+#     # shape safety (Nv,3)
+#     q_u = np.asarray(q_u)
+#     if q_u.ndim == 1:
+#         q_u = q_u.reshape(1, -1)
+#     if q_u.shape[1] != 3:
+#         raise ValueError(f"q_u must be [Nv,3], got {q_u.shape}")
+
+#     # add batch column: [Nv,4]
+#     coords_u = np.concatenate(
+#         [np.zeros((q_u.shape[0], 1), dtype=np.int32), q_u.astype(np.int32, copy=False)],
+#         axis=1,
+#     )
+
+#     coords_t = torch.from_numpy(np.ascontiguousarray(coords_u)).int()
+#     feats_t = torch.from_numpy(np.ascontiguousarray(feats_u)).float().to(device, non_blocking=True)
+
+#     st = ME.SparseTensor(feats_t, coordinates=coords_t)
+#     with _maybe_autocast(amp):
+#         logits = model(st).F
+
+#     pred_vox = logits.argmax(dim=1).to("cpu").numpy().astype(np.int64, copy=False)
+#     return pred_vox, unique_idx
 
 
 # def infer_with_tta(
@@ -927,9 +1577,14 @@ class EvalTotals:
     n_patches_filtered_out: int
     align_stats_sum: Dict[str, float]
     align_stats_n: int
+    pred_hist_full: np.ndarray
+    gt_hist_full: np.ndarray
+    cm_train: np.ndarray
+    gt_hist_train: np.ndarray
+    pred_hist_train: np.ndarray
 
 
-def empty_totals(C: int) -> EvalTotals:
+def empty_totals(C: int, T: int = 0) -> EvalTotals:
     return EvalTotals(
         cm_full=np.zeros((C, C), dtype=np.int64),
         cm_filtered=np.zeros((C, C), dtype=np.int64),
@@ -940,6 +1595,11 @@ def empty_totals(C: int) -> EvalTotals:
         n_patches_filtered_out=0,
         align_stats_sum={},
         align_stats_n=0,
+        pred_hist_full=np.zeros((C,), dtype=np.int64),
+        gt_hist_full=np.zeros((C,), dtype=np.int64),
+        cm_train=np.zeros((T, T), dtype=np.int64),
+        gt_hist_train=np.zeros((T,), dtype=np.int64),
+        pred_hist_train=np.zeros((T,), dtype=np.int64),
     )
 
 
@@ -967,6 +1627,390 @@ def meets_patch_filter(
     raise ValueError(f"Unknown patch_filter_mode: {spec.patch_filter_mode}")
 
 
+def _collapse_score_from_metrics(metrics: dict) -> dict:
+    """
+    Returns a few cheap numbers to classify collapse:
+      - cars+trucks fraction in train-space predictions
+      - vehicle fraction in common-space predictions
+    """
+    out = {}
+    ht = metrics.get("hist_train", {})
+    pred_train = np.asarray(ht.get("pred_train", []), dtype=np.int64).reshape(-1)
+
+    if pred_train.size >= 4:
+        denom = int(pred_train.sum()) or 1
+        out["cars_trucks_frac_train"] = float((pred_train[2] + pred_train[3]) / denom)
+        out["pred_train_sum"] = int(denom)
+
+    hf = metrics.get("hist_full", {})
+    pred_common = np.asarray(hf.get("pred", []), dtype=np.int64).reshape(-1)
+    if pred_common.size >= 8:
+        denom = int(pred_common.sum()) or 1
+        out["vehicle_frac_common"] = float(pred_common[7] / denom)
+        out["pred_common_sum"] = int(denom)
+
+    return out
+
+
+def diagnose_ckpt_vs_evalspec(
+    *,
+    ckpt_path: str,
+    base_spec: PreprocSpec,  # current eval spec = "Spec B"
+    model: torch.nn.Module,
+    amp: bool,
+    dales_files: List[Path],
+    map_dales_to_common: np.ndarray,
+    pred_to_common: np.ndarray,
+    common_class_names: List[str],
+    device: torch.device,
+    logger: logging.Logger,
+    patch_size_m: float,
+    patch_stride_m: float,
+    out_dir: str,
+) -> None:
+    outp = Path(out_dir)
+    outp.mkdir(parents=True, exist_ok=True)
+
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    load_model_state_or_die(model, ckpt, logger)
+    model.eval()
+    torch.set_grad_enabled(False)
+
+    ckpt_cfg = ckpt.get("cfg", None)
+    if ckpt_cfg is None:
+        raise RuntimeError("Checkpoint has no 'cfg' key; cannot auto-align spec.")
+
+    pre = ckpt_cfg["data"].get("preproc", {})
+    train_max_voxels = pre.get("max_voxels", None)
+    train_class_aware_max_voxels = bool(pre.get("class_aware_max_voxels", False))
+    train_rare_ids = tuple(int(x) for x in pre.get("rare_class_ids", [2, 3, 5, 6, 7]))
+
+    label_map = ckpt_cfg["data"].get("dales_label_map_native_to_train", None)
+    if label_map is None:
+        raise RuntimeError("Checkpoint cfg missing data.dales_label_map_native_to_train")
+
+    train_ignore_index = int(ckpt_cfg["data"]["label_space"]["ignore_index"])
+
+    lut_train = np.full((256,), train_ignore_index, dtype=np.int64)
+    for k, v in label_map.items():
+        kk = int(k)
+        if 0 <= kk < 256:
+            lut_train[kk] = int(v)
+
+    sha1 = _sha1_file(ckpt_path)
+    patch = ckpt_cfg["data"]["patch"]
+    feat = ckpt_cfg["data"]["features"]
+    ls = ckpt_cfg["data"]["label_space"]
+
+    logger.info(f"[diag] ckpt_path={ckpt_path}")
+    logger.info(f"[diag] ckpt_sha1={sha1}")
+    logger.info(f"[diag] ckpt.patch={patch}")
+    logger.info(f"[diag] ckpt.features={feat}")
+    logger.info(f"[diag] ckpt.label_space.class_names={ls.get('class_names')}")
+
+    # Spec A = checkpoint-aligned
+    spec_ckpt = dataclasses.replace(
+        base_spec,
+        coord_norm_factor=float(patch["coord_norm_factor"]),
+        voxel_size=float(patch["voxel_size"]),
+        returns_k=int(feat["returns_onehot_k"]),
+        voxel_feat_mode="sample_first",
+    )
+
+    # Spec B = current (whatever you passed on CLI / base_spec)
+    spec_cur = base_spec
+
+    # Run A
+    mA = evaluate_run(
+        model=model,
+        dales_files=dales_files,
+        map_dales_to_common=map_dales_to_common,
+        pred_to_common=pred_to_common,
+        common_class_names=common_class_names,
+        spec=spec_ckpt,
+        device=device,
+        logger=logger,
+        patch_size_m=patch_size_m,
+        patch_stride_m=patch_stride_m,
+        amp=amp,
+        map_dales_native_to_train=lut_train,
+        train_ignore_index=train_ignore_index,
+        train_max_voxels=train_max_voxels,
+        train_class_aware_max_voxels=train_class_aware_max_voxels,
+        rare_class_ids=train_rare_ids,
+    )
+    logger.info(f"[diag] ckpt_spec full metrics: {mA}")
+    (outp / "metrics_ckpt_spec.json").write_text(json.dumps(mA, indent=2))
+    sA = _collapse_score_from_metrics(mA)
+    logger.info(f"[diag] ckpt_spec collapse scores: {sA}")
+
+    # Run B
+    mB = evaluate_run(
+        model=model,
+        dales_files=dales_files,
+        map_dales_to_common=map_dales_to_common,
+        pred_to_common=pred_to_common,
+        common_class_names=common_class_names,
+        spec=spec_cur,
+        device=device,
+        logger=logger,
+        patch_size_m=patch_size_m,
+        patch_stride_m=patch_stride_m,
+        amp=amp,
+        map_dales_native_to_train=lut_train,
+        train_ignore_index=train_ignore_index,
+        train_max_voxels=train_max_voxels,
+        train_class_aware_max_voxels=train_class_aware_max_voxels,
+        rare_class_ids=train_rare_ids,
+    )
+    logger.info(f"[diag] current_spec full metrics: {mB}")
+    (outp / "metrics_current_spec.json").write_text(json.dumps(mB, indent=2))
+    sB = _collapse_score_from_metrics(mB)
+    logger.info(f"[diag] current_spec collapse scores: {sB}")
+
+    a_bad = (sA.get("cars_trucks_frac_train", 0.0) > 0.90) or (sA.get("vehicle_frac_common", 0.0) > 0.90)
+    b_bad = (sB.get("cars_trucks_frac_train", 0.0) > 0.90) or (sB.get("vehicle_frac_common", 0.0) > 0.90)
+
+    if (not a_bad) and b_bad:
+        logger.info("[diag] RESULT: Universe A (eval spec mismatch).")
+    elif a_bad and b_bad:
+        logger.info("[diag] RESULT: Universe C (collapsed even with ckpt-aligned spec).")
+    else:
+        logger.info("[diag] RESULT: Inconclusive edge case.")
+
+
+# def evaluate_run(
+#     *,
+#     model: torch.nn.Module,
+#     dales_files: List[Path],
+#     map_dales_to_common: np.ndarray,
+#     pred_to_common: np.ndarray,
+#     common_class_names: List[str],
+#     spec: PreprocSpec,
+#     device: torch.device,
+#     logger: logging.Logger,
+#     patch_size_m: float,
+#     patch_stride_m: float,
+#     amp: bool,
+#     map_dales_native_to_train: Optional[np.ndarray] = None,
+#     train_ignore_index: int = -100,
+# ) -> Dict:
+
+#     print("Evaluating...@@@@@@@@@@@@@$$$$$$$$$$$$$$$$$$$$$$$$&&&&&&&&&&&&&&&&&&&@$@#$$#@$@#$@$@$$@$@@$")
+
+#     C = len(common_class_names)
+#     totals = empty_totals(C)
+#     # at top of evaluate_run (after C defined)
+#     T = int(pred_to_common.shape[0])  # out_channels
+#     pred_hist_train = np.zeros((T,), dtype=np.int64)
+#     gt_hist_train = np.zeros((T,), dtype=np.int64)
+#     cm_train = np.zeros((T, T), dtype=np.int64)
+
+#     t0 = time.time()
+#     logger.info(f"[run] spec={dataclasses.asdict(spec)}")
+#     logger.info(f"[data] n_files={len(dales_files)} patch={patch_size_m} stride={patch_stride_m}")
+
+#     for fi, fp in enumerate(dales_files, 1):
+#         raw = read_dales_las(fp)
+#         xyz = raw["xyz"]
+#         rn = raw["return_number"]
+#         nor = raw["number_of_returns"]
+#         gt_native = raw["cls"]
+
+#         # map DALES native -> common (clamp)
+#         gt_native_clip = np.clip(gt_native, 0, 255)
+#         gt_common = map_dales_to_common[gt_native_clip]
+
+#         logger.info(f"[file] {fi}/{len(dales_files)} {fp.name} n_points={xyz.shape[0]}")
+
+#         patch_i = 0
+#         for idx in iter_xy_patches_indices(xyz, patch_size_m, patch_stride_m):
+#             patch_i += 1
+
+#             xyz_p = xyz[idx]
+#             rn_p = rn[idx]
+#             nor_p = nor[idx]
+#             gt_p = gt_common[idx]
+
+#             # local coords and normalized coords (for filter decisions)
+#             xyz_local = xyz_p - xyz_p.min(axis=0, keepdims=True)
+#             xyz_norm_for_filter = (xyz_local / float(spec.coord_norm_factor)).astype(np.float32, copy=False)
+#             xyz_norm_for_filter = np.ascontiguousarray(xyz_norm_for_filter, dtype=np.float32)
+#             xyz_norm_for_filter[:, 2] *= float(spec.z_scale)
+
+#             # FULL scope always
+#             pred_train, a_stats = infer_with_tta_adaptive(
+#                 model=model,
+#                 xyz_patch=xyz_p,
+#                 rn=rn_p,
+#                 nor=nor_p,
+#                 spec=spec,
+#                 device=device,
+#                 logger=logger,
+#                 amp=amp,
+#                 max_depth=2,  # tune: 1–3
+#             )
+
+#             pred_train = pred_train.astype(np.int64, copy=False)
+
+#             # sanity: pred ids must be within [0..T-1]
+#             if int(pred_train.max()) >= T or int(pred_train.min()) < 0:
+#                 raise RuntimeError(f"pred_train out of range: min={pred_train.min()} max={pred_train.max()} T={T}")
+
+#             # --------------------------
+#             # Train-space GT (MATCH TRAINING!)
+#             # --------------------------
+#             if map_dales_native_to_train is None:
+#                 raise RuntimeError("map_dales_native_to_train is required for DALES train-space eval.")
+
+#             # ---- accumulate train-space pred histogram (1D) ----
+#             pred_hist_train += np.bincount(pred_train, minlength=T)
+
+#             # ---- alignment stats once ----
+#             add_align_stats(totals, a_stats)
+
+#             # ---- Train-space GT for DALES: native 1..8 -> train 0..7 ; native 0 -> ignore ----
+#             gt_native_patch = gt_native[idx].astype(np.int64, copy=False)
+#             gt_train = map_dales_native_to_train[np.clip(gt_native_patch, 0, 255)]
+
+#             # hist + confusion (ignore already encoded as -100)
+#             m = gt_train != train_ignore_index
+#             totals.gt_hist_train += np.bincount(gt_train[m], minlength=T)
+#             totals.pred_hist_train += np.bincount(pred_train, minlength=T)
+
+#             cm_train = confusion_from_labels(gt_train, pred_train, num_classes=T, ignore_index=train_ignore_index)
+#             totals.cm_train += cm_train
+
+#             if int(pred_train.max()) >= pred_to_common.shape[0]:
+#                 raise RuntimeError(
+#                     f"pred_to_common too small: pred_max={int(pred_train.max())} " f"but lut_size={pred_to_common.shape[0]}"
+#                 )
+
+#             pred_common = pred_to_common[pred_train]
+#             valid = gt_p != 0  # match confusion_from_labels ignore_index=0
+#             totals.gt_hist_full += np.bincount(gt_p[valid].astype(np.int64), minlength=C)
+#             totals.pred_hist_full += np.bincount(pred_common[valid].astype(np.int64), minlength=C)
+
+#             cm = confusion_from_labels(gt_p, pred_common, C, ignore_index=0)
+#             totals.cm_full += cm
+#             totals.n_points_full += int(gt_p.shape[0])
+#             totals.n_patches_full += 1
+
+#             # FILTERED scope (analysis only; does not bias "full" deltas)
+#             keep_patch = meets_patch_filter(xyz_norm_for_filter, spec)
+#             if keep_patch:
+#                 totals.cm_filtered += cm
+#                 totals.n_points_filtered += int(gt_p.shape[0])
+#                 totals.n_patches_filtered += 1
+#             else:
+#                 totals.n_patches_filtered_out += 1
+
+#             # periodic logs
+#             if patch_i % 25 == 0:
+#                 logger.info(
+#                     f"[patch] {fp.name} patch_i={patch_i} n={len(idx)} "
+#                     f"occ_vox={a_stats.get('occ_vox', -1):.0f} "
+#                     f"ppv_mean={a_stats.get('pts_per_vox_mean', -1):.2f} "
+#                     f"ppv_med={a_stats.get('pts_per_vox_med', -1):.2f} "
+#                     f"z_span_m={a_stats.get('z_span_m', -1):.2f} "
+#                     f"filtered_kept={totals.n_patches_filtered} filtered_out={totals.n_patches_filtered_out}"
+#                 )
+#                 if device.type == "cuda":
+#                     logger.info(
+#                         f"[cuda] alloc={torch.cuda.memory_allocated()/1e9:.3f}GB "
+#                         f"reserved={torch.cuda.memory_reserved()/1e9:.3f}GB"
+#                     )
+
+#             if device.type == "cuda":
+#                 reserved = torch.cuda.memory_reserved()
+#                 total = torch.cuda.get_device_properties(0).total_memory
+#                 if reserved > 0.90 * total:
+#                     torch.cuda.empty_cache()
+
+#         # file-level cleanup helps long sweeps
+#         if device.type == "cuda":
+#             torch.cuda.empty_cache()
+#         gc.collect()
+
+#     tp = np.diag(totals.cm_full).astype(np.int64)
+#     fp = totals.cm_full.sum(axis=0).astype(np.int64) - tp
+#     fn = totals.cm_full.sum(axis=1).astype(np.int64) - tp
+
+#     per_class = []
+#     for i, name in enumerate(common_class_names):
+#         if i == 0:
+#             continue
+#         precision = float(tp[i] / max(1, tp[i] + fp[i]))
+#         recall = float(tp[i] / max(1, tp[i] + fn[i]))
+#         per_class.append(
+#             {
+#                 "class_id": i,
+#                 "name": name,
+#                 "tp": int(tp[i]),
+#                 "fp": int(fp[i]),
+#                 "fn": int(fn[i]),
+#                 "precision": precision,
+#                 "recall": recall,
+#                 "gt_count": int(totals.gt_hist_full[i]),
+#                 "pred_count": int(totals.pred_hist_full[i]),
+#             }
+#         )
+
+#     # ---- common-space metrics (unchanged) ----
+#     miou_full, iou_full = iou_from_confusion(totals.cm_full, ignore_index=0)
+#     miou_filt, iou_filt = iou_from_confusion(totals.cm_filtered, ignore_index=0)
+
+#     # ---- train-space metrics ----
+#     miou_train_all, iou_train_all = iou_from_confusion(cm_train, ignore_index=None)
+#     miou_train_no0, iou_train_no0 = iou_from_confusion(cm_train, ignore_index=0)  # optional
+
+#     runtime = time.time() - t0
+
+#     # aggregate alignment stats
+#     align_avg = {}
+#     if totals.align_stats_n > 0:
+#         for k, v in totals.align_stats_sum.items():
+#             align_avg[k] = float(v / totals.align_stats_n)
+
+#     return {
+#         "spec": dataclasses.asdict(spec),
+#         "runtime_s": runtime,
+#         "full": {
+#             "miou": miou_full,
+#             "iou_per_class": iou_full,
+#             "n_points": totals.n_points_full,
+#             "n_patches": totals.n_patches_full,
+#         },
+#         "filtered": {
+#             "miou": miou_filt,
+#             "iou_per_class": iou_filt,
+#             "n_points": totals.n_points_filtered,
+#             "n_patches_kept": totals.n_patches_filtered,
+#             "n_patches_dropped": totals.n_patches_filtered_out,
+#             "filter_mode": spec.patch_filter_mode,
+#         },
+#         "align_avg": align_avg,
+#         "hist_full": {
+#             "gt": totals.gt_hist_full.tolist(),
+#             "pred": totals.pred_hist_full.tolist(),
+#         },
+#         "per_class_pr": per_class,
+#         "hist_train": {
+#             "gt_train": gt_hist_train.tolist(),
+#             "pred_train": pred_hist_train.tolist(),
+#             "train_id_to_common": pred_to_common.tolist(),
+#             "train_to_common_counts": np.bincount(pred_to_common.astype(np.int64), minlength=C).tolist(),
+#         },
+#         "train": {
+#             "miou_all": miou_train_all,
+#             "iou_per_class_all": iou_train_all,
+#             "miou_ignore0": miou_train_no0,
+#             "iou_per_class_ignore0": iou_train_no0,
+#             "cm_train": cm_train.tolist(),
+#         },
+#     }
+
+
 def evaluate_run(
     *,
     model: torch.nn.Module,
@@ -980,14 +2024,41 @@ def evaluate_run(
     patch_size_m: float,
     patch_stride_m: float,
     amp: bool,
+    map_dales_native_to_train: Optional[np.ndarray] = None,
+    train_ignore_index: int = -100,
+    train_max_voxels: Optional[int] = None,
+    train_class_aware_max_voxels: bool = False,
+    rare_class_ids: Tuple[int, ...] = (2, 3, 5, 6, 7),
 ) -> Dict:
+    logger.info(f"[sanity] model.training={model.training}")
+
+    # ---- critical: eval mode (BN/Dropout) ----
+    if model.training:
+        logger.info("[eval] model was in TRAIN mode; switching to EVAL mode")
+    model.eval()
+
     C = len(common_class_names)
-    totals = empty_totals(C)
+
+    # out_channels / train-space classes
+    T = int(pred_to_common.shape[0])
+    if T <= 0:
+        raise RuntimeError(f"Invalid T={T} from pred_to_common.shape={pred_to_common.shape}")
+
+    totals = empty_totals(C, T)
+
+    do_train_space = map_dales_native_to_train is not None
+    if do_train_space and map_dales_native_to_train.shape[0] < 256:
+        raise RuntimeError(f"map_dales_native_to_train must be size 256, got {map_dales_native_to_train.shape}")
+
+    if not do_train_space:
+        logger.warning("[train] Train-space eval DISABLED (no target native->train LUT provided).")
 
     t0 = time.time()
     logger.info(f"[run] spec={dataclasses.asdict(spec)}")
     logger.info(f"[data] n_files={len(dales_files)} patch={patch_size_m} stride={patch_stride_m}")
+    logger.info(f"[train] T={T} train_ignore_index={train_ignore_index} cm_train_dtype={totals.cm_train.dtype}")
 
+    # dales_files = dales_files[:1]  # limit to first 10 files for debugging
     for fi, fp in enumerate(dales_files, 1):
         raw = read_dales_las(fp)
         xyz = raw["xyz"]
@@ -995,7 +2066,7 @@ def evaluate_run(
         nor = raw["number_of_returns"]
         gt_native = raw["cls"]
 
-        # map DALES native -> common (clamp)
+        # DALES native -> common (for common-space eval)
         gt_native_clip = np.clip(gt_native, 0, 255)
         gt_common = map_dales_to_common[gt_native_clip]
 
@@ -1004,11 +2075,19 @@ def evaluate_run(
         patch_i = 0
         for idx in iter_xy_patches_indices(xyz, patch_size_m, patch_stride_m):
             patch_i += 1
+            if fi == 3 and patch_i == 1:
+                logger.info(f"[sanity] gt_native unique (first 20): {np.unique(gt_native)[:20]}")
+                logger.info(f"[sanity] rn unique (first 20): {np.unique(rn)[:20]}")
+                logger.info(f"[sanity] nor unique (first 20): {np.unique(nor)[:20]}")
+                logger.info(
+                    f"[sanity] rn min/max: {int(rn.min())}/{int(rn.max())}  nor min/max: {int(nor.min())}/{int(nor.max())}"
+                )
 
             xyz_p = xyz[idx]
             rn_p = rn[idx]
             nor_p = nor[idx]
             gt_p = gt_common[idx]
+            gt_native_patch = gt_native[idx].astype(np.int64, copy=False)
 
             # local coords and normalized coords (for filter decisions)
             xyz_local = xyz_p - xyz_p.min(axis=0, keepdims=True)
@@ -1016,41 +2095,86 @@ def evaluate_run(
             xyz_norm_for_filter = np.ascontiguousarray(xyz_norm_for_filter, dtype=np.float32)
             xyz_norm_for_filter[:, 2] *= float(spec.z_scale)
 
-            # FULL scope always
-            pred_train, a_stats = infer_with_tta(
+            # --------------------------
+            # Inference (train-id per ORIGINAL point)
+            # --------------------------
+            pred_train, a_stats = infer_with_tta_adaptive(
                 model=model,
-                xyz_local=xyz_p,
+                xyz_patch=xyz_p,
                 rn=rn_p,
                 nor=nor_p,
                 spec=spec,
                 device=device,
                 logger=logger,
                 amp=amp,
+                max_depth=2,
             )
+            pred_train = pred_train.astype(np.int64, copy=False)
+
+            pmin = int(pred_train.min()) if pred_train.size else 0
+            pmax = int(pred_train.max()) if pred_train.size else -1
+            if pred_train.size and (pmax >= T or pmin < 0):
+                raise RuntimeError(f"pred_train out of range: min={pmin} max={pmax} T={T}")
+
             add_align_stats(totals, a_stats)
 
-            pred_train = pred_train.astype(np.int64, copy=False)
-            if int(pred_train.max()) >= pred_to_common.shape[0]:
-                raise RuntimeError(
-                    f"pred_to_common too small: pred_max={int(pred_train.max())} " f"but lut_size={pred_to_common.shape[0]}"
-                )
-            pred_common = pred_to_common[pred_train]
+            # --------------------------
+            # Train-space GT (native -> train via LUT)
+            # --------------------------
+            gt_train = None
+            if do_train_space:
+                # --------------------------
+                # Train-space GT (native -> train via LUT)
+                # --------------------------
+                gt_train = map_dales_native_to_train[np.clip(gt_native_patch, 0, 255)]
 
-            cm = confusion_from_labels(gt_p, pred_common, C, ignore_index=0)
-            totals.cm_full += cm
-            totals.n_points_full += int(gt_p.shape[0])
+                m = gt_train != train_ignore_index
+                if np.any(m):
+                    totals.gt_hist_train += np.bincount(gt_train[m], minlength=T)
+                    totals.pred_hist_train += np.bincount(pred_train[m], minlength=T)
+
+                cm_tr = confusion_from_labels(
+                    gt_train,
+                    pred_train,
+                    num_classes=T,
+                    ignore_index=train_ignore_index,
+                )
+                totals.cm_train += cm_tr
+
+            # --------------------------
+            # Common-space eval (unchanged)
+            # --------------------------
+
+            pred_common = pred_to_common[pred_train]
+            # One-time sanity for mapping correctness (first file, first patch)
+            if fi == 1 and patch_i == 1:
+                frac_ign = float(np.mean(gt_train == train_ignore_index)) if gt_train.size else 0.0
+                logger.info(f"[sanity] T(train classes)={T} C(common)={C}")
+                logger.info(f"[sanity] gt_train: frac_ignore={frac_ign:.4f} unique={np.unique(gt_train)[:20]}")
+                logger.info(f"[sanity] pred_train unique={np.unique(pred_train)[:20]}")
+                logger.info(f"[sanity] gt_common unique={np.unique(gt_p)[:20]}")
+                logger.info(f"[sanity] pred_common unique={np.unique(pred_common)[:20]}")
+                # If pred_to_common is wrong, this often becomes almost constant (e.g., all vehicle)
+                pc = np.bincount(pred_common.astype(np.int64), minlength=C)
+                logger.info(f"[sanity] pred_common hist={pc.tolist()}")
+
+            valid_common = gt_p != 0  # common ignore=0
+            totals.gt_hist_full += np.bincount(gt_p[valid_common].astype(np.int64), minlength=C)
+            totals.pred_hist_full += np.bincount(pred_common[valid_common].astype(np.int64), minlength=C)
+
+            cm_full = confusion_from_labels(gt_p, pred_common, C, ignore_index=0)
+            totals.cm_full += cm_full
+            totals.n_points_full += int(np.sum(gt_p != 0))
             totals.n_patches_full += 1
 
-            # FILTERED scope (analysis only; does not bias "full" deltas)
             keep_patch = meets_patch_filter(xyz_norm_for_filter, spec)
             if keep_patch:
-                totals.cm_filtered += cm
-                totals.n_points_filtered += int(gt_p.shape[0])
+                totals.cm_filtered += cm_full
+                totals.n_points_filtered += int(np.sum(gt_p != 0))
                 totals.n_patches_filtered += 1
             else:
                 totals.n_patches_filtered_out += 1
 
-            # periodic logs
             if patch_i % 25 == 0:
                 logger.info(
                     f"[patch] {fp.name} patch_i={patch_i} n={len(idx)} "
@@ -1060,18 +2184,28 @@ def evaluate_run(
                     f"z_span_m={a_stats.get('z_span_m', -1):.2f} "
                     f"filtered_kept={totals.n_patches_filtered} filtered_out={totals.n_patches_filtered_out}"
                 )
-                if device.type == "cuda":
-                    logger.info(
-                        f"[cuda] alloc={torch.cuda.memory_allocated()/1e9:.3f}GB "
-                        f"reserved={torch.cuda.memory_reserved()/1e9:.3f}GB"
-                    )
-        # file-level cleanup helps long sweeps
+
+            if device.type == "cuda":
+                reserved = torch.cuda.memory_reserved()
+                total = torch.cuda.get_device_properties(0).total_memory
+                if reserved > 0.90 * total:
+                    torch.cuda.empty_cache()
+
         if device.type == "cuda":
             torch.cuda.empty_cache()
         gc.collect()
 
+    # ---- common-space metrics ----
     miou_full, iou_full = iou_from_confusion(totals.cm_full, ignore_index=0)
     miou_filt, iou_filt = iou_from_confusion(totals.cm_filtered, ignore_index=0)
+
+    miou_train_all = None
+    iou_train_all = None
+    miou_train_no0 = None
+    iou_train_no0 = None
+    if do_train_space:
+        miou_train_all, iou_train_all = iou_from_confusion(totals.cm_train, ignore_index=None)
+        miou_train_no0, iou_train_no0 = iou_from_confusion(totals.cm_train, ignore_index=0)  # optional
 
     runtime = time.time() - t0
 
@@ -1080,6 +2214,31 @@ def evaluate_run(
     if totals.align_stats_n > 0:
         for k, v in totals.align_stats_sum.items():
             align_avg[k] = float(v / totals.align_stats_n)
+
+    # per-class precision/recall in common space (unchanged)
+    tp = np.diag(totals.cm_full).astype(np.int64)
+    fp = totals.cm_full.sum(axis=0).astype(np.int64) - tp
+    fn = totals.cm_full.sum(axis=1).astype(np.int64) - tp
+
+    per_class = []
+    for i, name in enumerate(common_class_names):
+        if i == 0:
+            continue
+        precision = float(tp[i] / max(1, tp[i] + fp[i]))
+        recall = float(tp[i] / max(1, tp[i] + fn[i]))
+        per_class.append(
+            {
+                "class_id": i,
+                "name": name,
+                "tp": int(tp[i]),
+                "fp": int(fp[i]),
+                "fn": int(fn[i]),
+                "precision": precision,
+                "recall": recall,
+                "gt_count": int(totals.gt_hist_full[i]),
+                "pred_count": int(totals.pred_hist_full[i]),
+            }
+        )
 
     return {
         "spec": dataclasses.asdict(spec),
@@ -1099,12 +2258,36 @@ def evaluate_run(
             "filter_mode": spec.patch_filter_mode,
         },
         "align_avg": align_avg,
+        "hist_full": {
+            "gt": totals.gt_hist_full.tolist(),
+            "pred": totals.pred_hist_full.tolist(),
+        },
+        "per_class_pr": per_class,
+        "hist_train": {
+            "gt_train": totals.gt_hist_train.tolist(),
+            "pred_train": totals.pred_hist_train.tolist(),
+            "train_id_to_common": pred_to_common.tolist(),
+            "train_to_common_counts": np.bincount(pred_to_common.astype(np.int64), minlength=C).tolist(),
+        },
+        "train": (
+            {
+                "miou_all": miou_train_all,
+                "iou_per_class_all": iou_train_all,
+                "miou_ignore0": miou_train_no0,
+                "iou_per_class_ignore0": iou_train_no0,
+                "cm_train": totals.cm_train.tolist(),
+            }
+            if do_train_space
+            else None
+        ),
     }
 
 
 # -------------------------
 # Run plan generation (staged + limited combos)
 # -------------------------
+
+
 def make_run_plan(base: PreprocSpec, mode: str, max_runs: int) -> List[PreprocSpec]:
     runs: List[PreprocSpec] = [base]
 
@@ -1628,6 +2811,79 @@ def fit_lut_to_out_channels(pred_to_common: np.ndarray, out_channels: int, *, lo
     return pred_to_common[:out_channels].astype(np.int64, copy=False)
 
 
+def _to_plain_dict_cfg(x: Any) -> Optional[dict]:
+    """Make ckpt['cfg'] usable regardless of it being dict / OmegaConf / something else."""
+    if isinstance(x, dict):
+        return x
+    # OmegaConf support if available, but don't require it.
+    try:
+        from omegaconf import OmegaConf  # type: ignore
+
+        if OmegaConf.is_config(x):
+            y = OmegaConf.to_container(x, resolve=True)
+            return y if isinstance(y, dict) else None
+    except Exception:
+        pass
+    return None
+
+
+def _contract_digest(cfg: dict) -> dict:
+    """Fields that MUST match between training ckpt cfg and eval YAML config."""
+    out = {}
+
+    model = cfg.get("model", {}) if isinstance(cfg.get("model", {}), dict) else {}
+    data = cfg.get("data", {}) if isinstance(cfg.get("data", {}), dict) else {}
+    feat = data.get("features", {}) if isinstance(data.get("features", {}), dict) else {}
+    ls = data.get("label_space", {}) if isinstance(data.get("label_space", {}), dict) else {}
+
+    out["data.dataset"] = str(data.get("dataset", ""))
+    out["model.D"] = int(model.get("D", 3))
+    out["model.out_channels"] = int(model.get("out_channels", -1))
+
+    # feature semantics (these define channel meaning)
+    out["features.use_intensity"] = bool(feat.get("use_intensity", False))
+    out["features.returns_onehot_k"] = int(feat.get("returns_onehot_k", -1))
+    out["features.use_rgb"] = bool(feat.get("use_rgb", False))
+    out["features.include_coords"] = bool(feat.get("include_coords", False))
+
+    # label-space semantics (these define class ordering)
+    out["label_space.num_classes"] = int(ls.get("num_classes", -1))
+    out["label_space.ignore_index"] = int(ls.get("ignore_index", -100))
+    out["label_space.class_names"] = ls.get("class_names", None)
+
+    return out
+
+
+def assert_yaml_matches_ckpt_cfg(*, yaml_cfg: dict, ckpt_path: str, logger: logging.Logger) -> dict:
+    """
+    Raises immediately if the YAML config doesn't match ckpt['cfg'] on critical fields.
+    Returns ckpt_cfg as a plain dict for further logging.
+    """
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    ckpt_cfg_raw = ckpt.get("cfg", None)
+    ckpt_cfg = _to_plain_dict_cfg(ckpt_cfg_raw)
+    if ckpt_cfg is None:
+        raise RuntimeError(
+            "Checkpoint has no usable 'cfg' dict (or OmegaConf) -> cannot validate config/label-space. "
+            f"ckpt keys={list(ckpt.keys())}"
+        )
+
+    a = _contract_digest(yaml_cfg)
+    b = _contract_digest(ckpt_cfg)
+
+    mism = {k: {"yaml": a.get(k), "ckpt": b.get(k)} for k in a.keys() if a.get(k) != b.get(k)}
+    if mism:
+        logger.error("[FATAL] YAML config does not match checkpoint training cfg on required contract fields:")
+        logger.error(json.dumps(mism, indent=2, default=str))
+        raise RuntimeError(
+            "Wrong --config for this --ckpt (or ckpt was trained with different label/features). "
+            "Fix: pass the exact training YAML for this checkpoint."
+        )
+
+    logger.info("[ok] YAML config matches ckpt['cfg'] contract (dataset/model/features/label_space).")
+    return ckpt_cfg
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -1641,6 +2897,14 @@ def main():
         "--mapping_pred_to_common",
         default=None,
         help="Optional: model output id -> common id YAML. " "Use if auto-derivation fails.",
+    )
+    ap.add_argument(
+        "--mapping_native_to_train",
+        default=None,
+        help=(
+            "Optional YAML: target native label -> model train id (size up to 256). "
+            "If omitted, will try to read from checkpoint cfg (e.g., cfg.data.dales_label_map_native_to_train)."
+        ),
     )
     ap.add_argument("--out_dir", required=True)
 
@@ -1685,7 +2949,7 @@ def main():
     ap.add_argument(
         "--plan",
         default="returns_only",
-        choices=["returns_only"],
+        choices=["returns_only", "voxel_ablation"],
         help="Run plan. For this script, only 'returns_only' (fixed decisive plan) is supported.",
     )
     ap.add_argument(
@@ -1699,6 +2963,16 @@ def main():
         required=True,
         help=("Folder with TARGET dataset .las/.laz. " "Use DALES path for ECLAIR→DALES, and ECLAIR path for DALES→ECLAIR."),
     )
+    ap.add_argument(
+        "--voxel_ablation_values",
+        default="0.02,0.03,0.04",
+        help=(
+            "CSV list of EXTRA voxel_size values (in normalized space) to evaluate in addition to "
+            "the baseline --voxel_size. Only used when --plan voxel_ablation. "
+            "Default gives 4 total runs when baseline is 0.05."
+        ),
+    )
+    ap.add_argument("--diag_ckpt", action="store_true", help="Run ckpt-vs-evalspec diagnostic and exit.")
 
     args = ap.parse_args()
     if abs(float(args.patch_stride_m) - float(args.patch_size_m)) > 1e-6:
@@ -1710,6 +2984,16 @@ def main():
     out_root = Path(args.out_dir)
     out_root.mkdir(parents=True, exist_ok=True)
     master = setup_logger(out_root, "preproc_sweep.master", level=logging.INFO)
+    # HARD FAIL-FAST: wrong YAML passed to eval
+    yaml_cfg = load_yaml(args.config)
+    ckpt_cfg = assert_yaml_matches_ckpt_cfg(yaml_cfg=yaml_cfg, ckpt_path=args.ckpt, logger=master)
+
+    # Optional: log the exact train-time class order (this catches "wrong label space" instantly)
+    try:
+        ls = ckpt_cfg.get("data", {}).get("label_space", {})
+        master.info(f"[ckpt] train class_names={ls.get('class_names')}")
+    except Exception:
+        pass
 
     set_all_seeds(args.seed)
     device = torch.device(args.device if (args.device == "cpu" or torch.cuda.is_available()) else "cpu")
@@ -1723,6 +3007,7 @@ def main():
     eclair_native_to_common_lut = load_yaml_lut_fixed(args.mapping_eclair_native_to_common, size=256, default=0)
 
     # derive pred_to_common
+    # (IMPORTANT: pred_to_common must be based on *checkpoint source domain*, not target.)
     # model + amp + out_channels (from config)
     model, amp, in_channels, out_channels = load_model_from_config(
         config_path=args.config,
@@ -1737,31 +3022,64 @@ def main():
             f"Check config.model.in_channels and --returns_k."
         )
 
+    # ---- Always load the model's native->train LUT from checkpoint (source-domain LUT) ----
+    lut_model_native_to_train, train_ignore_index, train_max_voxels, train_class_aware_max_voxels, rare_class_ids = (
+        load_native_to_train_from_ckpt(args.ckpt, master)
+    )
+
+    src_domain = "unknown"
     # pred_to_common
     if args.mapping_pred_to_common is not None:
         pred_to_common = load_yaml_lut_fixed(args.mapping_pred_to_common, size=out_channels, default=0)
         master.info(f"[map] Using provided mapping_pred_to_common: {args.mapping_pred_to_common}")
     else:
-        pred_to_common = None
-        if args.try_import_label_maps:
-            pred_to_common = derive_pred_to_common_map(
-                eclair_native_to_common_lut,
-                try_import=True,
-                undefined_id=int(args.eclair_undefined_id),
-                ignore_index=int(args.eclair_ignore_index),
+        # Auto-detect checkpoint source domain and derive pred_to_common from checkpoint LUT.
+        src_domain = infer_ckpt_domain(args.ckpt, out_channels=out_channels, logger=master)
+        if src_domain == "dales":
+            # DALES-trained model: source native->common MUST be DALES mapping
+            pred_to_common = build_pred_to_common_from_ckpt_lut(
+                native_to_train_lut=lut_model_native_to_train,
+                native_to_common_lut=map_dales,
+                out_channels=out_channels,
+                train_ignore_index=int(train_ignore_index),
                 logger=master,
             )
-            if pred_to_common is not None:
-                pred_to_common = fit_lut_to_out_channels(pred_to_common, out_channels, logger=master)
-                master.info(f"[map] Derived pred_to_common via imported label maps (out_channels={out_channels})")
-
-        if pred_to_common is None:
-            pred_to_common = build_pred_to_common_from_eclair_map(
-                eclair_native_to_common=eclair_native_to_common_dict,
+            master.info("[map] pred_to_common derived from CKPT LUT + DALES native->common")
+        elif src_domain == "eclair":
+            # ECLAIR-trained model: source native->common MUST be ECLAIR mapping
+            pred_to_common = build_pred_to_common_from_ckpt_lut(
+                native_to_train_lut=lut_model_native_to_train,
+                native_to_common_lut=eclair_native_to_common_lut,
                 out_channels=out_channels,
+                train_ignore_index=int(train_ignore_index),
+                logger=master,
             )
-            pred_to_common = fit_lut_to_out_channels(pred_to_common, out_channels, logger=master)
-            master.info(f"[map] Fallback pred_to_common using native_id=train_id+1 (out_channels={out_channels})")
+            master.info("[map] pred_to_common derived from CKPT LUT + ECLAIR native->common")
+        else:
+            # Last-resort: keep your previous behavior (but loudly warn)
+            master.warning(
+                "[map] Could not infer checkpoint domain; falling back to legacy ECLAIR derivation paths. "
+                "If this is a DALES checkpoint, you MUST provide --mapping_pred_to_common or fix ckpt cfg keys."
+            )
+            pred_to_common = None
+            if args.try_import_label_maps:
+                pred_to_common = derive_pred_to_common_map(
+                    eclair_native_to_common_lut,
+                    try_import=True,
+                    undefined_id=int(args.eclair_undefined_id),
+                    ignore_index=int(args.eclair_ignore_index),
+                    logger=master,
+                )
+                if pred_to_common is not None:
+                    pred_to_common = fit_lut_to_out_channels(pred_to_common, out_channels, logger=master)
+                    master.info(f"[map] Derived pred_to_common via imported label maps (out_channels={out_channels})")
+            if pred_to_common is None:
+                pred_to_common = build_pred_to_common_from_eclair_map(
+                    eclair_native_to_common=eclair_native_to_common_dict,
+                    out_channels=out_channels,
+                )
+                pred_to_common = fit_lut_to_out_channels(pred_to_common, out_channels, logger=master)
+                master.info(f"[map] Fallback pred_to_common using native_id=train_id+1 (out_channels={out_channels})")
 
     if pred_to_common is None:
         raise RuntimeError(
@@ -1800,6 +3118,40 @@ def main():
     if not files:
         raise RuntimeError(f"No LAS/LAZ files found under {droot}")
 
+    def _infer_target_domain(droot: Path, map_native_to_common_path: str) -> str:
+        s = (str(droot) + " " + str(map_native_to_common_path)).lower()
+        if "eclair" in s:
+            return "eclair"
+        if "dales" in s:
+            return "dales"
+        return "unknown"
+
+    target_domain = _infer_target_domain(droot, args.mapping_dales_native_to_common)
+    master.info(f"[data] inferred_target_domain={target_domain}")
+
+    # ---- target native -> train LUT (ONLY needed for train-space metrics / class-aware voxel cap) ----
+    if args.mapping_native_to_train is not None:
+        lut_train = load_yaml_lut_fixed(
+            args.mapping_native_to_train,
+            size=256,
+            default=int(train_ignore_index),
+        )
+        master.info(f"[trainmap] Using provided --mapping_native_to_train: {args.mapping_native_to_train}")
+
+    elif target_domain != "unknown" and src_domain != "unknown" and target_domain != src_domain:
+        # Cross-domain: checkpoint LUT is NOT the target dataset LUT.
+        lut_train = None
+        master.warning(
+            f"[trainmap] target_domain({target_domain}) != ckpt_domain({src_domain}). "
+            "Train-space metrics will be SKIPPED. "
+            "Pass --mapping_native_to_train if you explicitly want train-space eval / class-aware voxel cap."
+        )
+
+    else:
+        # Same-domain (or unknown): using ckpt LUT is acceptable
+        lut_train = lut_model_native_to_train
+        master.info("[trainmap] Using CKPT native->train LUT for GT mapping (same-domain/unknown)")
+
     # baseline spec (MATCH TRAINING)
     base = PreprocSpec(
         coord_norm_factor=float(args.coord_norm_factor),
@@ -1816,6 +3168,25 @@ def main():
         min_occ_vox=1000,
     )
 
+    if args.diag_ckpt:
+        # Use a single logger (master) and run the one-shot diagnostic then exit.
+        diagnose_ckpt_vs_evalspec(
+            ckpt_path=args.ckpt,
+            base_spec=base,
+            model=model,
+            amp=amp,
+            dales_files=files,
+            map_dales_to_common=map_dales,
+            pred_to_common=pred_to_common,
+            common_class_names=common_class_names,
+            device=device,
+            logger=master,
+            patch_size_m=args.patch_size_m,
+            patch_stride_m=args.patch_stride_m,
+            out_dir=args.out_dir,
+        )
+        return
+
     # -----------------------------
     # Resume mode: run only pending run_ids, but keep the ORIGINAL plan ordering/indices
     # -----------------------------
@@ -1825,11 +3196,43 @@ def main():
         pending_dicts = json.loads(pending_path.read_text())
         master.info(f"[plan] RESUME pending-only from {pending_path} n_specs={len(pending_dicts)}")
 
-    plan = make_decisive_returns_plan_returns_only(base)
-    master.info(f"[plan] returns-only decisive plan n_runs={len(plan)} device={device.type}")
-    master.info(f"[paths] dales_root={droot} ckpt={args.ckpt}")
-    master.info(f"[baseline] coord_norm_factor={base.coord_norm_factor} voxel_size={base.voxel_size} returns_k={base.returns_k}")
+    # plan = make_decisive_returns_plan_returns_only(base)
+    # master.info(f"[plan] returns-only decisive plan n_runs={len(plan)} device={device.type}")
+    # master.info(f"[paths] dales_root={droot} ckpt={args.ckpt}")
+    if args.plan == "voxel_ablation":
+        # Phase-1: ONLY voxel_size ablation, keep everything else fixed.
+        extras = _parse_csv_floats(str(args.voxel_ablation_values))
 
+        # Build plan: baseline first, then extras (dedup, preserve order)
+        plan = []
+        seen = set()
+        for v in [float(base.voxel_size)] + [float(x) for x in extras]:
+            vv = round(float(v), 8)
+            if vv in seen:
+                continue
+            seen.add(vv)
+            if abs(float(v) - float(base.voxel_size)) < 1e-12:
+                plan.append(base)
+            else:
+                plan.append(dataclasses.replace(base, voxel_size=float(v)))
+
+        master.info(f"[plan] voxel_ablation n_runs={len(plan)} device={device.type}")
+        master.info(f"[plan] baseline voxel_size={base.voxel_size} + extras={extras}")
+        if len(plan) != 4:
+            master.warning(
+                f"[plan] Expected 4 runs for Phase-1, but got {len(plan)}. "
+                f"Baseline={base.voxel_size}, extras={extras}. "
+                f"Tip: set --voxel_ablation_values to exactly 3 unique values."
+            )
+    else:
+        plan = make_decisive_returns_plan_returns_only(base)
+        master.info(f"[plan] returns-only decisive plan n_runs={len(plan)} device={device.type}")
+
+    master.info(f"[paths] dales_root={droot} ckpt={args.ckpt}")
+    master.info(
+        f"[baseline] coord_norm_factor={base.coord_norm_factor} voxel_size={base.voxel_size} "
+        f"returns_k={base.returns_k} tta_mode={base.tta_mode} voxel_feat_mode={base.voxel_feat_mode}"
+    )
     pending_set = None
     if pending_dicts is not None:
         # Build plan index: canonical spec -> run_id
@@ -1887,6 +3290,13 @@ def main():
         (run_dir / "spec.json").write_text(json.dumps(dataclasses.asdict(spec), indent=2))
 
         try:
+            # Deterministic per-spec: prevents RNG consumption leaking across runs
+            spec_seed = (int(args.seed) ^ int(run_id[:8], 16)) & 0xFFFFFFFF
+            set_all_seeds(spec_seed)
+
+            model.eval()
+            torch.set_grad_enabled(False)
+
             res = evaluate_run(
                 model=model,
                 dales_files=files,
@@ -1899,6 +3309,11 @@ def main():
                 patch_size_m=args.patch_size_m,
                 patch_stride_m=args.patch_stride_m,
                 amp=amp,
+                map_dales_native_to_train=lut_train,
+                train_ignore_index=int(train_ignore_index),
+                train_max_voxels=train_max_voxels,
+                train_class_aware_max_voxels=train_class_aware_max_voxels,
+                rare_class_ids=tuple(rare_class_ids),
             )
             (run_dir / "metrics.json").write_text(json.dumps(res, indent=2))
             results[run_id] = {"failed": False, **res}
@@ -2031,3 +3446,112 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# import laspy
+
+
+# def read_las_arrays_robust(path: Path) -> dict[str, np.ndarray]:
+#     """
+#     Reads LAS/LAZ files using robust property-access to avoid bit-packing bugs.
+#     Standardizes output keys to: xyz, intensity, return_number, number_of_returns, rgb, native_labels.
+#     """
+#     try:
+#         las = laspy.read(str(path))
+#     except Exception as e:
+#         raise RuntimeError(f"Failed to read LAS file {path}: {e}")
+
+#     # Standardize XYZ to float32
+#     xyz = np.array(las.xyz, dtype=np.float64)
+
+#     def _get_dim(attr_name: str, fallback_names: list[str] = None) -> np.ndarray:
+#         # Priority 1: Direct property access (handles bit-unpacking/scaling)
+#         if hasattr(las, attr_name):
+#             val = getattr(las, attr_name)
+#             return np.array(val)
+
+#         # Priority 2: Dictionary access (fallback for non-standard names)
+#         # Check standard dimension names case-insensitively
+#         dims_lower = set(d.lower() for d in las.point_format.dimension_names)
+
+#         if attr_name.lower() in dims_lower:
+#             return np.array(las[attr_name])
+
+#         if fallback_names:
+#             for name in fallback_names:
+#                 if name.lower() in dims_lower:
+#                     return np.array(las[name])
+#         return None
+
+#     # Intensity
+#     intensity = _get_dim("intensity")
+#     if intensity is None:
+#         intensity = np.zeros((xyz.shape[0],), dtype=np.float32)
+#     else:
+#         intensity = intensity.astype(np.float32)
+
+#     # Returns (CRITICAL FIX: Use property access)
+#     rn = _get_dim("return_number")
+#     nor = _get_dim("number_of_returns")
+
+#     if rn is None:
+#         rn = np.ones((xyz.shape[0],), dtype=np.int64)
+#     else:
+#         rn = rn.astype(np.int64)
+
+#     if nor is None:
+#         nor = np.ones((xyz.shape[0],), dtype=np.int64)
+#     else:
+#         nor = nor.astype(np.int64)
+
+#     # Labels
+#     labels = _get_dim("classification", fallback_names=["raw_classification"])
+#     if labels is None:
+#         # Fallback for datasets that might be unlabeled
+#         # print(f" [WARN] No classification found in {path.name}, using zeros.") # Optional logging
+#         labels = np.zeros((xyz.shape[0],), dtype=np.int64)
+#     else:
+#         labels = labels.astype(np.int64)
+
+#     # RGB
+#     rgb = None
+#     red = _get_dim("red")
+#     green = _get_dim("green")
+#     blue = _get_dim("blue")
+
+#     if red is not None and green is not None and blue is not None:
+#         max_val = max(red.max(), green.max(), blue.max())
+#         scale = 1.0
+#         if max_val > 255:
+#             scale = 1.0 / 65535.0
+#         r = red.astype(np.float32) * scale
+#         g = green.astype(np.float32) * scale
+#         b = blue.astype(np.float32) * scale
+#         rgb = np.stack([r, g, b], axis=1)
+
+#     return {
+#         "xyz": xyz,
+#         "intensity": intensity,
+#         "return_number": rn,
+#         "number_of_returns": nor,
+#         "rgb": rgb,
+#         "native_labels": labels,
+#     }
+
+
+# MAP_ECLAIR_COMMON = "/csehome/m23csa510/lidar_experiments/cross-sensor-3d-lidar-segmentation-and-dom-adpt/eclair_model_train/configs/mapping_dales_to_common.yaml"
+# ECLAIR_DIR = "/scratch/m23csa510/dales/dales/all"
+# lut = load_yaml_lut_fixed(MAP_ECLAIR_COMMON, size=256, default=0)
+# counts = np.zeros(8, dtype=np.int64)
+# files = sorted(list(Path(ECLAIR_DIR).rglob("*.las")) + list(Path(ECLAIR_DIR).rglob("*.laz")))
+
+# for fp in files:
+#     data = read_las_arrays_robust(fp)
+#     gt_native = data["native_labels"]
+#     gt_common = lut[np.clip(gt_native, 0, 255)]
+#     c = np.bincount(gt_common.astype(np.int64), minlength=8)
+#     counts[:8] += c[:8]
+
+# print("Counts per common id 0..7:", counts)
+# print("Vehicle fraction:", counts[7] / counts.sum())
+# print("Fence fraction:", counts[6] / counts.sum())

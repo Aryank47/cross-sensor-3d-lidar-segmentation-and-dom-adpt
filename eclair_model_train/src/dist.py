@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -35,9 +34,7 @@ def init_distributed(backend: str = "nccl") -> DistEnv:
         dist.init_process_group(backend=backend, init_method="env://")
 
     torch.cuda.set_device(local_rank)
-    return DistEnv(
-        enabled=True, rank=rank, world_size=world_size, local_rank=local_rank
-    )
+    return DistEnv(enabled=True, rank=rank, world_size=world_size, local_rank=local_rank)
 
 
 def is_main_process(env: DistEnv) -> bool:

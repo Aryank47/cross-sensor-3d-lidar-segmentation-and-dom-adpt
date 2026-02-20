@@ -5,9 +5,9 @@ import json
 import os
 import random
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import laspy
 import numpy as np
@@ -110,9 +110,7 @@ def read_las_arrays_robust(path: Path) -> Dict[str, np.ndarray]:
     # Standardize XYZ to float32
     xyz = np.array(las.xyz, dtype=np.float64)
 
-    def _get_dim(
-        attr_name: str, fallback_names: List[str] = None
-    ) -> Optional[np.ndarray]:
+    def _get_dim(attr_name: str, fallback_names: List[str] = None) -> Optional[np.ndarray]:
         # Priority 1: Direct property access (handles bit-unpacking/scaling)
         if hasattr(las, attr_name):
             val = getattr(las, attr_name)

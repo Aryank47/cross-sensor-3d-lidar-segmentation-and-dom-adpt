@@ -25,7 +25,7 @@ CONDA_ROOT="/csehome/m23csa510/lidar_experiments/env/miniconda3"
 ENV_NAME="e0_env"
 
 DALES_ROOT="/scratch/m23csa510/dales/dales"          # as you showed
-DALES_SPLIT="all"                              # change to: all | test | train
+DALES_SPLIT="test"                              # change to: all | test | train
 DALES_PATH="${DALES_ROOT}/${DALES_SPLIT}"
 
 ECLAIR_ROOT="/csehome/m23csa510/lidar_experiments/datasets/eclair"
@@ -141,25 +141,25 @@ export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:128,garbage_collection_thresho
 ########################################
 # 4) Sweep 1: ECLAIR → DALES (ECLAIR model on DALES)
 ########################################
-echo "=================================================="
-echo "[step] Sweep 1: ECLAIR → DALES (returns-only preproc)"
-echo "=================================================="
+# echo "=================================================="
+# echo "[step] Sweep 1: ECLAIR → DALES (returns-only preproc)"
+# echo "=================================================="
 
-srun --cpu-bind=cores python -m eclair_model_train.src.eval_dales_preproc_sweep_wo_intensity \
-  --config "${CONFIG_ECLAIR}" \
-  --ckpt "${CKPT}" \
-  --dales_root "${DALES_PATH}" \
-  --mapping_dales_native_to_common "${MAP_DALES_COMMON}" \
-  --mapping_eclair_native_to_common "${MAP_ECLAIR_COMMON}" \
-  --mapping_pred_to_common "${MAP_PRED_TOCOMMON_ECLAIR}" \
-  --out_dir "${OUT_E2D}"
+# srun --cpu-bind=cores python -m eclair_model_train.src.eval_dales_preproc_sweep_wo_intensity \
+#   --config "${CONFIG_ECLAIR}" \
+#   --ckpt "${CKPT}" \
+#   --dales_root "${DALES_PATH}" \
+#   --mapping_dales_native_to_common "${MAP_DALES_COMMON}" \
+#   --mapping_eclair_native_to_common "${MAP_ECLAIR_COMMON}" \
+#   --mapping_pred_to_common "${MAP_PRED_TOCOMMON_ECLAIR}" \
+#   --out_dir "${OUT_E2D}"
 
 ########################################
 # 5) Sweep 2: DALES → ECLAIR (DALES model on ECLAIR)
 ########################################
-echo "=================================================="
-echo "[step] Sweep 2: DALES → ECLAIR (returns-only preproc)"
-echo "=================================================="
+# echo "=================================================="
+# echo "[step] Sweep 2: DALES → ECLAIR (returns-only preproc)"
+# echo "=================================================="
 
 # NOTE:
 #  - Here we treat ECLAIR as the "target dataset" for the script,
@@ -169,24 +169,124 @@ echo "=================================================="
 #    of the target dataset.
 #  - We always pass mapping_pred_to_common, so the ECLAIR-specific
 #    fallback mapping logic in the script is never used.
+# srun --cpu-bind=cores python -m eclair_model_train.src.eval_dales_preproc_sweep_wo_intensity \
+#   --voxel_size 0.02 \
+#   --config "${CONFIG_DALES}" \
+#   --ckpt "${CKPT_DALES}" \
+#   --dales_root "${ECLAIR_DIR}" \
+#   --mapping_dales_native_to_common "${MAP_ECLAIR_COMMON}" \
+#   --mapping_eclair_native_to_common "${MAP_DALES_COMMON}" \
+#   --mapping_pred_to_common "${MAP_PRED_TOCOMMON_DALES}" \
+#   --out_dir "${OUT_D2E}"
+
+# echo "=================================================="
+# echo "[done] ECLAIR→DALES results in:  ${OUT_E2D}"
+# echo "[done] DALES→ECLAIR results in:  ${OUT_D2E}"
+# echo "=================================================="
+
+# python -m eclair_model_train.scripts.summarize_cross_sweeps \
+#   --e2d "${OUT_E2D}/results.json" \
+#   --d2e "${OUT_D2E}/results.json" \
+#   --out-json "${OUT_ROOT}/cross_summary.json"
+
+
+
+OUT_D2D="${OUT_ROOT}/dales_to_dales"
+mkdir -p "${OUT_D2D}"
+
+echo "=================================================="
+echo "[step] Sweep 3: DALES → DALES (sanity, instrumented)"
+echo "=================================================="
+
 srun --cpu-bind=cores python -m eclair_model_train.src.eval_dales_preproc_sweep_wo_intensity \
+  --diag_ckpt \
+  --coord_norm_factor 10.0 \
+  --voxel_size 0.02 \
   --config "${CONFIG_DALES}" \
   --ckpt "${CKPT_DALES}" \
-  --dales_root "${ECLAIR_DIR}" \
-  --mapping_dales_native_to_common "${MAP_ECLAIR_COMMON}" \
-  --mapping_eclair_native_to_common "${MAP_DALES_COMMON}" \
+  --dales_root "${DALES_PATH}" \
+  --mapping_dales_native_to_common "${MAP_DALES_COMMON}" \
+  --mapping_eclair_native_to_common "${MAP_ECLAIR_COMMON}" \
   --mapping_pred_to_common "${MAP_PRED_TOCOMMON_DALES}" \
-  --out_dir "${OUT_D2E}"
+  --out_dir "${OUT_D2D}"
 
-echo "=================================================="
-echo "[done] ECLAIR→DALES results in:  ${OUT_E2D}"
-echo "[done] DALES→ECLAIR results in:  ${OUT_D2E}"
-echo "=================================================="
+# srun --cpu-bind=cores python -m eclair_model_train.src.test_dales_train_time_eval
 
-python -m eclair_model_train.scripts.summarize_cross_sweeps \
-  --e2d "${OUT_E2D}/results.json" \
-  --d2e "${OUT_D2E}/results.json" \
-  --out-json "${OUT_ROOT}/cross_summary.json"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# python - <<'PY'
+# import hashlib, pathlib, sys
+# p = pathlib.Path("/scratch/m23csa510/e0_results/e0_dales_train_24930/checkpoints/best.pt")
+# h = hashlib.sha1(p.read_bytes()).hexdigest()
+# print("path:", p)
+# print("size:", p.stat().st_size)
+# print("sha1:", h)
+# PY
+
+
+
+# python - <<'PY'
+# import torch, sys
+# ckpt = torch.load("/scratch/m23csa510/e0_results/e0_dales_train_24930/checkpoints/best.pt", map_location="cpu")
+# print("keys:", ckpt.keys())
+# for k in ["class_names","label_space","cfg","config","meta"]:
+#     if k in ckpt:
+#         print(k, ckpt[k])
+# PY
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # # -----------------------------

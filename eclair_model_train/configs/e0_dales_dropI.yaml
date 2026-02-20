@@ -1,3 +1,4 @@
+#/eclair_model_train/configs/e0_dales_dropI.yaml
 epochs: 180
 
 run:
@@ -50,10 +51,17 @@ data:
   preproc:
     intensity_mode: none
     use_height_xy_cap: false
-    max_voxels: 220000
+    max_voxels: 250000
     # NEW: enable class-aware cap
     class_aware_max_voxels: true
     rare_class_ids: [2, 3, 5, 6, 7]
+
+  aug:
+    enabled: true
+    random_flip_xy: true
+    random_rotate_deg: [0.0, 0.0]
+    scale_range: [0.95, 1.05]
+    jitter_std: 0.01
 
   features:
     use_intensity: false
@@ -100,11 +108,11 @@ loss:
   # order matches label_space.class_names:
   #   ground, vegetation, cars, trucks, buildings, poles, power_lines, fences
   alpha:
-    - 0.53   # ground
-    - 0.53   # vegetation
-    - 1.07   # cars
-    - 1.60   # trucks
-    - 0.53   # buildings
-    - 1.60   # poles
-    - 1.07   # power_lines
-    - 1.07   # fences
+    - 0.53 # ground
+    - 0.53 # vegetation
+    - 1.07 # cars
+    - 1.60 # trucks
+    - 0.53 # buildings
+    - 1.60 # poles
+    - 1.07 # power_lines
+    - 1.07 # fences
