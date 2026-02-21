@@ -17,6 +17,23 @@
 
 epochs: 80
 
+eval:
+  mode: point # voxel | point
+  window:
+    size_xy_m: 50.0
+    stride_xy_m: 50.0 # start non-overlap; later try 25.0 for overlap
+    aggregation: mean_logits
+    accum_dtype: float32 # float16 saves RAM, float32 safest
+    compute_point_loss: true
+
+  bev:
+    enabled: false
+    every_epochs: 5 # run BEV eval/vis every N epochs
+    max_batches: 2 # keep cheap
+    save_npz: true
+    save_png: true
+    levels: null # null => use cfg.model.aux_heads.bev.levels
+
 run:
   name: e0_eclair_dropI
   out_dir: ./runs/e0_eclair_dropI
@@ -28,6 +45,11 @@ run:
   save_every_epochs: 5
 
 data:
+  voxelization:
+    feat_pool: sample_first # sample_first | mean_all | max_all | random
+    label_pool: first # first | majority
+    random_seed_offset: 0
+
   dataset: eclair
   eclair_root: ${ECLAIR_ROOT} # must contain labels.json and pointclouds/
   cache_root: ${ECLAIR_CACHE_ROOT} # optional; will be created if scripts/precompute_eclair_cache.py is used
@@ -71,6 +93,42 @@ model:
   in_channels: 10 # 5 (return_number) + 5 (num_returns)
   out_channels: 11
   D: 3
+  aux_heads:
+    bev:
+      enabled: false
+      max_batches: 5
+      vis_every_epochs: 5
+
+      # NEW (Task 10B)
+      loss: dice # dice | ce
+      dice_smooth: 1.0 # dice numeric stability
+      dice_classes: present # present | all  (present = only classes appearing in GT)
+
+      # Which internal feature levels to use (MinkUNet14C supports block5..block8)
+      levels: ["block8"]
+
+      # LiDOG-style aux loss usage
+      weight: 0.5
+      ignore_index: -1
+      warmup_epochs: 10
+      warmup_only_bev: true
+
+      label_pool: "last" # last matches LiDOG getBEVImageNew assignment behavior
+      bev_img_sizes: [100] # must match len(levels); LiDOG uses per-level sizes
+
+      projector:
+        x_min_m: 0.0
+        x_max_m: 100.0
+        y_min_m: 0.0
+        y_max_m: 100.0
+        z_min_m: -10.0
+        z_max_m: 10.0
+        y_flip: true # matches LiDOG pixel_y definition
+        pool: max
+        res_m: 0.20
+        mode: select # pool | select
+
+      hidden_dim: 64
 
 optim:
   name: adam
@@ -85,7 +143,13 @@ sched:
 loss:
   name: focal
   gamma: 2.0
-  alpha: null
+  alpha: null # or your per-class alpha list
+  lovasz:
+    enabled: true
+    weight: 0.5
+    warmup_epochs: 10
+    ramp_epochs: 10
+    classes: present
 
 eclair:
   meta_filename: labels.json

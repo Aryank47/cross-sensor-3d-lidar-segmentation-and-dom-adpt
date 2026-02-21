@@ -8,8 +8,16 @@ from typing import List, Optional, Tuple
 
 from src.augment import AugmentConfig
 from src.config_loader import load_yaml
-from src.data_dales import DalesPatchConfig, DalesPreprocConfig, DalesTiles, _find_dales_files
+from src.data_dales import (
+    DalesPatchConfig,
+    DalesPreprocConfig,
+    DalesTiles,
+    _cache_key_for_dales_raw,
+    _ensure_raw_dtypes,
+    _find_dales_files,
+)
 from src.features import FeatureConfig
+from src.utils import atomic_save_torch, read_las_arrays_robust
 
 
 def _split_train_val(
@@ -33,22 +41,67 @@ def _split_train_val(
     return train_files, val_files
 
 
-def _precompute_one(
+def _precompute_raw(
+    *,
+    split_name: str,
+    files: List[Path],
+    cache_root: Path,
+    cache_subdir: str,
+    overwrite: bool,
+) -> None:
+    """
+    Write raw (unaugmented) DALES caches:
+      cache_root/cache_subdir/raw/<split>/<sha>.pt
+
+    The filename key MUST match DalesTiles._cache_key_for_dales_raw, which is stat-based.
+    """
+    out_dir = cache_root / cache_subdir / "raw" / split_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"[precompute][raw] split={split_name} n_files={len(files)} out_dir={out_dir}", flush=True)
+
+    written = 0
+    skipped = 0
+    for i, path in enumerate(files, start=1):
+        key = _cache_key_for_dales_raw(path=path)
+        out_path = out_dir / f"{key}.pt"
+
+        if out_path.exists() and not overwrite:
+            skipped += 1
+        else:
+            raw = read_las_arrays_robust(path)
+            raw = _ensure_raw_dtypes(raw)
+            atomic_save_torch(raw, out_path)
+            written += 1
+
+        if i % 50 == 0 or i == len(files):
+            print(
+                f"  [{split_name}] {i}/{len(files)} | written={written} skipped={skipped} last={out_path.name}",
+                flush=True,
+            )
+
+    print(f"[precompute][raw] done split={split_name} written={written} skipped={skipped}", flush=True)
+
+
+def _precompute_voxel(
     *,
     split_name: str,
     files: List[Path],
     dales_root: Path,
     patch_cfg: DalesPatchConfig,
     feat_cfg: FeatureConfig,
-    aug_cfg: AugmentConfig,
     preproc_cfg: DalesPreprocConfig,
     ignore_index: int,
     seed: int,
     cache_root: Path,
     cache_subdir: str,
     cache_key_extra: Optional[str],
-    num_workers: int,
+    label_map: dict[int, int],
 ) -> None:
+    """
+    Legacy voxel-cache mode:
+      cache_root/cache_subdir/voxel/<split>/<sha>.pt
+    """
     ds = DalesTiles(
         dales_root=dales_root,
         files=files,
@@ -65,26 +118,27 @@ def _precompute_one(
         require_cache=False,
         write_cache=True,
         split_name=split_name,
-        aug_cfg=aug_cfg,
+        aug_cfg=AugmentConfig(enabled=False),  # no augmentation for precompute
+        label_map=label_map,
+        cache_kind="voxel",
+        sampling_mode="tiles",
     )
 
-    # Simple single-process loop is the most robust.
-    # If you want parallelism, run multiple jobs or increase num_workers
-    # in a DataLoader with a no-op collate; but this is safe everywhere.
-    print(f"[precompute] split={split_name} n_files={len(ds)} cache_dir={ds._cache_dir}")
+    print(f"[precompute][voxel] split={split_name} n_files={len(ds)} cache_dir={ds._cache_dir}", flush=True)
     for i in range(len(ds)):
         _ = ds[i]
         if (i + 1) % 50 == 0:
-            print(f"  {split_name}: {i+1}/{len(ds)}")
-    print(f"[precompute] done split={split_name}")
+            print(f"  {split_name}: {i+1}/{len(ds)}", flush=True)
+    print(f"[precompute][voxel] done split={split_name}", flush=True)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--config", required=True, help="Path to YAML config (e.g. configs/e0_dales_dropI.yaml)")
     ap.add_argument(
-        "--config",
-        required=True,
-        help="Path to YAML config (e.g. configs/e0_dales_dropI.yaml)",
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing cache files (default: skip if present).",
     )
     args = ap.parse_args()
 
@@ -98,7 +152,6 @@ def main() -> None:
     dales_train_root = Path(data["dales_train_root"])
     dales_test_root = Path(data["dales_test_root"])
     dales_val_root = Path(data["dales_val_root"]) if "dales_val_root" in data else None
-
     val_frac = float(data.get("val_fraction_from_train", 0.125))
 
     patch_cfg = DalesPatchConfig(**data["patch"])
@@ -109,11 +162,16 @@ def main() -> None:
     ignore_index = int(ls["ignore_index"])
 
     cache_root = Path(data["cache_root"])
-    cache_subdir = str(data.get("cache_subdir", "dales_dropI"))
+    cache_subdir = str(data.get("cache_subdir", "dales"))
     cache_key_extra = data.get("cache_key_extra", None)
 
     seed = int(run.get("seed", 1337))
-    num_workers = int(data.get("num_workers", 0))
+
+    # Label map is required for voxel-cache path; parse it here once.
+    label_map_cfg = data.get("dales_label_map_native_to_train", None)
+    if label_map_cfg is None:
+        raise ValueError("data.dales_label_map_native_to_train is required for DALES.")
+    label_map = {int(k): int(v) for k, v in label_map_cfg.items()}
 
     train_files, val_files = _split_train_val(
         train_root=dales_train_root,
@@ -123,51 +181,77 @@ def main() -> None:
     )
     test_files = _find_dales_files(dales_test_root)
 
-    _precompute_one(
-        split_name="train",
-        files=train_files,
-        dales_root=dales_train_root,
-        patch_cfg=patch_cfg,
-        feat_cfg=feat_cfg,
-        aug_cfg=AugmentConfig(enabled=False),  # no augmentation for precompute
-        preproc_cfg=preproc_cfg,
-        ignore_index=ignore_index,
-        seed=seed,
-        cache_root=cache_root,
-        cache_subdir=cache_subdir,
-        cache_key_extra=cache_key_extra,
-        num_workers=num_workers,
-    )
-    _precompute_one(
-        split_name="val",
-        files=val_files,
-        dales_root=dales_train_root,
-        patch_cfg=patch_cfg,
-        feat_cfg=feat_cfg,
-        aug_cfg=AugmentConfig(enabled=False),  # no augmentation for precompute
-        preproc_cfg=preproc_cfg,
-        ignore_index=ignore_index,
-        seed=seed + 1,
-        cache_root=cache_root,
-        cache_subdir=cache_subdir,
-        cache_key_extra=cache_key_extra,
-        num_workers=num_workers,
-    )
-    _precompute_one(
-        split_name="test",
-        files=test_files,
-        dales_root=dales_test_root,
-        patch_cfg=patch_cfg,
-        feat_cfg=feat_cfg,
-        aug_cfg=AugmentConfig(enabled=False),  # no augmentation for precompute
-        preproc_cfg=preproc_cfg,
-        ignore_index=ignore_index,
-        seed=seed + 2,
-        cache_root=cache_root,
-        cache_subdir=cache_subdir,
-        cache_key_extra=cache_key_extra,
-        num_workers=num_workers,
-    )
+    cache_kind = str(data.get("cache_kind", "voxel")).lower().strip()
+    if cache_kind not in ("raw", "voxel"):
+        raise ValueError(f"Unknown data.cache_kind='{cache_kind}' (expected 'raw' or 'voxel').")
+
+    print(f"[precompute] cache_kind={cache_kind} cache_root={cache_root} cache_subdir={cache_subdir}", flush=True)
+
+    if cache_kind == "raw":
+        _precompute_raw(
+            split_name="train",
+            files=train_files,
+            cache_root=cache_root,
+            cache_subdir=cache_subdir,
+            overwrite=bool(args.overwrite),
+        )
+        _precompute_raw(
+            split_name="val",
+            files=val_files,
+            cache_root=cache_root,
+            cache_subdir=cache_subdir,
+            overwrite=bool(args.overwrite),
+        )
+        _precompute_raw(
+            split_name="test",
+            files=test_files,
+            cache_root=cache_root,
+            cache_subdir=cache_subdir,
+            overwrite=bool(args.overwrite),
+        )
+    else:
+        _precompute_voxel(
+            split_name="train",
+            files=train_files,
+            dales_root=dales_train_root,
+            patch_cfg=patch_cfg,
+            feat_cfg=feat_cfg,
+            preproc_cfg=preproc_cfg,
+            ignore_index=ignore_index,
+            seed=seed,
+            cache_root=cache_root,
+            cache_subdir=cache_subdir,
+            cache_key_extra=cache_key_extra,
+            label_map=label_map,
+        )
+        _precompute_voxel(
+            split_name="val",
+            files=val_files,
+            dales_root=dales_train_root,
+            patch_cfg=patch_cfg,
+            feat_cfg=feat_cfg,
+            preproc_cfg=preproc_cfg,
+            ignore_index=ignore_index,
+            seed=seed + 1,
+            cache_root=cache_root,
+            cache_subdir=cache_subdir,
+            cache_key_extra=cache_key_extra,
+            label_map=label_map,
+        )
+        _precompute_voxel(
+            split_name="test",
+            files=test_files,
+            dales_root=dales_test_root,
+            patch_cfg=patch_cfg,
+            feat_cfg=feat_cfg,
+            preproc_cfg=preproc_cfg,
+            ignore_index=ignore_index,
+            seed=seed + 2,
+            cache_root=cache_root,
+            cache_subdir=cache_subdir,
+            cache_key_extra=cache_key_extra,
+            label_map=label_map,
+        )
 
 
 if __name__ == "__main__":

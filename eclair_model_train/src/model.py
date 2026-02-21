@@ -1,8 +1,12 @@
 # Credits: the code is adapted from https://github.com/NVIDIA/MinkowskiEngine/blob/02fc608bea4c0549b0a7b00ca1bf15dee4a0b228/examples/minkunet.py#L1
 
 
+from typing import Any, Optional
+
 import MinkowskiEngine as ME
+import torch
 import torch.nn as nn
+from src.bev_head import BEVHead, BEVHeadConfig
 
 
 class BasicBlock(nn.Module):
@@ -77,9 +81,7 @@ class Bottleneck(nn.Module):
         super(Bottleneck, self).__init__()
         assert dimension > 0
 
-        self.conv1 = ME.MinkowskiConvolution(
-            inplanes, planes, kernel_size=1, dimension=dimension
-        )
+        self.conv1 = ME.MinkowskiConvolution(inplanes, planes, kernel_size=1, dimension=dimension)
         self.norm1 = ME.MinkowskiBatchNorm(planes, momentum=bn_momentum)
 
         self.conv2 = ME.MinkowskiConvolution(
@@ -92,12 +94,8 @@ class Bottleneck(nn.Module):
         )
         self.norm2 = ME.MinkowskiBatchNorm(planes, momentum=bn_momentum)
 
-        self.conv3 = ME.MinkowskiConvolution(
-            planes, planes * self.expansion, kernel_size=1, dimension=dimension
-        )
-        self.norm3 = ME.MinkowskiBatchNorm(
-            planes * self.expansion, momentum=bn_momentum
-        )
+        self.conv3 = ME.MinkowskiConvolution(planes, planes * self.expansion, kernel_size=1, dimension=dimension)
+        self.norm3 = ME.MinkowskiBatchNorm(planes * self.expansion, momentum=bn_momentum)
 
         self.relu = ME.MinkowskiReLU(inplace=True)
         self.downsample = downsample
@@ -142,32 +140,20 @@ class ResNetBase(nn.Module):
     def network_initialization(self, in_channels, out_channels, D):
         self.inplanes = self.INIT_DIM
         self.conv1 = nn.Sequential(
-            ME.MinkowskiConvolution(
-                in_channels, self.inplanes, kernel_size=3, stride=2, dimension=D
-            ),
+            ME.MinkowskiConvolution(in_channels, self.inplanes, kernel_size=3, stride=2, dimension=D),
             ME.MinkowskiInstanceNorm(self.inplanes),
             ME.MinkowskiReLU(inplace=True),
             ME.MinkowskiMaxPooling(kernel_size=2, stride=2, dimension=D),
         )
 
-        self.layer1 = self._make_layer(
-            self.BLOCK, self.PLANES[0], self.LAYERS[0], stride=2
-        )
-        self.layer2 = self._make_layer(
-            self.BLOCK, self.PLANES[1], self.LAYERS[1], stride=2
-        )
-        self.layer3 = self._make_layer(
-            self.BLOCK, self.PLANES[2], self.LAYERS[2], stride=2
-        )
-        self.layer4 = self._make_layer(
-            self.BLOCK, self.PLANES[3], self.LAYERS[3], stride=2
-        )
+        self.layer1 = self._make_layer(self.BLOCK, self.PLANES[0], self.LAYERS[0], stride=2)
+        self.layer2 = self._make_layer(self.BLOCK, self.PLANES[1], self.LAYERS[1], stride=2)
+        self.layer3 = self._make_layer(self.BLOCK, self.PLANES[2], self.LAYERS[2], stride=2)
+        self.layer4 = self._make_layer(self.BLOCK, self.PLANES[3], self.LAYERS[3], stride=2)
 
         self.conv5 = nn.Sequential(
             ME.MinkowskiDropout(),
-            ME.MinkowskiConvolution(
-                self.inplanes, self.inplanes, kernel_size=3, stride=3, dimension=D
-            ),
+            ME.MinkowskiConvolution(self.inplanes, self.inplanes, kernel_size=3, stride=3, dimension=D),
             ME.MinkowskiInstanceNorm(self.inplanes),
             ME.MinkowskiGELU(),
         )
@@ -211,11 +197,7 @@ class ResNetBase(nn.Module):
         )
         self.inplanes = planes * block.expansion
         for i in range(1, blocks):
-            layers.append(
-                block(
-                    self.inplanes, planes, stride=1, dilation=dilation, dimension=self.D
-                )
-            )
+            layers.append(block(self.inplanes, planes, stride=1, dilation=dilation, dimension=self.D))
 
         return nn.Sequential(*layers)
 
@@ -245,84 +227,50 @@ class MinkUNetBase(ResNetBase):
     def network_initialization(self, in_channels, out_channels, D):
         # Output of the first conv concated to conv6
         self.inplanes = self.INIT_DIM
-        self.conv0p1s1 = ME.MinkowskiConvolution(
-            in_channels, self.inplanes, kernel_size=5, dimension=D
-        )
+        self.conv0p1s1 = ME.MinkowskiConvolution(in_channels, self.inplanes, kernel_size=5, dimension=D)
 
         bn_momentum = 0.02
         self.bn0 = ME.MinkowskiBatchNorm(self.inplanes, momentum=bn_momentum)
 
-        self.conv1p1s2 = ME.MinkowskiConvolution(
-            self.inplanes, self.inplanes, kernel_size=2, stride=2, dimension=D
-        )
+        self.conv1p1s2 = ME.MinkowskiConvolution(self.inplanes, self.inplanes, kernel_size=2, stride=2, dimension=D)
         self.bn1 = ME.MinkowskiBatchNorm(self.inplanes, momentum=bn_momentum)
 
-        self.block1 = self._make_layer(
-            self.BLOCK, self.PLANES[0], self.LAYERS[0], bn_momentum=bn_momentum
-        )
+        self.block1 = self._make_layer(self.BLOCK, self.PLANES[0], self.LAYERS[0], bn_momentum=bn_momentum)
 
-        self.conv2p2s2 = ME.MinkowskiConvolution(
-            self.inplanes, self.inplanes, kernel_size=2, stride=2, dimension=D
-        )
+        self.conv2p2s2 = ME.MinkowskiConvolution(self.inplanes, self.inplanes, kernel_size=2, stride=2, dimension=D)
         self.bn2 = ME.MinkowskiBatchNorm(self.inplanes, momentum=bn_momentum)
 
-        self.block2 = self._make_layer(
-            self.BLOCK, self.PLANES[1], self.LAYERS[1], bn_momentum=bn_momentum
-        )
+        self.block2 = self._make_layer(self.BLOCK, self.PLANES[1], self.LAYERS[1], bn_momentum=bn_momentum)
 
-        self.conv3p4s2 = ME.MinkowskiConvolution(
-            self.inplanes, self.inplanes, kernel_size=2, stride=2, dimension=D
-        )
+        self.conv3p4s2 = ME.MinkowskiConvolution(self.inplanes, self.inplanes, kernel_size=2, stride=2, dimension=D)
 
         self.bn3 = ME.MinkowskiBatchNorm(self.inplanes, momentum=bn_momentum)
-        self.block3 = self._make_layer(
-            self.BLOCK, self.PLANES[2], self.LAYERS[2], bn_momentum=bn_momentum
-        )
+        self.block3 = self._make_layer(self.BLOCK, self.PLANES[2], self.LAYERS[2], bn_momentum=bn_momentum)
 
-        self.conv4p8s2 = ME.MinkowskiConvolution(
-            self.inplanes, self.inplanes, kernel_size=2, stride=2, dimension=D
-        )
+        self.conv4p8s2 = ME.MinkowskiConvolution(self.inplanes, self.inplanes, kernel_size=2, stride=2, dimension=D)
         self.bn4 = ME.MinkowskiBatchNorm(self.inplanes, momentum=bn_momentum)
-        self.block4 = self._make_layer(
-            self.BLOCK, self.PLANES[3], self.LAYERS[3], bn_momentum=bn_momentum
-        )
+        self.block4 = self._make_layer(self.BLOCK, self.PLANES[3], self.LAYERS[3], bn_momentum=bn_momentum)
 
-        self.convtr4p16s2 = ME.MinkowskiConvolutionTranspose(
-            self.inplanes, self.PLANES[4], kernel_size=2, stride=2, dimension=D
-        )
+        self.convtr4p16s2 = ME.MinkowskiConvolutionTranspose(self.inplanes, self.PLANES[4], kernel_size=2, stride=2, dimension=D)
         self.bntr4 = ME.MinkowskiBatchNorm(self.PLANES[4], momentum=bn_momentum)
 
         self.inplanes = self.PLANES[4] + self.PLANES[2] * self.BLOCK.expansion
-        self.block5 = self._make_layer(
-            self.BLOCK, self.PLANES[4], self.LAYERS[4], bn_momentum=bn_momentum
-        )
-        self.convtr5p8s2 = ME.MinkowskiConvolutionTranspose(
-            self.inplanes, self.PLANES[5], kernel_size=2, stride=2, dimension=D
-        )
+        self.block5 = self._make_layer(self.BLOCK, self.PLANES[4], self.LAYERS[4], bn_momentum=bn_momentum)
+        self.convtr5p8s2 = ME.MinkowskiConvolutionTranspose(self.inplanes, self.PLANES[5], kernel_size=2, stride=2, dimension=D)
         self.bntr5 = ME.MinkowskiBatchNorm(self.PLANES[5], momentum=bn_momentum)
 
         self.inplanes = self.PLANES[5] + self.PLANES[1] * self.BLOCK.expansion
-        self.block6 = self._make_layer(
-            self.BLOCK, self.PLANES[5], self.LAYERS[5], bn_momentum=bn_momentum
-        )
-        self.convtr6p4s2 = ME.MinkowskiConvolutionTranspose(
-            self.inplanes, self.PLANES[6], kernel_size=2, stride=2, dimension=D
-        )
+        self.block6 = self._make_layer(self.BLOCK, self.PLANES[5], self.LAYERS[5], bn_momentum=bn_momentum)
+        self.convtr6p4s2 = ME.MinkowskiConvolutionTranspose(self.inplanes, self.PLANES[6], kernel_size=2, stride=2, dimension=D)
         self.bntr6 = ME.MinkowskiBatchNorm(self.PLANES[6], momentum=bn_momentum)
 
         self.inplanes = self.PLANES[6] + self.PLANES[0] * self.BLOCK.expansion
-        self.block7 = self._make_layer(
-            self.BLOCK, self.PLANES[6], self.LAYERS[6], bn_momentum=bn_momentum
-        )
-        self.convtr7p2s2 = ME.MinkowskiConvolutionTranspose(
-            self.inplanes, self.PLANES[7], kernel_size=2, stride=2, dimension=D
-        )
+        self.block7 = self._make_layer(self.BLOCK, self.PLANES[6], self.LAYERS[6], bn_momentum=bn_momentum)
+        self.convtr7p2s2 = ME.MinkowskiConvolutionTranspose(self.inplanes, self.PLANES[7], kernel_size=2, stride=2, dimension=D)
         self.bntr7 = ME.MinkowskiBatchNorm(self.PLANES[7], momentum=bn_momentum)
 
         self.inplanes = self.PLANES[7] + self.INIT_DIM
-        self.block8 = self._make_layer(
-            self.BLOCK, self.PLANES[7], self.LAYERS[7], bn_momentum=bn_momentum
-        )
+        self.block8 = self._make_layer(self.BLOCK, self.PLANES[7], self.LAYERS[7], bn_momentum=bn_momentum)
 
         self.final = ME.MinkowskiConvolution(
             self.PLANES[7] * self.BLOCK.expansion,
@@ -403,5 +351,95 @@ class MinkUNet14C(MinkUNet14):
     PLANES = (32, 64, 128, 256, 192, 192, 128, 128)
 
 
-def build_model(in_channels: int, out_channels: int, D: int = 3):
-    return MinkUNet14C(in_channels=in_channels, out_channels=out_channels, D=D)
+class MinkUNetWithBEV(torch.nn.Module):
+    """
+    Wraps an existing MinkUNet14C and adds an optional LiDOG-style BEV head.
+    Returns:
+      - seg_out: ME.SparseTensor
+      - bev_pred: Dict[level, Tensor[B,C,H,W]] or None
+    """
+
+    def __init__(self, base: torch.nn.Module, *, out_classes: int, bev_cfg: BEVHeadConfig, meters_per_voxel: float):
+        super().__init__()
+        self.base = base
+        self.bev_cfg = bev_cfg
+        self.meters_per_voxel = float(meters_per_voxel)
+
+        self._feat_cache = {}
+        self._hooks = []
+
+        # Register hooks for requested levels (MinkUNet14C has block5..block8)
+        for lvl in self.bev_cfg.levels:
+            mod = getattr(self.base, lvl, None)
+            if mod is None:
+                raise ValueError(f"BEV requested level '{lvl}' not found on base model. Expected block5..block8.")
+            self._hooks.append(mod.register_forward_hook(self._make_hook(lvl)))
+
+        self.bev_head = BEVHead(out_classes=out_classes, cfg=self.bev_cfg)
+
+    def _make_hook(self, key: str):
+        def _hook(_m, _inp, out):
+            self._feat_cache[key] = out
+
+        return _hook
+
+    def _extract_feats_by_level(self, seg_out, x) -> dict[str, Any]:
+        """
+        Return the hooked sparse tensors for the requested BEV levels.
+        This makes BEV projection level-faithful (uses each level's own active sites).
+        """
+        feats: dict[str, Any] = {}
+        missing = []
+        for lvl in self.bev_cfg.levels:
+            st = self._feat_cache.get(lvl, None)
+            if st is None:
+                missing.append(lvl)
+            else:
+                feats[lvl] = st
+        if missing:
+            raise RuntimeError(
+                f"BEV levels missing from hook cache: {missing}. "
+                f"Available: {sorted(self._feat_cache.keys())}. "
+                "Check that hooks are registered on base.{block5..block8} and forward executed."
+            )
+        return feats
+
+    def forward(
+        self,
+        x,
+        *,
+        is_train: bool = False,
+        bev_selected_idx: Optional[dict[str, torch.Tensor]] = None,
+        compute_bev: Optional[bool] = None,
+    ):
+        self._feat_cache.clear()
+        seg_out = self.base(x)  # SparseTensor
+        bev_pred = None
+        # NEW: allow forcing BEV in eval
+        do_bev = bool(compute_bev) if compute_bev is not None else (self.bev_cfg.enabled and is_train)
+        if self.bev_cfg.enabled and do_bev:
+            feats_by_level = self._extract_feats_by_level(seg_out, x)  # your existing logic
+            bev_pred = self.bev_head(
+                feats_by_level,
+                meters_per_voxel=self.meters_per_voxel,
+                bev_selected_idx=bev_selected_idx,
+            )
+        return seg_out, bev_pred
+
+
+def build_model(in_channels: int, out_channels: int, D: int = 3, *, cfg: Optional[dict[str, Any]] = None):
+    base = MinkUNet14C(in_channels=in_channels, out_channels=out_channels, D=D)
+
+    if cfg is None:
+        return base
+
+    bev_cfg = BEVHeadConfig.from_cfg(cfg)
+    if not bev_cfg.enabled:
+        return base
+
+    patch = (cfg.get("data", {}) or {}).get("patch", {}) or {}
+    voxel_size_norm = float(patch.get("voxel_size", 0.05))
+    coord_norm_factor = float(patch.get("coord_norm_factor", 10.0))
+    meters_per_voxel = voxel_size_norm * coord_norm_factor
+
+    return MinkUNetWithBEV(base, out_classes=out_channels, bev_cfg=bev_cfg, meters_per_voxel=meters_per_voxel)

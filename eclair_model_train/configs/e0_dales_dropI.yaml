@@ -11,7 +11,28 @@ run:
   eval_every_epochs: 1
   save_every_epochs: 5
 
+eval:
+  mode: point # voxel | point
+  window:
+    size_xy_m: 50.0
+    stride_xy_m: 50.0 # start non-overlap; later try 25.0 for overlap
+    aggregation: mean_logits
+    accum_dtype: float32 # float16 saves RAM, float32 safest
+    compute_point_loss: true
+  bev:
+    enabled: false
+    every_epochs: 5 # run BEV eval/vis every N epochs
+    max_batches: 2 # keep cheap
+    save_npz: true
+    save_png: true
+    levels: null # null => use cfg.model.aux_heads.bev.levels
+
 data:
+  voxelization:
+    feat_pool: sample_first # sample_first | mean_all | max_all | random
+    label_pool: first # first | majority
+    random_seed_offset: 0
+
   dataset: dales
   dales_label_map_native_to_train:
     0: -100 # unknown -> ignore
@@ -42,18 +63,39 @@ data:
   cache_root: ${DALES_CACHE_ROOT_DROP_I}
   cache_subdir: dales_dropI
   cache_key_extra: e0_dales_dropI_v2_labels8
+  cache_kind: raw # NEW
+  require_cache: true # NEW (recommended for training)
+  write_cache: false # NEW (recommended for training)
 
   patch:
     make_local_coords: true
     coord_norm_factor: 10.0
     voxel_size: 0.02
 
+  sampling:
+    mode: crops
+    crop_size_xy_m: 20.0
+    crop_min_points: 2000
+    crops_per_tile_per_epoch: 8
+    rare_center_prob: 0.5
+    rare_center_class_ids: [5, 6]
+
+    # OOM safety (recommended)
+    max_voxels_per_crop_soft: 120000
+    max_voxels_per_crop_hard: 160000
+    min_crop_size_xy_m: 8.0
+    shrink_ratio: 0.8
+    max_shrink_steps: 5
+    hard_max_points: 200000
+    max_points_per_crop_soft: 350000 # optional; saves time by shrinking before voxelization
+    resample_tries: 25
+
   preproc:
     intensity_mode: none
     use_height_xy_cap: false
-    max_voxels: 250000
+    max_voxels: null
     # NEW: enable class-aware cap
-    class_aware_max_voxels: true
+    class_aware_max_voxels: false
     rare_class_ids: [2, 3, 5, 6, 7]
 
   aug:
@@ -90,6 +132,42 @@ model:
   in_channels: 10
   out_channels: 8
   D: 3
+  aux_heads:
+    bev:
+      enabled: false
+      max_batches: 5
+      vis_every_epochs: 5
+
+      # NEW (Task 10B)
+      loss: dice # dice | ce
+      dice_smooth: 1.0 # dice numeric stability
+      dice_classes: present # present | all  (present = only classes appearing in GT)
+
+      # Which internal feature levels to use (MinkUNet14C supports block5..block8)
+      levels: ["block8"]
+
+      # LiDOG-style aux loss usage
+      weight: 0.5
+      ignore_index: -1
+      warmup_epochs: 10
+      warmup_only_bev: true
+
+      label_pool: "last" # last matches LiDOG getBEVImageNew assignment behavior
+      bev_img_sizes: [100] # must match len(levels); LiDOG uses per-level sizes
+
+      projector:
+        x_min_m: 0.0
+        x_max_m: 20.0
+        y_min_m: 0.0
+        y_max_m: 20.0
+        z_min_m: -10.0
+        z_max_m: 10.0
+        y_flip: true # matches LiDOG pixel_y definition
+        pool: max
+        res_m: 0.20
+        mode: select # pool | select
+
+      hidden_dim: 64
 
 optim:
   name: adam
@@ -102,17 +180,26 @@ sched:
   gamma: 0.5
 
 loss:
+  # name: focal
+  # gamma: 2.0
+  # # Per-class alpha (sum-normalized to ~8) to emphasize rare classes
+  # # order matches label_space.class_names:
+  # #   ground, vegetation, cars, trucks, buildings, poles, power_lines, fences
+  # alpha:
+  #   - 0.53 # ground
+  #   - 0.53 # vegetation
+  #   - 1.07 # cars
+  #   - 1.60 # trucks
+  #   - 0.53 # buildings
+  #   - 1.60 # poles
+  #   - 1.07 # power_lines
+  #   - 1.07 # fences
   name: focal
   gamma: 2.0
-  # Per-class alpha (sum-normalized to ~8) to emphasize rare classes
-  # order matches label_space.class_names:
-  #   ground, vegetation, cars, trucks, buildings, poles, power_lines, fences
-  alpha:
-    - 0.53 # ground
-    - 0.53 # vegetation
-    - 1.07 # cars
-    - 1.60 # trucks
-    - 0.53 # buildings
-    - 1.60 # poles
-    - 1.07 # power_lines
-    - 1.07 # fences
+  alpha: null # or your per-class alpha list
+  lovasz:
+    enabled: true
+    weight: 0.5
+    warmup_epochs: 10
+    ramp_epochs: 10
+    classes: present

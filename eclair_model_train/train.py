@@ -4,21 +4,33 @@ from __future__ import annotations
 import argparse
 import random
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import MinkowskiEngine as ME
+import numpy as np
 import torch
+import torch.nn.functional as F
 from src.augment import AugmentConfig
+from src.bev_head import BEVHeadConfig
+from src.bev_labels import build_bev_labels_and_selected_idx
 from src.config_loader import load_yaml
-from src.data_dales import DalesPatchConfig, DalesPreprocConfig, DalesTiles, _find_dales_files, minkowski_collate_dales
+from src.data_dales import (
+    DalesCropConfig,
+    DalesPatchConfig,
+    DalesPreprocConfig,
+    DalesTiles,
+    _find_dales_files,
+    minkowski_collate_dales,
+)
 from src.data_eclair import EclairTiles, PatchConfig, minkowski_collate_fn
 from src.dist import DistEnv, all_reduce_sum, init_distributed, is_main_process
-from src.features import FeatureConfig, infer_in_channels
+from src.features import FeatureConfig, build_features, infer_in_channels
 from src.label_maps import ECLAIR_CLASS_NAMES_11
-from src.losses import FocalLoss, FocalLossConfig
+from src.losses import FocalLoss, FocalLossConfig, FocalLovaszLoss, LovaszSoftmaxLoss, LovaszWarmupConfig
 from src.metrics import ConfusionMatrix
 from src.model import build_model
 from src.utils import CSVLogger, atomic_save_torch, format_seconds, save_json, set_seed, unwrap_model
+from src.voxelization import VoxelizationConfig, voxelize_from_q
 from torch.utils.data import DataLoader
 
 
@@ -27,6 +39,9 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
     dataset = str(data.get("dataset", "eclair")).lower()
 
     feat_cfg = FeatureConfig(**data["features"])
+    voxel_cfg = VoxelizationConfig.from_cfg(data)
+
+    bev_cfg = BEVHeadConfig.from_cfg(cfg)
 
     # -------------------------
     # Feature-stack sanity check (prevents silent channel bugs)
@@ -42,9 +57,9 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
 
     ls = data["label_space"]
     ignore_index = int(ls["ignore_index"])
-    aug_cfg = AugmentConfig(**data["aug"])
 
     if dataset == "eclair":
+        eclair_aug_cfg = AugmentConfig(**data["aug"])
         eclair_cfg = cfg.get("eclair", {})
         meta_filename = eclair_cfg.get("meta_filename", "labels.json")
         train_cats = eclair_cfg.get("train_review_categories", None)  # None = no filtering
@@ -60,7 +75,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             split="train",
             is_train=True,
             patch_cfg=patch_cfg,
-            aug_cfg=aug_cfg,
+            aug_cfg=eclair_aug_cfg,
             feat_cfg=feat_cfg,
             ignore_index=ignore_index,
             undefined_id=undefined_id,
@@ -69,13 +84,16 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             seed=int(cfg["run"]["seed"]),
             meta_filename=meta_filename,
             allowed_review_categories=train_cats,
+            voxel_cfg=voxel_cfg,
+            bev_cfg=bev_cfg,
+            num_classes=int(ls["num_classes"]),
         )
         val_ds = EclairTiles(
             eclair_root=data["eclair_root"],
             split="val",
             is_train=False,
             patch_cfg=patch_cfg,
-            aug_cfg=aug_cfg,  # aug_cfg ignored when is_train=False
+            aug_cfg=eclair_aug_cfg,  # aug_cfg ignored when is_train=False
             feat_cfg=feat_cfg,
             ignore_index=ignore_index,
             undefined_id=undefined_id,
@@ -84,13 +102,16 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             seed=int(cfg["run"]["seed"]) + 1,
             meta_filename=meta_filename,
             allowed_review_categories=val_cats,
+            voxel_cfg=voxel_cfg,
+            bev_cfg=bev_cfg,
+            num_classes=int(ls["num_classes"]),
         )
         test_ds = EclairTiles(
             eclair_root=data["eclair_root"],
             split="test",
             is_train=False,
             patch_cfg=patch_cfg,
-            aug_cfg=aug_cfg,
+            aug_cfg=eclair_aug_cfg,
             feat_cfg=feat_cfg,
             ignore_index=ignore_index,
             undefined_id=undefined_id,
@@ -99,17 +120,18 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             seed=int(cfg["run"]["seed"]) + 2,
             meta_filename=meta_filename,
             allowed_review_categories=test_cats,
+            voxel_cfg=voxel_cfg,
+            bev_cfg=bev_cfg,
+            num_classes=int(ls["num_classes"]),
         )
 
         collate = minkowski_collate_fn
 
     elif dataset == "dales":
         # DALES has train/ and test/ only in your setup.
-        # We create val by splitting train deterministically unless a val root
-        # is provided.
-        dales_aug_config = AugmentConfig(enabled=False)
+        # We create val by splitting train deterministically unless a val root is provided.
+        dales_aug_cfg = AugmentConfig(**data["aug"])
         label_map = data.get("dales_label_map_native_to_train", None)
-        # ensure keys are ints if YAML loads them as ints anyway; safe:
         if label_map is not None:
             label_map = {int(k): int(v) for k, v in label_map.items()}
 
@@ -120,11 +142,31 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
         patch_cfg = DalesPatchConfig(**data["patch"])
         preproc_cfg = DalesPreprocConfig(**data.get("preproc", {}))
 
-        # cache (recommended)
+        # cache controls
         use_cache = bool(data.get("use_cache", True))
         cache_root = data.get("cache_root", None)
         cache_subdir = data.get("cache_subdir", "dales_dropI")
         cache_key_extra = data.get("cache_key_extra", None)
+
+        sampling = data.get("sampling", {}) or {}
+        sampling_mode = str(sampling.get("mode", "tiles")).lower()
+        crop_kwargs = {k: v for k, v in sampling.items() if k != "mode"}
+        crop_cfg = DalesCropConfig(**crop_kwargs)
+
+        cache_kind = str(data.get("cache_kind", "voxel")).lower()
+        require_cache = bool(data.get("require_cache", False))
+        write_cache = bool(data.get("write_cache", False))
+
+        # -------------------------
+        # IMPORTANT: runtime augmentation requires RAW cache.
+        # If cache_kind='voxel', __getitem__ can bypass aug by returning cached tensors.
+        # Make this a hard error to avoid silent training bugs.
+        # -------------------------
+        if bool(dales_aug_cfg.enabled) and cache_kind != "raw":
+            raise ValueError(
+                "DALES: data.aug.enabled=true requires data.cache_kind='raw'. "
+                "With cache_kind='voxel', cached samples can bypass runtime augmentations."
+            )
 
         if dales_val_root is not None and dales_val_root.exists():
             train_files = _find_dales_files(dales_train_root)
@@ -149,7 +191,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             patch_cfg=patch_cfg,
             feat_cfg=feat_cfg,
             is_train=True,
-            aug_cfg=dales_aug_config,
+            aug_cfg=dales_aug_cfg,
             ignore_index=ignore_index,
             preproc=preproc_cfg,
             seed=int(cfg["run"]["seed"]),
@@ -157,10 +199,15 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             cache_root=cache_root,
             cache_subdir=str(cache_subdir),
             cache_key_extra=cache_key_extra,
-            require_cache=False,
-            write_cache=True,
             split_name="train",
             label_map=label_map,
+            cache_kind=cache_kind,
+            require_cache=require_cache,
+            write_cache=write_cache,
+            sampling_mode=sampling_mode,
+            crop_cfg=crop_cfg,
+            voxel_cfg=voxel_cfg,
+            bev_cfg=bev_cfg,
         )
         val_ds = DalesTiles(
             dales_root=dales_train_root,
@@ -168,7 +215,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             patch_cfg=patch_cfg,
             feat_cfg=feat_cfg,
             is_train=False,
-            aug_cfg=dales_aug_config,
+            aug_cfg=dales_aug_cfg,
             ignore_index=ignore_index,
             preproc=preproc_cfg,
             seed=int(cfg["run"]["seed"]) + 1,
@@ -176,10 +223,15 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             cache_root=cache_root,
             cache_subdir=str(cache_subdir),
             cache_key_extra=cache_key_extra,
-            require_cache=False,
-            write_cache=True,
             split_name="val",
             label_map=label_map,
+            cache_kind=cache_kind,
+            require_cache=require_cache,
+            write_cache=write_cache,
+            sampling_mode="tiles",  # recommended: deterministic eval (see note below)
+            crop_cfg=crop_cfg,
+            voxel_cfg=voxel_cfg,
+            bev_cfg=bev_cfg,
         )
         test_ds = DalesTiles(
             dales_root=dales_test_root,
@@ -187,7 +239,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             patch_cfg=patch_cfg,
             feat_cfg=feat_cfg,
             is_train=False,
-            aug_cfg=dales_aug_config,
+            aug_cfg=dales_aug_cfg,
             ignore_index=ignore_index,
             preproc=preproc_cfg,
             seed=int(cfg["run"]["seed"]) + 2,
@@ -195,10 +247,15 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             cache_root=cache_root,
             cache_subdir=str(cache_subdir),
             cache_key_extra=cache_key_extra,
-            require_cache=False,
-            write_cache=True,
             split_name="test",
             label_map=label_map,
+            cache_kind=cache_kind,
+            require_cache=require_cache,
+            write_cache=write_cache,
+            sampling_mode="tiles",
+            crop_cfg=crop_cfg,
+            voxel_cfg=voxel_cfg,
+            bev_cfg=bev_cfg,
         )
 
         # NOTE: caching is handled inside DalesTiles only if you add the
@@ -263,18 +320,274 @@ def build_scheduler(cfg: Dict[str, Any], optimizer: torch.optim.Optimizer):
     raise ValueError(f"Unknown scheduler: {name}")
 
 
-# def build_loss(cfg: Dict[str, Any]):
-#     loss_cfg = cfg["loss"]
-#     name = loss_cfg["name"].lower()
-#     ignore_index = int(cfg["data"]["label_space"]["ignore_index"])
-#     if name == "focal":
-#         fl_cfg = FocalLossConfig(
-#             gamma=float(loss_cfg.get("gamma", 2.0)),
-#             alpha=None,
-#             ignore_index=ignore_index,
-#         )
-#         return FocalLoss(fl_cfg)
-#     raise ValueError(f"Unknown loss: {name}")
+def _bev_enabled(cfg: Dict[str, Any]) -> bool:
+    return bool(((cfg.get("model", {}) or {}).get("aux_heads", {}) or {}).get("bev", {}) or {}).get("enabled", False)
+
+
+def _bev_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return ((cfg.get("model", {}) or {}).get("aux_heads", {}) or {}).get("bev", {}) or {}
+
+
+def _bev_weight_for_epoch(bev_cfg: Dict[str, Any], epoch: int) -> float:
+    # simple constant weight for now (you can add ramps later)
+    return float(bev_cfg.get("weight", 0.5))
+
+
+def soft_dice_loss_2d(
+    logits: torch.Tensor,  # [B,C,H,W]
+    target: torch.Tensor,  # [B,H,W] int64
+    *,
+    ignore_index: int,
+    smooth: float = 1.0,
+    classes: str = "present",  # "present" | "all"
+) -> torch.Tensor:
+    if logits.numel() == 0:
+        return logits.sum() * 0.0
+
+    B, C, H, W = logits.shape
+    target = target.to(torch.int64)
+
+    valid = target != ignore_index
+    if valid.sum() == 0:
+        return logits.sum() * 0.0
+
+    probs = F.softmax(logits, dim=1)  # [B,C,H,W]
+
+    # one-hot target (clamp invalid to 0 just for scatter, then mask out)
+    t_clamped = target.clamp_min(0)
+    tgt_1h = torch.zeros((B, C, H, W), device=logits.device, dtype=probs.dtype)
+    tgt_1h.scatter_(1, t_clamped.unsqueeze(1), 1.0)
+
+    m = valid.unsqueeze(1).to(probs.dtype)
+    probs = probs * m
+    tgt_1h = tgt_1h * m
+
+    # per-class dice over batch+spatial
+    dims = (0, 2, 3)
+    inter = (probs * tgt_1h).sum(dim=dims)  # [C]
+    denom = probs.sum(dim=dims) + tgt_1h.sum(dim=dims)  # [C]
+    dice = (2.0 * inter + smooth) / (denom + smooth)  # [C]
+    loss_c = 1.0 - dice  # [C]
+
+    if classes == "present":
+        present = tgt_1h.sum(dim=dims) > 0  # [C]
+        if present.sum() == 0:
+            return logits.sum() * 0.0
+        return loss_c[present].mean()
+
+    return loss_c.mean()
+
+
+def _compute_bev_loss(
+    bev_pred,  # dict[level] -> [B,C,H,W]
+    bev_targets,  # dict[level] -> [B,H,W]
+    *,
+    loss_type: str,
+    ignore_index: int,
+    dice_smooth: float,
+    dice_classes: str,
+    ce_criterion: torch.nn.Module,
+) -> torch.Tensor:
+    # average across levels (LiDOG-style dict outputs)
+    levels = list(bev_pred.keys())
+    loss = None
+    for lvl in levels:
+        logits = bev_pred[lvl]
+        tgt = bev_targets[lvl].to(torch.int64)
+
+        if loss_type == "dice":
+            l = soft_dice_loss_2d(
+                logits,
+                tgt,
+                ignore_index=ignore_index,
+                smooth=float(dice_smooth),
+                classes=str(dice_classes),
+            )
+        elif loss_type == "ce":
+            l = ce_criterion(logits, tgt)
+        else:
+            raise ValueError(f"Unknown BEV loss_type='{loss_type}' (expected 'dice' or 'ce').")
+
+        loss = l if loss is None else (loss + l)
+
+    if loss is None:
+        # no levels present
+        return torch.tensor(0.0, device=next(iter(bev_pred.values())).device)
+
+    return loss / float(len(levels))
+
+
+def _colorize_label_map(lbl: np.ndarray, *, num_classes: int, ignore_index: int) -> np.ndarray:
+    # lbl: [H,W] int
+    rng = np.random.default_rng(0)
+    colors = rng.integers(0, 255, size=(num_classes, 3), dtype=np.uint8)
+    colors[0] = np.array([0, 0, 0], dtype=np.uint8)
+
+    out = np.zeros((lbl.shape[0], lbl.shape[1], 3), dtype=np.uint8)
+    valid = (lbl != ignore_index) & (lbl >= 0) & (lbl < num_classes)
+    out[valid] = colors[lbl[valid]]
+    # ignored pixels in gray
+    out[~valid] = np.array([120, 120, 120], dtype=np.uint8)
+    return out
+
+
+@torch.no_grad()
+def eval_and_visualize_bev(
+    *,
+    model: torch.nn.Module,
+    dist_env,
+    loader,
+    device: torch.device,
+    amp: bool,
+    out_dir: Path,
+    epoch: int,
+    num_classes: int,
+    cfg: Dict[str, Any],
+):
+    model.eval()
+
+    eval_bev = (cfg.get("eval", {}) or {}).get("bev", {}) or {}
+    if not bool(eval_bev.get("enabled", False)):
+        return None
+
+    every = int(eval_bev.get("every_epochs", 5))
+    if (epoch % every) != 0:
+        return None
+
+    max_batches = int(eval_bev.get("max_batches", 2))
+    save_npz = bool(eval_bev.get("save_npz", True))
+    save_png = bool(eval_bev.get("save_png", True))
+
+    # Use the structured config object for levels/img sizes/ignore
+    bev_head_cfg = BEVHeadConfig.from_cfg(cfg)
+    levels_req = eval_bev.get("levels", None)
+    if levels_req is None:
+        levels_req = list(bev_head_cfg.levels)
+
+    bev_ignore = int(bev_head_cfg.ignore_index)
+    voxel_ignore = int(cfg["data"]["label_space"]["ignore_index"])
+
+    # meters per voxel in YOUR coordinate convention
+    patch_cfg = loader.dataset.patch_cfg
+    m_per_vox = float(patch_cfg.voxel_size) * float(patch_cfg.coord_norm_factor)
+
+    cm = ConfusionMatrix(num_classes=num_classes, ignore_index=bev_ignore)
+
+    vis_dir = out_dir / "bev_vis" / f"epoch_{epoch:03d}"
+    if is_main_process(dist_env):
+        vis_dir.mkdir(parents=True, exist_ok=True)
+
+    for batch_i, batch in enumerate(loader):
+        if batch_i >= max_batches:
+            break
+
+        # ---------- Build sparse input ----------
+        coords_cpu = batch["coords"]  # CPU int tensor [N,1+3]
+        feats_cpu = batch["feats"]
+        labels_cpu = batch["labels"]  # CPU long [N]
+
+        # Create BEV GT on CPU using (coords, labels)
+        coords_np = coords_cpu.numpy().astype(np.int32, copy=False)
+        labels_np = labels_cpu.numpy().astype(np.int64, copy=False)
+
+        if coords_np.size == 0:
+            continue
+
+        B = int(coords_np[:, 0].max()) + 1  # batch size inside this sparse batch
+
+        bev_targets_cpu: Dict[str, List[np.ndarray]] = {lvl: [] for lvl in levels_req}
+        bev_sel_cpu: Dict[str, List[np.ndarray]] = {lvl: [] for lvl in levels_req}
+
+        for bi in range(B):
+            m = coords_np[:, 0] == bi
+            c_b = coords_np[m, 1:4]  # [Nv_b,3] voxel coords
+            y_b = labels_np[m]  # [Nv_b] voxel labels
+
+            for lvl in levels_req:
+                lbl, sel = build_bev_labels_and_selected_idx(
+                    coords_vox_int32=c_b,
+                    labels_vox_i64=y_b,
+                    voxel_ignore_index=voxel_ignore,
+                    bev_cfg=bev_head_cfg,
+                    level=str(lvl),
+                    meters_per_voxel=m_per_vox,
+                    rng=None,  # deterministic eval
+                )
+                bev_targets_cpu[lvl].append(lbl)
+                bev_sel_cpu[lvl].append(sel)
+
+        bev_targets = {lvl: torch.from_numpy(np.stack(bev_targets_cpu[lvl], axis=0)).long() for lvl in levels_req}
+        bev_sel = {lvl: torch.from_numpy(np.stack(bev_sel_cpu[lvl], axis=0)).long() for lvl in levels_req}
+
+        # Move sparse input to GPU
+        coords = coords_cpu.to(device, non_blocking=True)
+        feats = feats_cpu.to(device, non_blocking=True)
+        st = ME.SparseTensor(feats, coordinates=coords, device=device)
+
+        # Move selected_idx to GPU (model/projector may use it)
+        bev_sel_dev = {k: v.to(device, non_blocking=True) for k, v in bev_sel.items()}
+
+        # ---------- Forward (force BEV in eval) ----------
+        with torch.autocast(device_type="cuda", enabled=amp):
+            try:
+                out_st, bev_pred = model(st, is_train=False, bev_selected_idx=bev_sel_dev, compute_bev=True)
+            except TypeError:
+                # fallback if you didn't patch model signature yet
+                out_st, bev_pred = model(st, is_train=True, bev_selected_idx=bev_sel_dev)
+
+        if bev_pred is None:
+            continue
+
+        # ---------- Metrics + visuals ----------
+        for lvl, logits in bev_pred.items():
+            if lvl not in bev_targets:
+                continue
+            tgt = bev_targets[lvl]  # [B,H,W] CPU
+
+            pred = logits.argmax(dim=1).detach().cpu()  # [B,H,W]
+
+            cm.update(pred.reshape(-1), tgt.reshape(-1))
+
+            if is_main_process(dist_env):
+                p0 = pred[0].numpy().astype(np.int32)
+                t0 = tgt[0].numpy().astype(np.int32)
+
+                if save_npz:
+                    np.savez_compressed(
+                        vis_dir / f"bev_{lvl}_b{batch_i:02d}.npz",
+                        pred=p0,
+                        target=t0,
+                        ignore_index=np.int32(bev_ignore),
+                    )
+                if save_png:
+                    try:
+                        from PIL import Image
+
+                        pimg = _colorize_label_map(p0, num_classes=num_classes, ignore_index=bev_ignore)
+                        timg = _colorize_label_map(t0, num_classes=num_classes, ignore_index=bev_ignore)
+                        Image.fromarray(pimg).save(vis_dir / f"bev_pred_{lvl}_b{batch_i:02d}.png")
+                        Image.fromarray(timg).save(vis_dir / f"bev_gt_{lvl}_b{batch_i:02d}.png")
+                    except Exception:
+                        pass
+
+    # DDP reduce
+    if dist_env.enabled:
+        cm_mat = cm.mat.to(device=device)
+        cm_mat = all_reduce_sum(dist_env, cm_mat)
+        cm.mat = cm_mat.cpu()
+
+    res = cm.compute()
+    bev_metrics = {
+        "bev_miou": res.miou,
+        "bev_macro_f1": res.macro_f1,
+        "bev_per_class_iou": res.per_class_iou,
+        "bev_per_class_f1": res.per_class_f1,
+    }
+
+    if is_main_process(dist_env):
+        save_json(vis_dir / "bev_metrics.json", bev_metrics)
+
+    return bev_metrics
 
 
 def build_loss(cfg: Dict[str, Any]):
@@ -282,42 +595,75 @@ def build_loss(cfg: Dict[str, Any]):
     name = loss_cfg["name"].lower()
     ignore_index = int(cfg["data"]["label_space"]["ignore_index"])
 
-    if name == "focal":
-        alpha_raw = loss_cfg.get("alpha", None)
-        alpha_tensor = None
+    if name != "focal":
+        raise ValueError(f"Unknown loss: {name}")
 
-        if alpha_raw is not None:
-            # Allow YAML list/tuple; treat null as None
-            if isinstance(alpha_raw, (list, tuple)):
-                num_classes = int(cfg["data"]["label_space"]["num_classes"])
-                if len(alpha_raw) != num_classes:
-                    raise ValueError(f"loss.alpha length {len(alpha_raw)} != " f"num_classes={num_classes}")
-                alpha_tensor = torch.tensor(alpha_raw, dtype=torch.float32)
-            else:
-                raise TypeError(f"loss.alpha must be a list/tuple of floats or null; " f"got type {type(alpha_raw)}")
+    # --- focal (existing) ---
+    alpha_raw = loss_cfg.get("alpha", None)
+    alpha_tensor = None
+    if alpha_raw is not None:
+        if isinstance(alpha_raw, (list, tuple)):
+            num_classes = int(cfg["data"]["label_space"]["num_classes"])
+            if len(alpha_raw) != num_classes:
+                raise ValueError(f"loss.alpha length {len(alpha_raw)} != num_classes={num_classes}")
+            alpha_tensor = torch.tensor(alpha_raw, dtype=torch.float32)
+        else:
+            raise TypeError(f"loss.alpha must be a list/tuple of floats or null; got {type(alpha_raw)}")
 
-        fl_cfg = FocalLossConfig(
-            gamma=float(loss_cfg.get("gamma", 2.0)),
-            alpha=alpha_tensor,
-            ignore_index=ignore_index,
-        )
-        return FocalLoss(fl_cfg)
+    fl_cfg = FocalLossConfig(
+        gamma=float(loss_cfg.get("gamma", 2.0)),
+        alpha=alpha_tensor,
+        ignore_index=ignore_index,
+    )
+    focal = FocalLoss(fl_cfg)
 
-    raise ValueError(f"Unknown loss: {name}")
+    # --- optional lovasz warmup/ramp ---
+    lovasz_block = loss_cfg.get("lovasz", None) or {}
+    enabled = bool(lovasz_block.get("enabled", False))
+    if not enabled:
+        return focal
+
+    lw_cfg = LovaszWarmupConfig(
+        enabled=True,
+        weight=float(lovasz_block.get("weight", 0.5)),
+        warmup_epochs=int(lovasz_block.get("warmup_epochs", 10)),
+        ramp_epochs=int(lovasz_block.get("ramp_epochs", 10)),
+        classes=str(lovasz_block.get("classes", "present")),
+    )
+    lovasz = LovaszSoftmaxLoss(ignore_index=ignore_index, classes=lw_cfg.classes)
+
+    return FocalLovaszLoss(focal=focal, lovasz=lovasz, cfg=lw_cfg)
 
 
 def _forward_batch(
     model: torch.nn.Module,
     batch: Dict[str, torch.Tensor],
     device: torch.device,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    *,
+    is_train: bool,
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
     coords = batch["coords"].to(device, non_blocking=True)
     feats = batch["feats"].to(device, non_blocking=True)
     labels = batch["labels"].to(device, non_blocking=True)
+
     st = ME.SparseTensor(feats, coordinates=coords, device=device)
-    out = model(st)  # SparseTensor
+
+    bev_sel = batch.get("bev_selected_idx", None)
+    if isinstance(bev_sel, dict):
+        bev_sel = {k: v.to(device, non_blocking=True) for k, v in bev_sel.items()}
+    elif torch.is_tensor(bev_sel):
+        bev_sel = bev_sel.to(device, non_blocking=True)
+
+    try:
+        out = model(st, is_train=is_train, bev_selected_idx=bev_sel)
+    except TypeError:
+        out = model(st)
+
+    bev_pred = None
+    if isinstance(out, (tuple, list)) and len(out) == 2:
+        out, bev_pred = out  # out is SparseTensor
     logits = out.F  # [N, C]
-    return logits, labels
+    return logits, labels, bev_pred
 
 
 @torch.no_grad()
@@ -340,7 +686,7 @@ def evaluate(
 
     for batch in loader:
         with torch.autocast(device_type="cuda", enabled=amp):
-            logits, labels = _forward_batch(model, batch, device)
+            logits, labels, _bev = _forward_batch(model, batch, device, is_train=False)
             loss = criterion(logits, labels)
 
         # metrics
@@ -369,6 +715,236 @@ def evaluate(
     res = cm.compute()
     return {
         "loss": total_loss / max(1, total_n),
+        "miou": res.miou,
+        "macro_f1": res.macro_f1,
+        "per_class_iou": res.per_class_iou,
+        "per_class_f1": res.per_class_f1,
+        "miou_valid": res.miou_valid,
+    }
+
+
+def _make_sliding_origins(max_xy_vox: int, win_vox: int, stride_vox: int) -> List[int]:
+    if max_xy_vox <= win_vox:
+        return [0]
+    xs = list(range(0, max_xy_vox - win_vox + 1, stride_vox))
+    last = max_xy_vox - win_vox
+    if xs[-1] != last:
+        xs.append(last)
+    return xs
+
+
+@torch.no_grad()
+def evaluate_pointwise(
+    *,
+    model: torch.nn.Module,
+    dist_env: DistEnv,
+    dataset_obj,
+    criterion_cpu: torch.nn.Module,
+    num_classes: int,
+    ignore_index: int,
+    device: torch.device,
+    amp: bool,
+    cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Strict point-wise evaluation:
+      - load raw points
+      - voxelize full tile ONCE (cpu)
+      - run sparse UNet in sliding windows over voxels (gpu-safe)
+      - aggregate voxel logits over overlapping windows
+      - project voxel logits -> points via inverse_map
+      - compute point IoU/F1
+    """
+    model.eval()
+    cm = ConfusionMatrix(num_classes=num_classes, ignore_index=ignore_index)
+
+    eval_cfg = cfg.get("eval", {}) or {}
+    win_cfg = eval_cfg.get("window", {}) or {}
+
+    win_m = float(win_cfg.get("size_xy_m", 50.0))
+    stride_m = float(win_cfg.get("stride_xy_m", win_m))
+    # NOTE: do NOT drop small windows in eval; only skip empty
+    # (otherwise some points might never get predicted).
+    accum_dtype = str(win_cfg.get("accum_dtype", "float32")).lower()
+    if accum_dtype not in ("float32", "float16"):
+        raise ValueError("eval.window.accum_dtype must be float32 or float16")
+
+    agg = str(win_cfg.get("aggregation", "mean_logits")).lower()
+    if agg not in ("mean_logits", "sum_logits"):
+        raise ValueError("eval.window.aggregation must be mean_logits or sum_logits")
+
+    total_loss = 0.0
+    total_n = 0
+
+    n_tiles = len(dataset_obj)
+    for ti in range(n_tiles):
+        if dist_env.enabled and (ti % dist_env.world_size) != dist_env.rank:
+            continue
+
+        raw = dataset_obj.get_raw(ti)
+        xyz = raw["xyz"].astype(np.float32, copy=False)
+
+        # --- labels per POINT in train-id space ---
+        if hasattr(dataset_obj, "label_lut") and dataset_obj.label_lut is not None:
+            # DALES path (native -> train LUT)
+            y_native = raw.get("native_labels", None)
+            if y_native is None:
+                raise KeyError("DALES raw must include native_labels")
+            y_safe = np.clip(y_native.astype(np.int64, copy=False), 0, 255)
+            y_pts = dataset_obj.label_lut[y_safe].astype(np.int64, copy=False)
+        else:
+            # ECLAIR path (undefined -> ignore, else 1..K -> 0..K-1)
+            y_native = raw.get("native_labels", None)
+            if y_native is None:
+                # some readers call it "labels"
+                y_native = raw.get("labels", None)
+            if y_native is None:
+                raise KeyError("ECLAIR raw must include native_labels or labels")
+
+            undefined_id = int(getattr(dataset_obj, "undefined_id", 0))
+            y_native = y_native.astype(np.int64, copy=False)
+            y_pts = y_native - 1
+            y_pts[y_native == undefined_id] = ignore_index
+
+        # --- build per-point features (no aug in eval) ---
+        patch_cfg = dataset_obj.patch_cfg
+        feat_cfg = dataset_obj.feat_cfg
+
+        xyz_norm = (xyz / float(patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
+
+        feats_p = build_features(
+            xyz_local=xyz_norm,
+            intensity=(raw.get("intensity", None)),
+            return_number=raw.get("return_number", None),
+            number_of_returns=raw.get("number_of_returns", None),
+            rgb=(raw.get("rgb", None) if feat_cfg.use_rgb else None),
+            cfg=feat_cfg,
+        )  # [Np, Cin] float32
+
+        # --- full-tile quantization + inverse_map (CPU) ---
+        q = np.floor(xyz_norm / float(patch_cfg.voxel_size)).astype(np.int32, copy=False)
+        voxel_cfg = VoxelizationConfig.from_cfg(cfg["data"])
+        rng = None  # deterministic eval; or seed by tile if you want random pooling reproducible
+        vx = voxelize_from_q(
+            q_int32=q.astype(np.int32, copy=False),
+            feats_p_f32=feats_p.astype(np.float32, copy=False),
+            labels_p_i64=None,
+            ignore_index=int(ignore_index),
+            cfg=voxel_cfg,
+            rng=rng,
+            return_maps=True,
+            num_classes_hint=None,
+        )
+
+        coords_u = vx["coords_u"]
+        feats_v = vx["feats_u"]
+        inverse_map = vx["inverse_map"]
+        nv = int(coords_u.shape[0])
+
+        # --- window schedule in VOXEL units ---
+        m_per_vox = float(patch_cfg.voxel_size) * float(patch_cfg.coord_norm_factor)
+        win_vox = max(1, int(np.ceil(win_m / m_per_vox)))
+        stride_vox = max(1, int(np.ceil(stride_m / m_per_vox)))
+
+        x = coords_u[:, 0]
+        y = coords_u[:, 1]
+        xmax = int(x.max()) if nv > 0 else 0
+        ymax = int(y.max()) if nv > 0 else 0
+        xs = _make_sliding_origins(xmax + 1, win_vox, stride_vox)
+        ys = _make_sliding_origins(ymax + 1, win_vox, stride_vox)
+
+        # --- accumulate voxel logits across windows ---
+        sum_dtype = np.float16 if accum_dtype == "float16" else np.float32
+        voxel_logits_sum = np.zeros((nv, num_classes), dtype=sum_dtype)
+        voxel_counts = np.zeros((nv,), dtype=np.uint16)
+
+        for x0 in xs:
+            x1 = x0 + win_vox
+            mx = (x >= x0) & (x < x1)
+            if not bool(mx.any()):
+                continue
+            for y0 in ys:
+                y1 = y0 + win_vox
+                sel = np.where(mx & (y >= y0) & (y < y1))[0]
+                if sel.size == 0:
+                    continue
+
+                coords_sub = coords_u[sel].astype(np.int32, copy=False)
+                # per-window local shift (translation invariance, smaller coord ranges)
+                coords_sub = coords_sub - coords_sub.min(axis=0, keepdims=True)
+
+                coords_sub_t = torch.from_numpy(np.ascontiguousarray(coords_sub, dtype=np.int32)).int()
+                feats_sub_t = torch.from_numpy(np.ascontiguousarray(feats_v[sel], dtype=np.float32)).float()
+
+                coords_b = ME.utils.batched_coordinates([coords_sub_t], dtype=torch.int32)
+                st = ME.SparseTensor(
+                    feats_sub_t.to(device, non_blocking=True),
+                    coordinates=coords_b.to(device, non_blocking=True),
+                    device=device,
+                )
+
+                with torch.autocast(device_type="cuda", enabled=amp):
+                    try:
+                        out = model(st, is_train=False, compute_bev=False)
+                    except TypeError:
+                        out = model(st)
+
+                if isinstance(out, (tuple, list)) and len(out) == 2:
+                    out_st = out[0]
+                else:
+                    out_st = out
+                logits_sub = out_st.F
+
+                logits_sub_np = logits_sub.detach().float().cpu().numpy()
+                voxel_logits_sum[sel] += logits_sub_np.astype(sum_dtype, copy=False)
+                voxel_counts[sel] += 1
+
+        # finalize voxel logits
+        counts = voxel_counts.astype(np.float32)
+        counts[counts == 0] = 1.0  # safety
+        if agg == "mean_logits":
+            voxel_logits = (voxel_logits_sum.astype(np.float32) / counts[:, None]).astype(np.float32, copy=False)
+        else:
+            voxel_logits = voxel_logits_sum.astype(np.float32, copy=False)
+
+        # project voxel logits -> points
+        pt_logits = voxel_logits[inverse_map]  # [Np, C]
+        pt_pred = pt_logits.argmax(axis=1).astype(np.int64, copy=False)
+
+        # metrics (pointwise)
+        preds_t = torch.from_numpy(pt_pred)
+        labels_t = torch.from_numpy(y_pts.astype(np.int64, copy=False))
+        cm.update(preds_t, labels_t)
+
+        # optional pointwise loss on CPU (safe, but can be slow)
+        if bool(win_cfg.get("compute_point_loss", False)):
+            loss = criterion_cpu(torch.from_numpy(pt_logits), labels_t)
+            valid = labels_t != ignore_index
+            n = int(valid.sum().item())
+            total_loss += float(loss.item()) * max(1, n)
+            total_n += max(1, n)
+        else:
+            # still count valid points for normalization consistency if you later enable loss
+            n = int((labels_t != ignore_index).sum().item())
+            total_n += max(1, n)
+
+    # DDP reduce
+    if dist_env.enabled:
+        cm_mat = cm.mat.to(device=device)
+        cm_mat = all_reduce_sum(dist_env, cm_mat)
+        cm.mat = cm_mat.cpu()
+
+        tl = torch.tensor([total_loss], dtype=torch.float64, device=device)
+        tn = torch.tensor([total_n], dtype=torch.float64, device=device)
+        tl = all_reduce_sum(dist_env, tl)
+        tn = all_reduce_sum(dist_env, tn)
+        total_loss = float(tl.item())
+        total_n = int(tn.item())
+
+    res = cm.compute()
+    loss_out = (total_loss / max(1, total_n)) if bool(win_cfg.get("compute_point_loss", False)) else float("nan")
+    return {
+        "loss": loss_out,
         "miou": res.miou,
         "macro_f1": res.macro_f1,
         "per_class_iou": res.per_class_iou,
@@ -406,6 +982,7 @@ def train(cfg_path: str):
         in_channels=int(model_cfg["in_channels"]),
         out_channels=int(model_cfg["out_channels"]),
         D=int(model_cfg.get("D", 3)),
+        cfg=cfg,
     ).to(device)
 
     if dist_env.enabled:
@@ -419,6 +996,13 @@ def train(cfg_path: str):
     optimizer = build_optimizer(cfg, model)
     scheduler = build_scheduler(cfg, optimizer)
     criterion = build_loss(cfg).to(device)
+    criterion_cpu = build_loss(cfg).cpu()
+
+    # ensure same schedule behavior for both
+    if hasattr(criterion, "set_epoch"):
+        criterion.set_epoch(0)
+    if hasattr(criterion_cpu, "set_epoch"):
+        criterion_cpu.set_epoch(0)
 
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
 
@@ -482,6 +1066,22 @@ def train(cfg_path: str):
         if dist_env.enabled:
             # ensures shuffling differs each epoch
             train_loader.sampler.set_epoch(epoch)
+        # Ensure crop RNG changes per epoch (and is stable)
+        ds = train_loader.dataset
+        if hasattr(ds, "set_epoch"):
+            # Optionally mix in rank so different ranks don't accidentally correlate
+            ds.set_epoch(epoch + (dist_env.rank * 100000 if dist_env.enabled else 0))
+
+        # Update loss warmup schedule
+        if hasattr(criterion, "set_epoch"):
+            criterion.set_epoch(epoch)
+        if hasattr(criterion_cpu, "set_epoch"):
+            criterion_cpu.set_epoch(epoch)
+
+        # Optional: log lovasz weight
+        if is_main_process(dist_env) and hasattr(criterion, "current_weight"):
+            print(f"[loss] epoch={epoch:03d} lovasz_w={criterion.current_weight():.4f}", flush=True)
+
         cm_train = ConfusionMatrix(num_classes=num_classes, ignore_index=ignore_index)
         train_loss_sum = 0.0
         train_n_sum = 0
@@ -491,11 +1091,57 @@ def train(cfg_path: str):
         t1 = torch.cuda.Event(enable_timing=True)
         t0.record()
 
+        bev_cfg = _bev_cfg(cfg)
+        bev_enabled = _bev_enabled(cfg)
+        bev_loss_type = "ce"
+        bev_ignore_index = -1
+        bev_dice_smooth = 1.0
+        bev_dice_classes = "present"
+        bev_ce = None
+
+        if bev_enabled:
+            bev_loss_type = str(bev_cfg.get("loss", "ce")).lower()
+            bev_ignore_index = int(bev_cfg.get("ignore_index", -1))
+            bev_dice_smooth = float(bev_cfg.get("dice_smooth", 1.0))
+            bev_dice_classes = str(bev_cfg.get("dice_classes", "present")).lower()
+            bev_ce = torch.nn.CrossEntropyLoss(ignore_index=bev_ignore_index)
+
         for step, batch in enumerate(train_loader, start=1):
             with torch.autocast(device_type="cuda", enabled=amp):
-                logits, labels = _forward_batch(model, batch, device)
-                loss = criterion(logits, labels)
-                loss_scaled = loss / float(grad_accum)
+                logits, labels, bev_pred = _forward_batch(model, batch, device, is_train=True)
+                seg_loss = criterion(logits, labels)
+                # Always defined, even when BEV disabled
+                total = seg_loss
+                # Step-local BEV loss (prevents carry-over)
+                bev_loss_step = None
+
+                if bev_enabled and (bev_pred is not None) and ("bev_labels" in batch):
+                    bev_targets = batch["bev_labels"]
+                    # move to GPU
+                    if isinstance(bev_targets, dict):
+                        bev_targets = {k: v.to(device, non_blocking=True) for k, v in bev_targets.items()}
+                    else:
+                        raise TypeError("batch['bev_labels'] must be a dict[level]->Tensor[B,H,W].")
+
+                    bev_loss_step = _compute_bev_loss(
+                        bev_pred,
+                        bev_targets,
+                        loss_type=bev_loss_type,
+                        ignore_index=bev_ignore_index,
+                        dice_smooth=bev_dice_smooth,
+                        dice_classes=bev_dice_classes,
+                        ce_criterion=bev_ce,
+                    )
+                    if bev_enabled and (bev_loss_step is not None):
+                        # keep your existing warmup/weight logic (already correct)
+                        bev_w = _bev_weight_for_epoch(bev_cfg, epoch)
+
+                        if bool(bev_cfg.get("warmup_only_bev", False)) and (epoch <= int(bev_cfg.get("warmup_epochs", 0))):
+                            total = bev_w * bev_loss_step
+                        else:
+                            total = seg_loss + bev_w * bev_loss_step
+
+                loss_scaled = total / float(grad_accum)
 
             scaler.scale(loss_scaled).backward()
 
@@ -504,7 +1150,7 @@ def train(cfg_path: str):
 
             valid = labels != ignore_index
             n = int(valid.sum().item())
-            train_loss_sum += float(loss.item()) * max(1, n)
+            train_loss_sum += float(total.item()) * max(1, n)
             train_n_sum += max(1, n)
 
             if step % grad_accum == 0:
@@ -513,10 +1159,15 @@ def train(cfg_path: str):
                 optimizer.zero_grad(set_to_none=True)
 
             global_step += 1
-            if global_step % int(run.get("log_every_steps", 50)) == 0:
+            if global_step % int(run.get("log_every_steps", 50)) == 0 and is_main_process(dist_env):
                 lr = optimizer.param_groups[0]["lr"]
-                if is_main_process(dist_env):
-                    print(f"[epoch {epoch:03d} step {step:05d}] loss={loss.item():.4f} lr={lr:.2e}")
+                if bev_enabled:
+                    bev_loss_val = float(bev_loss_step.item()) if (bev_loss_step is not None) else 0.0
+                    print(
+                        f"[epoch {epoch:03d} step {step:05d}] total={total.item():.4f} seg={seg_loss.item():.4f} bev={bev_loss_val:.4f} lr={lr:.2e}"
+                    )
+                else:
+                    print(f"[epoch {epoch:03d} step {step:05d}] loss={total.item():.4f} lr={lr:.2e}")
 
         # flush leftover grads if dataloader size not divisible by grad_accum
         if (len(train_loader) % grad_accum) != 0:
@@ -531,22 +1182,49 @@ def train(cfg_path: str):
         torch.cuda.synchronize()
         epoch_ms = t0.elapsed_time(t1)
         epoch_s = epoch_ms / 1000.0
-
+        bev_metrics = None
         train_loss = train_loss_sum / max(1, train_n_sum)
 
         # ---- Eval ----
         do_eval = (epoch % int(run.get("eval_every_epochs", 1)) == 0) or (epoch == epochs)
         if do_eval:
-            val_metrics = evaluate(
-                model=model,
-                dist_env=dist_env,
-                loader=val_loader,
-                criterion=criterion,
-                num_classes=num_classes,
-                ignore_index=ignore_index,
-                device=device,
-                amp=amp,
-            )
+            eval_mode = str(cfg.get("eval", {}).get("mode", "voxel")).lower()
+            if eval_mode == "point":
+                val_metrics = evaluate_pointwise(
+                    model=model,
+                    dist_env=dist_env,
+                    dataset_obj=val_loader.dataset,
+                    criterion_cpu=criterion_cpu,
+                    num_classes=num_classes,
+                    ignore_index=ignore_index,
+                    device=device,
+                    amp=amp,
+                    cfg=cfg,
+                )
+            else:
+                val_metrics = evaluate(
+                    model=model,
+                    dist_env=dist_env,
+                    loader=val_loader,
+                    criterion=criterion,
+                    num_classes=num_classes,
+                    ignore_index=ignore_index,
+                    device=device,
+                    amp=amp,
+                )
+
+            if bev_enabled and do_eval:
+                bev_metrics = eval_and_visualize_bev(
+                    model=model,
+                    dist_env=dist_env,
+                    loader=val_loader,
+                    device=device,
+                    amp=amp,
+                    out_dir=out_dir,
+                    epoch=epoch,
+                    num_classes=num_classes,
+                    cfg=cfg,
+                )
         else:
             val_metrics = {
                 "loss": float("nan"),
@@ -593,6 +1271,7 @@ def train(cfg_path: str):
             "val_macro_f1": val_metrics["macro_f1"],
             "time_epoch_s": epoch_s,
             "best_val_miou": best_val_miou,
+            "bev_miou": bev_metrics["bev_miou"] if bev_metrics is not None else float("nan"),
         }
         for name, v in zip(class_names, val_metrics["per_class_iou"]):
             row[f"val_iou_{name.replace(' ', '_').replace('.', '')}"] = v
@@ -610,23 +1289,40 @@ def train(cfg_path: str):
                 f"best={best_val_miou:.4f} time={format_seconds(epoch_s)}"
             )
 
-    # Final test evaluation on best model
+    # Final test evaluation on best model (respect eval.mode)
     best_ckpt = torch.load(out_dir / "checkpoints" / "best.pt", map_location="cpu")
     unwrap_model(model).load_state_dict(best_ckpt["model_state"])
-    test_metrics = evaluate(
-        model=model,
-        dist_env=dist_env,
-        loader=test_loader,
-        criterion=criterion,
-        num_classes=num_classes,
-        ignore_index=ignore_index,
-        device=device,
-        amp=amp,
-    )
+
+    eval_mode = str(cfg.get("eval", {}).get("mode", "voxel")).lower()
+    if eval_mode == "point":
+        test_metrics = evaluate_pointwise(
+            model=model,
+            dist_env=dist_env,
+            dataset_obj=test_loader.dataset,
+            criterion_cpu=criterion_cpu,  # keep parity with val
+            num_classes=num_classes,
+            ignore_index=ignore_index,
+            device=device,
+            amp=amp,
+            cfg=cfg,
+        )
+    else:
+        test_metrics = evaluate(
+            model=model,
+            dist_env=dist_env,
+            loader=test_loader,
+            criterion=criterion,
+            num_classes=num_classes,
+            ignore_index=ignore_index,
+            device=device,
+            amp=amp,
+        )
+
     if is_main_process(dist_env):
         save_json(out_dir / "test_metrics.json", test_metrics)
         print(
-            f"[TEST] loss={test_metrics['loss']:.4f} mIoU={test_metrics['miou']:.4f} macroF1={test_metrics['macro_f1']:.4f} miou_valid={test_metrics['miou_valid']:.4f}"
+            f"[TEST] loss={test_metrics['loss']:.4f} mIoU={test_metrics['miou']:.4f} "
+            f"macroF1={test_metrics['macro_f1']:.4f} miou_valid={test_metrics['miou_valid']:.4f}"
         )
 
 
