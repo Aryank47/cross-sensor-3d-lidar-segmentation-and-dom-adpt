@@ -128,8 +128,17 @@ def _points_to_sparse(
     label_lut: np.ndarray,
     voxel_cfg: VoxelizationConfig,
     rng: Optional[np.random.Generator] = None,
+    crop_center_xy_m: Optional[Tuple[float, float]] = None,
 ) -> Dict[str, torch.Tensor]:
     xyz = xyz_m[point_idx]
+
+    # --- LiDOG-faithful crop centering (XY only): center crop at (0,0) ---
+    # This is a rigid translation; it does NOT distort geometry.
+    if crop_center_xy_m is not None:
+        cx, cy = float(crop_center_xy_m[0]), float(crop_center_xy_m[1])
+        xyz = xyz.astype(np.float32, copy=True)
+        xyz[:, 0] -= cx
+        xyz[:, 1] -= cy
 
     xyz_norm = (xyz.astype(np.float32) / float(patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
 
@@ -183,11 +192,11 @@ def _pick_center_index(
     crop_cfg: DalesCropConfig,
     fallback_rare_ids: Tuple[int, ...],
     rng: np.random.Generator,
-) -> int:
+) -> Tuple[int, bool]:
     """Pick a center point index, optionally biased towards rare classes."""
     n = y_train_pts.shape[0]
     if n == 0:
-        return 0
+        return 0, False
 
     rare_ids = crop_cfg.rare_center_class_ids
     if rare_ids is None or len(rare_ids) == 0:
@@ -198,9 +207,9 @@ def _pick_center_index(
         mask_rare = (y_train_pts != ignore_index) & np.isin(y_train_pts, np.asarray(rare_ids, dtype=np.int64))
         cand = np.where(mask_rare)[0]
         if cand.size > 0:
-            return int(rng.choice(cand))
+            return int(rng.choice(cand)), True
 
-    return int(rng.integers(0, n))
+    return int(rng.integers(0, n)), False
 
 
 def _points_in_xy_square(
@@ -577,8 +586,13 @@ class DalesTiles(torch.utils.data.Dataset):
 
     def _stable_seed(self, *, path: Path, tile_i: int, rep_i: int) -> int:
         h = zlib.crc32(path.name.encode("utf-8")) & 0xFFFFFFFF
-        # include epoch so crops differ each epoch
-        s = (self.seed * 1000003 + self.epoch * 9176 + tile_i * 101 + rep_i * 17 + h) & 0x7FFFFFFF
+
+        # val/test may not have repetition indexing; allow None safely.
+        ti = int(tile_i) if tile_i is not None else 0
+        ri = int(rep_i) if rep_i is not None else 0
+        ep = int(self.epoch) if getattr(self, "epoch", None) is not None else 0
+
+        s = (self.seed * 1000003 + ep * 9176 + ti * 101 + ri * 17 + h) & 0x7FFFFFFF
         return int(s)
 
     def set_epoch(self, epoch: int) -> None:
@@ -621,8 +635,8 @@ class DalesTiles(torch.utils.data.Dataset):
         return out
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        tile_i = None
-        rep_i = None
+        tile_i = 0
+        rep_i = 0
         if self.is_train and self.sampling_mode == "crops":
             reps = int(self.crop_cfg.crops_per_tile_per_epoch)
             tile_i = idx // reps
@@ -673,6 +687,7 @@ class DalesTiles(torch.utils.data.Dataset):
 
         # Deterministic RNG per sample for reproducible augmentation (while still random across epochs).
         # We mix in global RNG state to vary each epoch naturally.
+        # print(f"DALES: processing {path} (tile_i={tile_i}, rep_i={rep_i})")
         sample_seed = self._stable_seed(path=path, tile_i=tile_i, rep_i=rep_i)
         rng = np.random.default_rng(sample_seed)
 
@@ -766,8 +781,11 @@ class DalesTiles(torch.utils.data.Dataset):
 
             out = None
 
+            # Track chosen crop stats for debugging
+            chosen_meta = None
+
             for _attempt in range(int(crop_cfg.resample_tries)):
-                c_idx = _pick_center_index(
+                c_idx, used_rare_center = _pick_center_index(
                     y_train_pts=y_train_pts,
                     ignore_index=int(self.ignore_index),
                     crop_cfg=crop_cfg,
@@ -792,6 +810,16 @@ class DalesTiles(torch.utils.data.Dataset):
                             break
                         continue
 
+                    # Rare-class fraction in THIS crop (point-space)
+                    y_crop = y_train_pts[pt_idx]
+                    valid = y_crop != int(self.ignore_index)
+                    denom = int(valid.sum())
+                    if denom > 0:
+                        rare_mask = valid & np.isin(y_crop, np.asarray(rare_ids, dtype=np.int64))
+                        rare_frac = float(rare_mask.sum()) / float(denom)
+                    else:
+                        rare_frac = 0.0
+
                     out_try = _points_to_sparse(
                         xyz_m=xyz.astype(np.float32, copy=False),
                         raw={
@@ -807,11 +835,22 @@ class DalesTiles(torch.utils.data.Dataset):
                         label_lut=self.label_lut,
                         voxel_cfg=self.voxel_cfg,
                         rng=rng,
+                        crop_center_xy_m=(cx, cy),  # <-- LiDOG-faithful centering
                     )
 
                     n_vox = int(out_try["coords"].shape[0])
                     if n_vox <= max_vox_soft:
                         out = out_try
+                        chosen_meta = {
+                            "crop_size_xy_m": float(size),
+                            "shrink_steps": int(_shrink),
+                            "resample_attempt": int(_attempt),
+                            "n_points": int(pt_idx.size),
+                            "n_vox": int(n_vox),
+                            "rare_frac": float(rare_frac),
+                            "used_rare_center": int(used_rare_center),
+                            "used_fallback": 0,
+                        }
                         break
 
                     # Too many voxels → shrink crop instead of dropping voxels globally
@@ -847,6 +886,16 @@ class DalesTiles(torch.utils.data.Dataset):
 
                 # Build sparse and (if needed) iteratively reduce points to meet hard voxel budget
                 for _k in range(4):
+
+                    y_crop = y_train_pts[pt_idx]
+                    valid = y_crop != int(self.ignore_index)
+                    denom = int(valid.sum())
+                    if denom > 0:
+                        rare_mask = valid & np.isin(y_crop, np.asarray(rare_ids, dtype=np.int64))
+                        rare_frac = float(rare_mask.sum()) / float(denom)
+                    else:
+                        rare_frac = 0.0
+
                     out_try = _points_to_sparse(
                         xyz_m=xyz.astype(np.float32, copy=False),
                         raw={
@@ -862,10 +911,21 @@ class DalesTiles(torch.utils.data.Dataset):
                         label_lut=self.label_lut,
                         voxel_cfg=self.voxel_cfg,
                         rng=rng,
+                        crop_center_xy_m=(cx, cy),  # <-- center even in fallback
                     )
                     n_vox = int(out_try["coords"].shape[0])
                     if n_vox <= max_vox_hard:
                         out = out_try
+                        chosen_meta = {
+                            "crop_size_xy_m": float(min_size),
+                            "shrink_steps": -1,
+                            "resample_attempt": -1,
+                            "n_points": int(pt_idx.size),
+                            "n_vox": int(n_vox),
+                            "rare_frac": float(rare_frac),
+                            "used_rare_center": 0,
+                            "used_fallback": 1,
+                        }
                         break
 
                     # Reduce points proportionally and retry (rare-preserving)
@@ -890,6 +950,50 @@ class DalesTiles(torch.utils.data.Dataset):
                     out = out_try
 
             out["path"] = str(path)
+
+            # --- Attach debug meta tensors (for train-time logging) ---
+            if chosen_meta is None:
+                chosen_meta = {
+                    "crop_size_xy_m": float(base_size),
+                    "shrink_steps": -1,
+                    "resample_attempt": -1,
+                    "n_points": -1,
+                    "n_vox": int(out["coords"].shape[0]),
+                    "rare_frac": float("nan"),
+                    "used_rare_center": 0,
+                    "used_fallback": 0,
+                }
+            out["meta_crop_size_xy_m"] = torch.tensor(chosen_meta["crop_size_xy_m"], dtype=torch.float32)
+            out["meta_shrink_steps"] = torch.tensor(chosen_meta["shrink_steps"], dtype=torch.int64)
+            out["meta_resample_attempt"] = torch.tensor(chosen_meta["resample_attempt"], dtype=torch.int64)
+            out["meta_n_points"] = torch.tensor(chosen_meta["n_points"], dtype=torch.int64)
+            out["meta_n_vox"] = torch.tensor(chosen_meta["n_vox"], dtype=torch.int64)
+            out["meta_rare_frac"] = torch.tensor(chosen_meta["rare_frac"], dtype=torch.float32)
+            out["meta_used_rare_center"] = torch.tensor(chosen_meta["used_rare_center"], dtype=torch.int64)
+            out["meta_used_fallback"] = torch.tensor(chosen_meta["used_fallback"], dtype=torch.int64)
+
+            # --- BEV supervision in crop-mode (Task 8) ---
+            if self.bev_cfg is not None and self.bev_cfg.enabled:
+                m_per_vox = float(self.patch_cfg.voxel_size) * float(self.patch_cfg.coord_norm_factor)
+                coords_np = out["coords"].cpu().numpy().astype(np.int32, copy=False)
+                labels_np = out["labels"].cpu().numpy().astype(np.int64, copy=False)
+                bev_labels = {}
+                bev_selected = {}
+                for lvl in self.bev_cfg.levels:
+                    lbl, sel = build_bev_labels_and_selected_idx(
+                        coords_vox_int32=coords_np,
+                        labels_vox_i64=labels_np,
+                        voxel_ignore_index=int(self.ignore_index),
+                        bev_cfg=self.bev_cfg,
+                        level=str(lvl),
+                        meters_per_voxel=m_per_vox,
+                        rng=rng,
+                    )
+                    bev_labels[str(lvl)] = torch.from_numpy(lbl).long()
+                    bev_selected[str(lvl)] = torch.from_numpy(sel).long()
+                out["bev_labels"] = bev_labels
+                out["bev_selected_idx"] = bev_selected
+
             return out
 
         # ---- TILE MODE (EVAL / DEBUG) ----
@@ -1026,6 +1130,11 @@ def minkowski_collate_dales(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, t
     coords, feats, labels = ME.utils.sparse_collate(coords_list, feats_list, labels_list)
     paths = [b["path"] for b in batch]
     out = {"coords": coords, "feats": feats, "labels": labels, "paths": paths}
+
+    # --- NEW: carry DALES crop debug meta ---
+    for k in batch[0].keys():
+        if k.startswith("meta_"):
+            out[k] = torch.stack([b[k] for b in batch], dim=0)
 
     if "bev_labels" in batch[0]:
         bev0 = batch[0]["bev_labels"]

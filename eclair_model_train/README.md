@@ -107,3 +107,215 @@ Paper DALES table reports IoU for **8 classes** (ground, buildings, cars, trucks
 | Baseline (46727326c2)      | sample_first, no TTA               |     0.0490 |     0.3230 | 0.0154 | 0.0037 |  0.0010 |
 | **Best (36f0394584)**      | **coord_norm_factor=8 + mean_all** | **0.0603** | **0.4097** | 0.0086 | 0.0019 |  0.0010 |
 | **Runner-up (5849333e41)** | **voxel_size=0.04 + mean_all**     | **0.0603** | **0.4096** | 0.0086 | 0.0019 |  0.0010 |
+
+---
+
+For DALES you’re doing crop sampling in point space before voxelization. Each training iteration picks a 20m × 20m spatial window from a large DALES tile/file, keeps only the points inside that window (optionally biased toward rare classes like poles/wires), then voxelizes only those points into MinkowskiEngine sparse tensors. Crop size and voxel size are both hyperparameters (data/representation knobs), not “features”, and tuning them is totally legitimate — they control memory, context, and how thin structures survive quantization.
+
+1. What exactly is “crop sampling” in your DALES pipeline?
+
+DALES scenes are huge. Feeding a full scene into a sparse UNet can explode memory because sparse UNets keep many active sites across multiple resolutions.
+
+So instead of dropping voxels globally, your DALES loader does:
+
+Load raw arrays (xyz + return attributes + native labels) from the raw cache.
+
+(Optional) Augment the points (flip/scale/jitter).
+
+Choose a crop center (𝑐𝑥,𝑐𝑦)
+
+Select points in a square window around that center:
+𝐶={𝑖∣∣𝑥𝑖−𝑐𝑥∣≤𝑠/2, ∣𝑦𝑖−𝑐𝑦∣≤𝑠/2}
+
+where 𝑠=crop_size_xy_m (e.g., 20m).
+
+(Optional) Recenter crop coords to crop-local frame (important for BEV).
+
+Build per-point features (return_number one-hot + number_of_returns one-hot).
+
+Voxelize those points with voxel_size and pooling rules.
+
+Return {coords, feats, labels, (maps...), (bev_labels...)} to the trainer.
+
+Key answer:
+
+✅ Crop sampling happens before voxelization.
+
+That’s also why it prevents OOM: you never voxelize the full giant scene—only the crop.
+
+---
+
+2. How is the crop center chosen?
+
+You configured:
+
+rare_center_prob: 0.5
+
+rare_center_class_ids: [5,6] (poles, power_lines in your train ID space)
+
+crops_per_tile_per_epoch: 8
+
+So conceptually, per file/tile per epoch:
+
+For each crop:
+
+with probability 0.5, pick a random point belonging to a rare class (pole/powerline) as the crop center
+
+otherwise, pick a random point from the scene as crop center
+
+This biases training to include thin/rare classes more often, rather than hoping random uniform crops contain poles/wires.
+
+If the selected crop is too small (not enough points) or too large (too many voxels), the loader retries (you set resample_tries: 25) and can shrink crop size.
+
+---
+
+3. How is crop size determined during runtime?
+
+You set:
+
+crop_size_xy_m: 20.0
+
+min_crop_size_xy_m: 8.0
+
+shrink_ratio: 0.8
+
+max_shrink_steps: 5
+
+crop_min_points: 2000
+
+voxel budgets:
+
+max_voxels_per_crop_soft: 120000
+
+max_voxels_per_crop_hard: 160000
+
+So runtime crop sizing is:
+
+Start with s = 20.0m.
+
+Select points in that crop.
+
+If:
+
+too few points (<2000) → resample a different center, or
+
+estimated/actual voxels exceed soft budget → shrink crop:
+
+𝑠←0.8
+
+repeat until:
+
+under budget, or
+
+reached min_crop_size_xy_m, or
+
+max shrink steps used.
+
+If still too big → apply a hard fallback (e.g., subsample points but preserve rare classes), so you don’t crash.
+
+So crop size is a starting hyperparam but becomes adaptive to stay OOM-safe.
+
+---
+
+4. Does crop sampling happen after voxelization?
+
+No — and it matters.
+
+If you cropped after voxelization:
+
+you’d have to voxelize the full scene first (expensive and can OOM)
+
+then discard many voxels (wasteful)
+
+and you’d still have indexing/mapping complexities
+
+Cropping in point space is the standard way to keep memory bounded.
+
+---
+
+5. Are voxel size and crop size “hyperparameters”? Can we tune them?
+
+Yes, absolutely.
+
+Crop size (crop_size_xy_m) is a hyperparameter controlling:
+
+context (bigger crops see more surroundings; better for buildings/roads)
+
+memory (bigger crops → more points → more voxels → more GPU memory)
+
+rare class frequency (smaller crops + rare-center sampling can concentrate poles/wires more often)
+
+boundary effects (too small crops can cut structures and confuse the model)
+
+Voxel size (patch.voxel_size) is a hyperparameter controlling:
+
+resolution (smaller voxels preserve thin wires/poles better)
+
+compute/memory (smaller voxels create more active sites)
+
+aliasing (large voxels can erase thin structures)
+
+Neither is a “feature” like intensity or returns — they are representation / sampling knobs.
+
+Tuning them is fair game, and in LiDAR segmentation papers, voxel size and crop/window size are routinely treated as key experimental knobs because they directly affect sparse tensor density and performance.
+
+---
+
+6. How crop size and voxel size interact (important intuition)
+
+A rough mental model:
+
+number of points in a crop grows ~ with area: 𝑁∝𝑠^2
+
+number of voxels grows with both area and voxel size:
+smaller voxel_size → many more unique voxels per meter.
+
+So:
+
+doubling crop size can quadruple points
+
+halving voxel size can increase voxel count dramatically (especially in dense regions)
+
+That’s why your pipeline has both:
+
+crop-size adaptation
+
+voxel budgets
+
+---
+
+7. Practical guidance for your current config
+
+You’re currently at:
+
+crop: 20m
+
+voxel size: 0.02
+
+soft/hard voxels: 120k / 160k
+
+stride in eval: 50m non-overlap (for point eval)
+
+This is a reasonable starting point for 2×GPU runs, but you should expect:
+
+wires/poles are sensitive to voxel size
+
+buildings/ground benefit from larger crop context
+
+So you can tune:
+
+crop_size_xy_m (e.g., 15, 20, 25)
+
+voxel_size (e.g., 0.02 vs 0.03)
+
+rare_center_prob (0.5 → 0.7 if utility assets are still weak)
+
+One subtle point (ties to your earlier BEV question)
+
+If you want BEV bounds fixed to [0,20]×[0,20], you either:
+
+crop-center/recenter into crop frame, or
+
+use symmetric bounds [-10,10] and shift indices like LiDOG
+
+Otherwise BEV will “see” an empty map for most crops.

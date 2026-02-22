@@ -7,8 +7,8 @@
 #SBATCH --gres=gpu:0
 #SBATCH --mem=48G
 #SBATCH --time=08:00:00
-#SBATCH --output=/scratch/m23csa510/e0_logs/cache_%j.out
-#SBATCH --error=/scratch/m23csa510/e0_logs/cache_%j.err
+#SBATCH --output=/scratch/m23csa510/e0_logs/eclair_cache_%j.out
+#SBATCH --error=/scratch/m23csa510/e0_logs/eclair_cache_%j.err
 
 set -euo pipefail
 
@@ -20,7 +20,7 @@ set -u
 
 PROJECT_ROOT="/csehome/m23csa510/lidar_experiments"
 REPO_ROOT="$PROJECT_ROOT/cross-sensor-3d-lidar-segmentation-and-dom-adpt"
-CODE_ROOT="$REPO_ROOT/eclair_model_train/scripts"  # where precompute script lives
+CODE_ROOT="$REPO_ROOT/eclair_model_train"  # where precompute script lives
 CONDA_ROOT="$PROJECT_ROOT/env/miniconda3"
 DATA_ROOT="$PROJECT_ROOT/datasets"
 
@@ -69,7 +69,7 @@ mkdir -p "${CACHE_ROOT}"
 cd "${CODE_ROOT}"
 echo "CWD: $(pwd)"
 
-python precompute_eclair_cache.py \
+python -m scripts.precompute_eclair_cache \
   --eclair_root "${ECLAIR_DIR}" \
   --cache_root "${CACHE_ROOT}" \
   --splits train val test

@@ -18,7 +18,7 @@
 epochs: 80
 
 eval:
-  mode: point # voxel | point
+  mode: voxel # voxel | point
   window:
     size_xy_m: 50.0
     stride_xy_m: 50.0 # start non-overlap; later try 25.0 for overlap
@@ -114,18 +114,18 @@ model:
       warmup_only_bev: true
 
       label_pool: "last" # last matches LiDOG getBEVImageNew assignment behavior
-      bev_img_sizes: [100] # must match len(levels); LiDOG uses per-level sizes
+      bev_img_sizes: [200] # must match len(levels); LiDOG uses per-level sizes
 
       projector:
         x_min_m: 0.0
         x_max_m: 100.0
         y_min_m: 0.0
         y_max_m: 100.0
-        z_min_m: -10.0
-        z_max_m: 10.0
+        z_min_m: -100.0
+        z_max_m: 200.0
         y_flip: true # matches LiDOG pixel_y definition
         pool: max
-        res_m: 0.20
+        res_m: 0.5
         mode: select # pool | select
 
       hidden_dim: 64
@@ -145,7 +145,7 @@ loss:
   gamma: 2.0
   alpha: null # or your per-class alpha list
   lovasz:
-    enabled: true
+    enabled: false
     weight: 0.5
     warmup_epochs: 10
     ramp_epochs: 10

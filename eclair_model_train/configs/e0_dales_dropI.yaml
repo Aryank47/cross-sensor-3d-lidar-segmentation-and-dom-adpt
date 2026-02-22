@@ -12,13 +12,13 @@ run:
   save_every_epochs: 5
 
 eval:
-  mode: point # voxel | point
+  mode: voxel_windowed # voxel_windowed | point
   window:
     size_xy_m: 50.0
     stride_xy_m: 50.0 # start non-overlap; later try 25.0 for overlap
     aggregation: mean_logits
     accum_dtype: float32 # float16 saves RAM, float32 safest
-    compute_point_loss: true
+    compute_point_loss: flase
   bev:
     enabled: false
     every_epochs: 5 # run BEV eval/vis every N epochs
@@ -87,7 +87,7 @@ data:
     shrink_ratio: 0.8
     max_shrink_steps: 5
     hard_max_points: 200000
-    max_points_per_crop_soft: 350000 # optional; saves time by shrinking before voxelization
+    max_points_per_crop_soft: null # optional; saves time by shrinking before voxelization
     resample_tries: 25
 
   preproc:
@@ -99,7 +99,7 @@ data:
     rare_class_ids: [2, 3, 5, 6, 7]
 
   aug:
-    enabled: true
+    enabled: false
     random_flip_xy: true
     random_rotate_deg: [0.0, 0.0]
     scale_range: [0.95, 1.05]
@@ -156,10 +156,10 @@ model:
       bev_img_sizes: [100] # must match len(levels); LiDOG uses per-level sizes
 
       projector:
-        x_min_m: 0.0
-        x_max_m: 20.0
-        y_min_m: 0.0
-        y_max_m: 20.0
+        x_min_m: -10.0
+        x_max_m: 10.0
+        y_min_m: -10.0
+        y_max_m: 10.0
         z_min_m: -10.0
         z_max_m: 10.0
         y_flip: true # matches LiDOG pixel_y definition
@@ -176,8 +176,8 @@ optim:
 
 sched:
   name: step
-  step_size_epochs: 10
-  gamma: 0.5
+  step_size_epochs: 20
+  gamma: 0.8
 
 loss:
   # name: focal
@@ -198,7 +198,7 @@ loss:
   gamma: 2.0
   alpha: null # or your per-class alpha list
   lovasz:
-    enabled: true
+    enabled: false
     weight: 0.5
     warmup_epochs: 10
     ramp_epochs: 10

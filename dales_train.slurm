@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=e0_ECLAIR_REPRO
+#SBATCH --job-name=e0_DALES_TRAIN
 #SBATCH --partition=mtech
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:2
 #SBATCH --mem=64G
-#SBATCH --time=48:00:00
-#SBATCH --output=/scratch/m23csa510/e0_logs/e0_eclair_%j.out
-#SBATCH --error=/scratch/m23csa510/e0_logs/e0_eclair_%j.err
+#SBATCH --time=36:00:00
+#SBATCH --output=/scratch/m23csa510/e0_logs/dales_train_%j.out
+#SBATCH --error=/scratch/m23csa510/e0_logs/dales_train_%j.err
 
 set -euo pipefail
 
@@ -24,19 +24,19 @@ set -u
 PROJECT_ROOT="/csehome/m23csa510/lidar_experiments"
 CONDA_ROOT="$PROJECT_ROOT/env/miniconda3"
 
-# This should be the folder that contains:
-#   train.py, configs/e0_eclair.yaml, scripts/precompute_eclair_cache.py, src/
+# repo root containing train.py, configs/, scripts/, src/
 CODE_ROOT="$PROJECT_ROOT/cross-sensor-3d-lidar-segmentation-and-dom-adpt/eclair_model_train"
 
-# ECLAIR dataset root must contain: labels.json and pointclouds/
-ECLAIR_DIR="$PROJECT_ROOT/datasets/eclair"
+DATA_ROOT="/scratch/m23csa510/dales"
+DALES_TRAIN_DIR="$DATA_ROOT/dales/train"
+DALES_TEST_DIR="$DATA_ROOT/dales/test"
 
 # Scratch outputs
 SCRATCH_OUTROOT="/scratch/m23csa510/e0_results"
 SCRATCH_LOGROOT="/scratch/m23csa510/e0_logs"
-CACHE_ROOT="/scratch/m23csa510/eclair_cache"
+DALES_CACHE_ROOT_DROP_I="/scratch/m23csa510/dales/dales_cache"
 
-mkdir -p "${SCRATCH_OUTROOT}" "${SCRATCH_LOGROOT}" "${CACHE_ROOT}"
+mkdir -p "${SCRATCH_OUTROOT}" "${SCRATCH_LOGROOT}" "${DALES_CACHE_ROOT_DROP_I}"
 
 ########################
 # 1) MODULES / CUDA
@@ -65,14 +65,7 @@ export NCCL_DEBUG=WARN
 source "${CONDA_ROOT}/etc/profile.d/conda.sh"
 conda activate e0_env
 
-# Make conda env take priority (and avoid ~/.local bin shadowing)
-# export PYTHONNOUSERSITE=1
 export PATH="${CONDA_PREFIX}/bin:${PATH}"
-
-# # Optionally remove ~/.local/bin entirely for the job
-# export PATH="$(echo "$PATH" | tr ':' '\n' | grep -v "$HOME/.local/bin" | paste -sd: -)"
-# hash -r
-
 
 echo "Python: $(which python)"
 python -V
@@ -81,20 +74,16 @@ echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
 
 nvidia-smi
 
-echo "which python:  $(which python)"
-echo "python exec:   $(python -c 'import sys; print(sys.executable)')"
-echo "which torchrun: $(which torchrun || true)"
-echo "torchrun head:  $(head -n 1 $(which torchrun) 2>/dev/null || true)"
-
-python -c "import torch; import sys; print('torch', torch.__version__, 'py', sys.executable)"
-python -c "import MinkowskiEngine as ME; import sys; print('ME_OK', ME.__file__, 'py', sys.executable)"
-
+python -c "import torch, sys; print('torch', torch.__version__, 'py', sys.executable)"
+python -c "import MinkowskiEngine as ME, sys; print('ME_OK', ME.__file__, 'py', sys.executable)"
 
 ########################
 # 4) ENV VARS REQUIRED BY YAML
 ########################
-export ECLAIR_ROOT="${ECLAIR_DIR}"
-export ECLAIR_CACHE_ROOT="${CACHE_ROOT}"
+# These must match your DALES YAML (recommended keys below).
+export DALES_TRAIN_ROOT="${DALES_TRAIN_DIR}"
+export DALES_TEST_ROOT="${DALES_TEST_DIR}"
+export DALES_CACHE_ROOT_DROP_I="${DALES_CACHE_ROOT_DROP_I}"
 
 ########################
 # 5) MOVE TO CODE
@@ -103,21 +92,28 @@ cd "${CODE_ROOT}"
 echo "CWD: $(pwd)"
 
 ########################
-# 7) CREATE JOB RUN DIR + JOB-SPECIFIC YAML
+# 6) CREATE JOB RUN DIR + JOB-SPECIFIC YAML
 ########################
-RUN_DIR="${SCRATCH_OUTROOT}/e0_eclair_repro_${SLURM_JOB_ID}"
+RUN_DIR="${SCRATCH_OUTROOT}/e0_dales_train_${SLURM_JOB_ID}"
 mkdir -p "${RUN_DIR}"
 
-CONFIG_SRC="configs/e0_eclair_dropI.yaml"
-CONFIG_RUN="${RUN_DIR}/e0_eclair_${SLURM_JOB_ID}.yaml"
+# IMPORTANT: use your DALES training config here
+# e.g. configs/e0_dales_dropI.yaml (the one we created earlier)
+CONFIG_SRC="configs/e0_dales_dropI.yaml"
+CONFIG_RUN="${RUN_DIR}/e0_dales_${SLURM_JOB_ID}.yaml"
 
 python - <<PY
 import yaml
 from pathlib import Path
 
 cfg = yaml.safe_load(Path("${CONFIG_SRC}").read_text())
+
 cfg.setdefault("run", {})
 cfg["run"]["out_dir"] = "${RUN_DIR}"
+
+# Optional: keep logs distinguishable
+cfg["run"]["name"] = cfg["run"].get("name", "e0_dales_train") + f"_{${SLURM_JOB_ID}}"
+
 Path("${CONFIG_RUN}").write_text(yaml.safe_dump(cfg, sort_keys=False))
 print("[config] wrote:", "${CONFIG_RUN}")
 PY
@@ -125,16 +121,15 @@ PY
 echo "[run] RUN_DIR=${RUN_DIR}"
 echo "[run] Using config: ${CONFIG_RUN}"
 
-# Optional: record git commit if this is a git repo
+# Optional: record git commit
 if command -v git >/dev/null 2>&1 && [ -d .git ]; then
   git rev-parse HEAD | tee "${RUN_DIR}/git_commit.txt" || true
   git status --porcelain | tee "${RUN_DIR}/git_status.txt" || true
 fi
 
 ########################
-# 8) TRAIN (2-GPU DDP)
+# 7) TRAIN (2-GPU DDP)
 ########################
-# Pick a deterministic-ish free port (avoid collisions)
 MASTER_PORT=$((10000 + (${SLURM_JOB_ID} % 50000)))
 export MASTER_PORT
 

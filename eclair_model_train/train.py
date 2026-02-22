@@ -321,7 +321,7 @@ def build_scheduler(cfg: Dict[str, Any], optimizer: torch.optim.Optimizer):
 
 
 def _bev_enabled(cfg: Dict[str, Any]) -> bool:
-    return bool(((cfg.get("model", {}) or {}).get("aux_heads", {}) or {}).get("bev", {}) or {}).get("enabled", False)
+    return bool(((cfg.get("model", {}) or {}).get("aux_heads", {}) or {}).get("bev", {}).get("enabled", False))
 
 
 def _bev_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -734,6 +734,220 @@ def _make_sliding_origins(max_xy_vox: int, win_vox: int, stride_vox: int) -> Lis
 
 
 @torch.no_grad()
+def evaluate_voxel_windowed(
+    *,
+    model: torch.nn.Module,
+    dist_env: DistEnv,
+    dataset_obj,
+    criterion_cpu: torch.nn.Module,
+    num_classes: int,
+    ignore_index: int,
+    device: torch.device,
+    amp: bool,
+    cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    OOM-safe voxel evaluation for huge DALES tiles:
+      - load raw points
+      - voxelize full tile ONCE (cpu), INCLUDING voxel labels (label_pool)
+      - run sparse UNet in sliding windows over voxels (gpu-safe)
+      - aggregate voxel logits over overlapping windows
+      - compute voxel IoU/F1 directly on voxels (no inverse_map projection)
+    """
+    model.eval()
+    cm = ConfusionMatrix(num_classes=num_classes, ignore_index=ignore_index)
+
+    eval_cfg = cfg.get("eval", {}) or {}
+    win_cfg = eval_cfg.get("window", {}) or {}
+
+    win_m = float(win_cfg.get("size_xy_m", 50.0))
+    stride_m = float(win_cfg.get("stride_xy_m", win_m))
+    accum_dtype = str(win_cfg.get("accum_dtype", "float32")).lower()
+    if accum_dtype not in ("float32", "float16"):
+        raise ValueError("eval.window.accum_dtype must be float32 or float16")
+
+    agg = str(win_cfg.get("aggregation", "mean_logits")).lower()
+    if agg not in ("mean_logits", "sum_logits"):
+        raise ValueError("eval.window.aggregation must be mean_logits or sum_logits")
+
+    # reuse the same flag for convenience (loss over voxels here)
+    compute_voxel_loss = bool(win_cfg.get("compute_point_loss", False))
+
+    total_loss = 0.0
+    total_n = 0
+
+    n_tiles = len(dataset_obj)
+    for ti in range(n_tiles):
+        if dist_env.enabled and (ti % dist_env.world_size) != dist_env.rank:
+            continue
+
+        raw = dataset_obj.get_raw(ti)
+        xyz = raw["xyz"].astype(np.float32, copy=False)
+
+        # --- labels per POINT in train-id space ---
+        if hasattr(dataset_obj, "label_lut") and dataset_obj.label_lut is not None:
+            # DALES path (native -> train LUT)
+            y_native = raw.get("native_labels", None)
+            if y_native is None:
+                raise KeyError("DALES raw must include native_labels")
+            y_safe = np.clip(y_native.astype(np.int64, copy=False), 0, 255)
+            y_pts = dataset_obj.label_lut[y_safe].astype(np.int64, copy=False)
+        else:
+            # ECLAIR path
+            y_native = raw.get("native_labels", None)
+            if y_native is None:
+                y_native = raw.get("labels", None)
+            if y_native is None:
+                raise KeyError("ECLAIR raw must include native_labels or labels")
+            undefined_id = int(getattr(dataset_obj, "undefined_id", 0))
+            y_native = y_native.astype(np.int64, copy=False)
+            y_pts = y_native - 1
+            y_pts[y_native == undefined_id] = ignore_index
+
+        # --- features per POINT ---
+        patch_cfg = dataset_obj.patch_cfg
+        feat_cfg = dataset_obj.feat_cfg
+
+        xyz_norm = (xyz / float(patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
+        feats_p = build_features(
+            xyz_local=xyz_norm,
+            intensity=(raw.get("intensity", None)),
+            return_number=raw.get("return_number", None),
+            number_of_returns=raw.get("number_of_returns", None),
+            rgb=(raw.get("rgb", None) if feat_cfg.use_rgb else None),
+            cfg=feat_cfg,
+        )  # [Np, Cin]
+
+        # --- full-tile quantization (CPU) INCLUDING voxel labels ---
+        q = np.floor(xyz_norm / float(patch_cfg.voxel_size)).astype(np.int32, copy=False)
+        voxel_cfg = VoxelizationConfig.from_cfg(cfg["data"])
+        vx = voxelize_from_q(
+            q_int32=q,
+            feats_p_f32=feats_p.astype(np.float32, copy=False),
+            labels_p_i64=y_pts.astype(np.int64, copy=False),
+            ignore_index=int(ignore_index),
+            cfg=voxel_cfg,
+            rng=None,
+            return_maps=False,
+            num_classes_hint=num_classes,
+        )
+
+        coords_u = vx["coords_u"]  # [Nv,3] int32
+        feats_v = vx["feats_u"]  # [Nv,Cin] float32
+        labels_v = vx["labels_u"]  # [Nv] int64
+        if labels_v is None:
+            raise RuntimeError("voxelize_from_q did not return labels_u; labels_p_i64 was provided but labels_u is None.")
+        nv = int(coords_u.shape[0])
+        if nv == 0:
+            continue
+
+        # --- window schedule in VOXEL units ---
+        m_per_vox = float(patch_cfg.voxel_size) * float(patch_cfg.coord_norm_factor)
+        win_vox = max(1, int(np.ceil(win_m / m_per_vox)))
+        stride_vox = max(1, int(np.ceil(stride_m / m_per_vox)))
+
+        x = coords_u[:, 0]
+        y = coords_u[:, 1]
+        xmax = int(x.max())
+        ymax = int(y.max())
+        xs = _make_sliding_origins(xmax + 1, win_vox, stride_vox)
+        ys = _make_sliding_origins(ymax + 1, win_vox, stride_vox)
+
+        # --- accumulate voxel logits across windows ---
+        sum_dtype = np.float16 if accum_dtype == "float16" else np.float32
+        voxel_logits_sum = np.zeros((nv, num_classes), dtype=sum_dtype)
+        voxel_counts = np.zeros((nv,), dtype=np.uint16)
+
+        for x0 in xs:
+            x1 = x0 + win_vox
+            mx = (x >= x0) & (x < x1)
+            if not bool(mx.any()):
+                continue
+            for y0 in ys:
+                y1 = y0 + win_vox
+                sel = np.where(mx & (y >= y0) & (y < y1))[0]
+                if sel.size == 0:
+                    continue
+
+                coords_sub = coords_u[sel].astype(np.int32, copy=False)
+                coords_sub = coords_sub - coords_sub.min(axis=0, keepdims=True)
+
+                coords_sub_t = torch.from_numpy(np.ascontiguousarray(coords_sub, dtype=np.int32)).int()
+                feats_sub_t = torch.from_numpy(np.ascontiguousarray(feats_v[sel], dtype=np.float32)).float()
+
+                coords_b = ME.utils.batched_coordinates([coords_sub_t], dtype=torch.int32)
+                st = ME.SparseTensor(
+                    feats_sub_t.to(device, non_blocking=True),
+                    coordinates=coords_b.to(device, non_blocking=True),
+                    device=device,
+                )
+
+                with torch.autocast(device_type="cuda", enabled=amp):
+                    try:
+                        out = model(st, is_train=False, compute_bev=False)
+                    except TypeError:
+                        out = model(st)
+
+                if isinstance(out, (tuple, list)) and len(out) == 2:
+                    out_st = out[0]
+                else:
+                    out_st = out
+
+                logits_sub_np = out_st.F.detach().float().cpu().numpy()
+                voxel_logits_sum[sel] += logits_sub_np.astype(sum_dtype, copy=False)
+                voxel_counts[sel] += 1
+
+        # finalize voxel logits
+        counts = voxel_counts.astype(np.float32)
+        counts[counts == 0] = 1.0
+        if agg == "mean_logits":
+            voxel_logits = (voxel_logits_sum.astype(np.float32) / counts[:, None]).astype(np.float32, copy=False)
+        else:
+            voxel_logits = voxel_logits_sum.astype(np.float32, copy=False)
+
+        # metrics (voxel-wise)
+        voxel_pred = voxel_logits.argmax(axis=1).astype(np.int64, copy=False)
+        preds_t = torch.from_numpy(voxel_pred)
+        labels_t = torch.from_numpy(labels_v.astype(np.int64, copy=False))
+        cm.update(preds_t, labels_t)
+
+        if compute_voxel_loss:
+            # compute loss on CPU to avoid GPU memory blowups
+            logits_t = torch.from_numpy(voxel_logits)
+            loss = criterion_cpu(logits_t, labels_t)
+            valid = labels_t != ignore_index
+            n = int(valid.sum().item())
+            total_loss += float(loss.item()) * max(1, n)
+            total_n += max(1, n)
+        else:
+            total_n += max(1, int((labels_t != ignore_index).sum().item()))
+
+    # DDP reduce
+    if dist_env.enabled:
+        cm_mat = cm.mat.to(device=device)
+        cm_mat = all_reduce_sum(dist_env, cm_mat)
+        cm.mat = cm_mat.cpu()
+
+        tl = torch.tensor([total_loss], dtype=torch.float64, device=device)
+        tn = torch.tensor([total_n], dtype=torch.float64, device=device)
+        tl = all_reduce_sum(dist_env, tl)
+        tn = all_reduce_sum(dist_env, tn)
+        total_loss = float(tl.item())
+        total_n = int(tn.item())
+
+    res = cm.compute()
+    loss_out = (total_loss / max(1, total_n)) if compute_voxel_loss else float("nan")
+    return {
+        "loss": loss_out,
+        "miou": res.miou,
+        "macro_f1": res.macro_f1,
+        "per_class_iou": res.per_class_iou,
+        "per_class_f1": res.per_class_f1,
+        "miou_valid": res.miou_valid,
+    }
+
+
+@torch.no_grad()
 def evaluate_pointwise(
     *,
     model: torch.nn.Module,
@@ -1042,6 +1256,25 @@ def train(cfg_path: str):
         "time_epoch_s",
         "best_val_miou",
     ]
+
+    # BEV scalar metric (row currently writes it; add column so it actually appears)
+    fields.append("bev_miou")
+
+    # DALES crop debug metrics (blank for non-DALES / non-crops)
+    is_dales = dataset == "dales"
+    sampling_mode = str(cfg.get("data", {}).get("sampling", {}).get("mode", "tiles")).lower()
+    is_dales_crops = is_dales and (sampling_mode == "crops")
+    if is_dales_crops:
+        fields += [
+            "train_vox_mean",
+            "train_rare_frac_mean",
+            "train_crop_size_mean",
+            "train_shrink_steps_mean",
+            "train_fallback_rate",
+            "train_rare_center_rate",
+            "train_resample_attempt_mean",
+        ]
+
     # per-class columns
     for name in class_names:
         fields.append(f"val_iou_{name.replace(' ', '_').replace('.', '')}")
@@ -1085,6 +1318,15 @@ def train(cfg_path: str):
         cm_train = ConfusionMatrix(num_classes=num_classes, ignore_index=ignore_index)
         train_loss_sum = 0.0
         train_n_sum = 0
+        # --- NEW: crop debug accumulators (DALES crop-mode only) ---
+        dbg_n = 0
+        dbg_vox_sum = 0.0
+        dbg_rare_sum = 0.0
+        dbg_crop_size_sum = 0.0
+        dbg_shrink_sum = 0.0
+        dbg_fallback_sum = 0.0
+        dbg_rare_center_sum = 0.0
+        dbg_resample_sum = 0.0
         optimizer.zero_grad(set_to_none=True)
 
         t0 = torch.cuda.Event(enable_timing=True)
@@ -1153,6 +1395,18 @@ def train(cfg_path: str):
             train_loss_sum += float(total.item()) * max(1, n)
             train_n_sum += max(1, n)
 
+            # --- NEW: consume DALES crop meta if present ---
+            if "meta_n_vox" in batch:
+                # batch values are [B], but B might be 1 for DALES; take mean for safety
+                dbg_n += 1
+                dbg_vox_sum += float(batch["meta_n_vox"].float().mean().item())
+                dbg_rare_sum += float(batch["meta_rare_frac"].float().mean().item())
+                dbg_crop_size_sum += float(batch["meta_crop_size_xy_m"].float().mean().item())
+                dbg_shrink_sum += float(batch["meta_shrink_steps"].float().mean().item())
+                dbg_fallback_sum += float(batch["meta_used_fallback"].float().mean().item())
+                dbg_rare_center_sum += float(batch["meta_used_rare_center"].float().mean().item())
+                dbg_resample_sum += float(batch["meta_resample_attempt"].float().mean().item())
+
             if step % grad_accum == 0:
                 scaler.step(optimizer)
                 scaler.update()
@@ -1163,11 +1417,22 @@ def train(cfg_path: str):
                 lr = optimizer.param_groups[0]["lr"]
                 if bev_enabled:
                     bev_loss_val = float(bev_loss_step.item()) if (bev_loss_step is not None) else 0.0
-                    print(
-                        f"[epoch {epoch:03d} step {step:05d}] total={total.item():.4f} seg={seg_loss.item():.4f} bev={bev_loss_val:.4f} lr={lr:.2e}"
-                    )
+                    msg = f"[epoch {epoch:03d} step {step:05d}] total={total.item():.4f} seg={seg_loss.item():.4f} bev={bev_loss_val:.4f} lr={lr:.2e}"
                 else:
-                    print(f"[epoch {epoch:03d} step {step:05d}] loss={total.item():.4f} lr={lr:.2e}")
+                    msg = f"[epoch {epoch:03d} step {step:05d}] total={total.item():.4f} seg={seg_loss.item():.4f} lr={lr:.2e}"
+
+                # append crop debug if present
+                if "meta_n_vox" in batch:
+                    msg += (
+                        f" | n_vox={int(batch['meta_n_vox'].float().mean().item())}"
+                        f" crop_m={batch['meta_crop_size_xy_m'].float().mean().item():.1f}"
+                        f" shrink={int(batch['meta_shrink_steps'].float().mean().item())}"
+                        f" rare_frac={batch['meta_rare_frac'].float().mean().item():.3f}"
+                        f" rare_center={int(batch['meta_used_rare_center'].float().mean().item())}"
+                        f" fallback={int(batch['meta_used_fallback'].float().mean().item())}"
+                        f" resample={int(batch['meta_resample_attempt'].float().mean().item())}"
+                    )
+                print(msg, flush=True)
 
         # flush leftover grads if dataloader size not divisible by grad_accum
         if (len(train_loader) % grad_accum) != 0:
@@ -1191,6 +1456,18 @@ def train(cfg_path: str):
             eval_mode = str(cfg.get("eval", {}).get("mode", "voxel")).lower()
             if eval_mode == "point":
                 val_metrics = evaluate_pointwise(
+                    model=model,
+                    dist_env=dist_env,
+                    dataset_obj=val_loader.dataset,
+                    criterion_cpu=criterion_cpu,
+                    num_classes=num_classes,
+                    ignore_index=ignore_index,
+                    device=device,
+                    amp=amp,
+                    cfg=cfg,
+                )
+            elif eval_mode in ("voxel_windowed", "voxel_window"):
+                val_metrics = evaluate_voxel_windowed(
                     model=model,
                     dist_env=dist_env,
                     dataset_obj=val_loader.dataset,
@@ -1273,6 +1550,17 @@ def train(cfg_path: str):
             "best_val_miou": best_val_miou,
             "bev_miou": bev_metrics["bev_miou"] if bev_metrics is not None else float("nan"),
         }
+
+        # --- NEW: DALES crop debug epoch aggregates ---
+        if dbg_n > 0:
+            row["train_vox_mean"] = dbg_vox_sum / dbg_n
+            row["train_rare_frac_mean"] = dbg_rare_sum / dbg_n
+            row["train_crop_size_mean"] = dbg_crop_size_sum / dbg_n
+            row["train_shrink_steps_mean"] = dbg_shrink_sum / dbg_n
+            row["train_fallback_rate"] = dbg_fallback_sum / dbg_n
+            row["train_rare_center_rate"] = dbg_rare_center_sum / dbg_n
+            row["train_resample_attempt_mean"] = dbg_resample_sum / dbg_n
+
         for name, v in zip(class_names, val_metrics["per_class_iou"]):
             row[f"val_iou_{name.replace(' ', '_').replace('.', '')}"] = v
         for name, v in zip(class_names, val_metrics["per_class_f1"]):
@@ -1300,6 +1588,18 @@ def train(cfg_path: str):
             dist_env=dist_env,
             dataset_obj=test_loader.dataset,
             criterion_cpu=criterion_cpu,  # keep parity with val
+            num_classes=num_classes,
+            ignore_index=ignore_index,
+            device=device,
+            amp=amp,
+            cfg=cfg,
+        )
+    elif eval_mode in ("voxel_windowed", "voxel_window"):
+        test_metrics = evaluate_voxel_windowed(
+            model=model,
+            dist_env=dist_env,
+            dataset_obj=test_loader.dataset,
+            criterion_cpu=criterion_cpu,
             num_classes=num_classes,
             ignore_index=ignore_index,
             device=device,
