@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:2
 #SBATCH --mem=64G
-#SBATCH --time=48:00:00
+#SBATCH --time=36:00:00
 #SBATCH --output=/scratch/m23csa510/e0_logs/eclair_train_%j.out
 #SBATCH --error=/scratch/m23csa510/e0_logs/eclair_train_%j.err
 

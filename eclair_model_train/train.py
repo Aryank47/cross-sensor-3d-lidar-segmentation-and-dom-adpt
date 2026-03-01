@@ -130,7 +130,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
     elif dataset == "dales":
         # DALES has train/ and test/ only in your setup.
         # We create val by splitting train deterministically unless a val root is provided.
-        dales_aug_cfg = AugmentConfig(**data["aug"])
+        dales_aug_cfg = AugmentConfig(**data["aug"]) if data.get("aug", None) else AugmentConfig(enabled=False)
         label_map = data.get("dales_label_map_native_to_train", None)
         if label_map is not None:
             label_map = {int(k): int(v) for k, v in label_map.items()}
@@ -666,6 +666,21 @@ def _forward_batch(
     return logits, labels, bev_pred
 
 
+def _rotate_xy_np(xyz: np.ndarray, deg: float) -> np.ndarray:
+    """Rotate XYZ around +Z axis by deg, returning a new array."""
+    if deg % 360 == 0:
+        return xyz
+    theta = np.deg2rad(deg)
+    c, s = np.cos(theta), np.sin(theta)
+    xy = xyz[:, :2]
+    R = np.array([[c, -s], [s, c]], dtype=xyz.dtype)
+    xy_r = xy @ R.T
+    out = xyz.copy()
+    out[:, 0] = xy_r[:, 0]
+    out[:, 1] = xy_r[:, 1]
+    return out
+
+
 @torch.no_grad()
 def evaluate(
     *,
@@ -961,12 +976,14 @@ def evaluate_pointwise(
     cfg: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    Strict point-wise evaluation:
+    Strict point-wise evaluation with optional TTA rotations:
       - load raw points
-      - voxelize full tile ONCE (cpu)
+      - (optional) rotate XY + shift to non-negative local frame
+      - voxelize full tile (cpu)
       - run sparse UNet in sliding windows over voxels (gpu-safe)
       - aggregate voxel logits over overlapping windows
       - project voxel logits -> points via inverse_map
+      - average point logits across TTA rotations
       - compute point IoU/F1
     """
     model.eval()
@@ -974,6 +991,21 @@ def evaluate_pointwise(
 
     eval_cfg = cfg.get("eval", {}) or {}
     win_cfg = eval_cfg.get("window", {}) or {}
+
+    # --- TTA config (dict-safe) ---
+    tta_cfg = eval_cfg.get("tta", {}) or {}
+    tta_enabled = bool(tta_cfg.get("enabled", False))
+    rotations_deg = [0.0]
+    if tta_enabled:
+        rotations_deg = tta_cfg.get("rotations_deg", [0.0])
+        if isinstance(rotations_deg, (int, float)):
+            rotations_deg = [float(rotations_deg)]
+        else:
+            rotations_deg = [float(x) for x in list(rotations_deg)]
+        if len(rotations_deg) == 0:
+            rotations_deg = [0.0]
+
+    num_tta = len(rotations_deg)
 
     win_m = float(win_cfg.get("size_xy_m", 50.0))
     stride_m = float(win_cfg.get("stride_xy_m", win_m))
@@ -987,8 +1019,12 @@ def evaluate_pointwise(
     if agg not in ("mean_logits", "sum_logits"):
         raise ValueError("eval.window.aggregation must be mean_logits or sum_logits")
 
+    compute_point_loss = bool(win_cfg.get("compute_point_loss", False))
+
     total_loss = 0.0
     total_n = 0
+
+    voxel_cfg = VoxelizationConfig.from_cfg(cfg["data"])
 
     n_tiles = len(dataset_obj)
     for ti in range(n_tiles):
@@ -996,11 +1032,11 @@ def evaluate_pointwise(
             continue
 
         raw = dataset_obj.get_raw(ti)
-        xyz = raw["xyz"].astype(np.float32, copy=False)
+        xyz_base = raw["xyz"].astype(np.float32, copy=False)
+        Np = int(xyz_base.shape[0])
 
-        # --- labels per POINT in train-id space ---
+        # --- labels per POINT in train-id space (computed once) ---
         if hasattr(dataset_obj, "label_lut") and dataset_obj.label_lut is not None:
-            # DALES path (native -> train LUT)
             y_native = raw.get("native_labels", None)
             if y_native is None:
                 raise KeyError("DALES raw must include native_labels")
@@ -1024,123 +1060,144 @@ def evaluate_pointwise(
         patch_cfg = dataset_obj.patch_cfg
         feat_cfg = dataset_obj.feat_cfg
 
-        xyz_norm = (xyz / float(patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
+        intensity = raw.get("intensity", None)
+        return_number = raw.get("return_number", None)
+        number_of_returns = raw.get("number_of_returns", None)
+        rgb = raw.get("rgb", None) if getattr(feat_cfg, "use_rgb", False) else None
 
-        feats_p = build_features(
-            xyz_local=xyz_norm,
-            intensity=(raw.get("intensity", None)),
-            return_number=raw.get("return_number", None),
-            number_of_returns=raw.get("number_of_returns", None),
-            rgb=(raw.get("rgb", None) if feat_cfg.use_rgb else None),
-            cfg=feat_cfg,
-        )  # [Np, Cin] float32
+        # --- TTA accumulation on POINT logits ---
+        pt_logits_sum = np.zeros((Np, num_classes), dtype=np.float32)
 
-        # --- full-tile quantization + inverse_map (CPU) ---
-        q = np.floor(xyz_norm / float(patch_cfg.voxel_size)).astype(np.int32, copy=False)
-        voxel_cfg = VoxelizationConfig.from_cfg(cfg["data"])
-        rng = None  # deterministic eval; or seed by tile if you want random pooling reproducible
-        vx = voxelize_from_q(
-            q_int32=q.astype(np.int32, copy=False),
-            feats_p_f32=feats_p.astype(np.float32, copy=False),
-            labels_p_i64=None,
-            ignore_index=int(ignore_index),
-            cfg=voxel_cfg,
-            rng=rng,
-            return_maps=True,
-            num_classes_hint=None,
-        )
+        for ri, rot_deg in enumerate(rotations_deg):
+            xyz_r = xyz_base
 
-        coords_u = vx["coords_u"]
-        feats_v = vx["feats_u"]
-        inverse_map = vx["inverse_map"]
-        nv = int(coords_u.shape[0])
+            # rotate about XY centroid (pure rigid transform)
+            if rot_deg % 360 != 0:
+                ctr = xyz_r[:, :2].mean(axis=0, keepdims=True)
+                tmp = xyz_r.copy()
+                tmp[:, :2] -= ctr
+                tmp = _rotate_xy_np(tmp, rot_deg)
+                tmp[:, :2] += ctr
+                xyz_r = tmp
 
-        # --- window schedule in VOXEL units ---
-        m_per_vox = float(patch_cfg.voxel_size) * float(patch_cfg.coord_norm_factor)
-        win_vox = max(1, int(np.ceil(win_m / m_per_vox)))
-        stride_vox = max(1, int(np.ceil(stride_m / m_per_vox)))
+            # shift to non-negative local frame so window masks don't drop negatives
+            xyz_r = xyz_r - xyz_r.min(axis=0, keepdims=True)
 
-        x = coords_u[:, 0]
-        y = coords_u[:, 1]
-        xmax = int(x.max()) if nv > 0 else 0
-        ymax = int(y.max()) if nv > 0 else 0
-        xs = _make_sliding_origins(xmax + 1, win_vox, stride_vox)
-        ys = _make_sliding_origins(ymax + 1, win_vox, stride_vox)
+            # --- build per-point features (no aug in eval) ---
+            xyz_norm = (xyz_r / float(patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
+            feats_p = build_features(
+                xyz_local=xyz_norm,
+                intensity=intensity,
+                return_number=return_number,
+                number_of_returns=number_of_returns,
+                rgb=rgb,
+                cfg=feat_cfg,
+            )
 
-        # --- accumulate voxel logits across windows ---
-        sum_dtype = np.float16 if accum_dtype == "float16" else np.float32
-        voxel_logits_sum = np.zeros((nv, num_classes), dtype=sum_dtype)
-        voxel_counts = np.zeros((nv,), dtype=np.uint16)
+            # --- full-tile quantization + inverse_map (CPU) ---
+            q = np.floor(xyz_norm / float(patch_cfg.voxel_size)).astype(np.int32, copy=False)
 
-        for x0 in xs:
-            x1 = x0 + win_vox
-            mx = (x >= x0) & (x < x1)
-            if not bool(mx.any()):
+            # deterministic rng (only matters if voxelization uses random pooling)
+            rng = np.random.default_rng(seed=(ti * 1009 + ri * 9176 + 1337) & 0x7FFFFFFF)
+
+            vx = voxelize_from_q(
+                q_int32=q.astype(np.int32, copy=False),
+                feats_p_f32=feats_p.astype(np.float32, copy=False),
+                labels_p_i64=None,
+                ignore_index=int(ignore_index),
+                cfg=voxel_cfg,
+                rng=rng,
+                return_maps=True,
+                num_classes_hint=None,
+            )
+
+            coords_u = vx["coords_u"]
+            feats_v = vx["feats_u"]
+            inverse_map = vx["inverse_map"]
+            nv = int(coords_u.shape[0])
+            if nv == 0:
                 continue
-            for y0 in ys:
-                y1 = y0 + win_vox
-                sel = np.where(mx & (y >= y0) & (y < y1))[0]
-                if sel.size == 0:
+
+            # --- window schedule in VOXEL units ---
+            m_per_vox = float(patch_cfg.voxel_size) * float(patch_cfg.coord_norm_factor)
+            win_vox = max(1, int(np.ceil(win_m / m_per_vox)))
+            stride_vox = max(1, int(np.ceil(stride_m / m_per_vox)))
+
+            x = coords_u[:, 0]
+            y = coords_u[:, 1]
+            xmax = int(x.max()) if nv > 0 else 0
+            ymax = int(y.max()) if nv > 0 else 0
+            xs = _make_sliding_origins(xmax + 1, win_vox, stride_vox)
+            ys = _make_sliding_origins(ymax + 1, win_vox, stride_vox)
+
+            # --- accumulate voxel logits across windows ---
+            sum_dtype = np.float16 if accum_dtype == "float16" else np.float32
+            voxel_logits_sum = np.zeros((nv, num_classes), dtype=sum_dtype)
+            voxel_counts = np.zeros((nv,), dtype=np.uint16)
+
+            for x0 in xs:
+                x1 = x0 + win_vox
+                mx = (x >= x0) & (x < x1)
+                if not bool(mx.any()):
                     continue
+                for y0 in ys:
+                    y1 = y0 + win_vox
+                    sel = np.where(mx & (y >= y0) & (y < y1))[0]
+                    if sel.size == 0:
+                        continue
 
-                coords_sub = coords_u[sel].astype(np.int32, copy=False)
-                # per-window local shift (translation invariance, smaller coord ranges)
-                coords_sub = coords_sub - coords_sub.min(axis=0, keepdims=True)
+                    coords_sub = coords_u[sel].astype(np.int32, copy=False)
+                    coords_sub = coords_sub - coords_sub.min(axis=0, keepdims=True)
 
-                coords_sub_t = torch.from_numpy(np.ascontiguousarray(coords_sub, dtype=np.int32)).int()
-                feats_sub_t = torch.from_numpy(np.ascontiguousarray(feats_v[sel], dtype=np.float32)).float()
+                    coords_sub_t = torch.from_numpy(np.ascontiguousarray(coords_sub, dtype=np.int32)).int()
+                    feats_sub_t = torch.from_numpy(np.ascontiguousarray(feats_v[sel], dtype=np.float32)).float()
 
-                coords_b = ME.utils.batched_coordinates([coords_sub_t], dtype=torch.int32)
-                st = ME.SparseTensor(
-                    feats_sub_t.to(device, non_blocking=True),
-                    coordinates=coords_b.to(device, non_blocking=True),
-                    device=device,
-                )
+                    coords_b = ME.utils.batched_coordinates([coords_sub_t], dtype=torch.int32)
+                    st = ME.SparseTensor(
+                        feats_sub_t.to(device, non_blocking=True),
+                        coordinates=coords_b.to(device, non_blocking=True),
+                        device=device,
+                    )
 
-                with torch.autocast(device_type="cuda", enabled=amp):
-                    try:
-                        out = model(st, is_train=False, compute_bev=False)
-                    except TypeError:
-                        out = model(st)
+                    with torch.autocast(device_type="cuda", enabled=amp):
+                        try:
+                            out = model(st, is_train=False, compute_bev=False)
+                        except TypeError:
+                            out = model(st)
 
-                if isinstance(out, (tuple, list)) and len(out) == 2:
-                    out_st = out[0]
-                else:
-                    out_st = out
-                logits_sub = out_st.F
+                    out_st = out[0] if isinstance(out, (tuple, list)) and len(out) == 2 else out
+                    logits_sub_np = out_st.F.detach().float().cpu().numpy()
 
-                logits_sub_np = logits_sub.detach().float().cpu().numpy()
-                voxel_logits_sum[sel] += logits_sub_np.astype(sum_dtype, copy=False)
-                voxel_counts[sel] += 1
+                    voxel_logits_sum[sel] += logits_sub_np.astype(sum_dtype, copy=False)
+                    voxel_counts[sel] += 1
 
-        # finalize voxel logits
-        counts = voxel_counts.astype(np.float32)
-        counts[counts == 0] = 1.0  # safety
-        if agg == "mean_logits":
-            voxel_logits = (voxel_logits_sum.astype(np.float32) / counts[:, None]).astype(np.float32, copy=False)
-        else:
-            voxel_logits = voxel_logits_sum.astype(np.float32, copy=False)
+            counts = voxel_counts.astype(np.float32)
+            counts[counts == 0] = 1.0
 
-        # project voxel logits -> points
-        pt_logits = voxel_logits[inverse_map]  # [Np, C]
-        pt_pred = pt_logits.argmax(axis=1).astype(np.int64, copy=False)
+            if agg == "mean_logits":
+                voxel_logits = (voxel_logits_sum.astype(np.float32) / counts[:, None]).astype(np.float32, copy=False)
+            else:
+                voxel_logits = voxel_logits_sum.astype(np.float32, copy=False)
 
-        # metrics (pointwise)
+            pt_logits = voxel_logits[inverse_map]  # [Np, C]
+            pt_logits_sum += pt_logits.astype(np.float32, copy=False)
+
+        # --- average across TTA rotations ---
+        pt_logits_avg = pt_logits_sum / float(num_tta)
+        pt_pred = pt_logits_avg.argmax(axis=1).astype(np.int64, copy=False)
+
         preds_t = torch.from_numpy(pt_pred)
         labels_t = torch.from_numpy(y_pts.astype(np.int64, copy=False))
         cm.update(preds_t, labels_t)
 
-        # optional pointwise loss on CPU (safe, but can be slow)
-        if bool(win_cfg.get("compute_point_loss", False)):
-            loss = criterion_cpu(torch.from_numpy(pt_logits), labels_t)
-            valid = labels_t != ignore_index
-            n = int(valid.sum().item())
+        # optional pointwise loss on averaged logits
+        valid = labels_t != ignore_index
+        n = int(valid.sum().item())
+        total_n += max(1, n)
+
+        if compute_point_loss:
+            loss = criterion_cpu(torch.from_numpy(pt_logits_avg), labels_t)
             total_loss += float(loss.item()) * max(1, n)
-            total_n += max(1, n)
-        else:
-            # still count valid points for normalization consistency if you later enable loss
-            n = int((labels_t != ignore_index).sum().item())
-            total_n += max(1, n)
 
     # DDP reduce
     if dist_env.enabled:
@@ -1156,7 +1213,7 @@ def evaluate_pointwise(
         total_n = int(tn.item())
 
     res = cm.compute()
-    loss_out = (total_loss / max(1, total_n)) if bool(win_cfg.get("compute_point_loss", False)) else float("nan")
+    loss_out = (total_loss / max(1, total_n)) if compute_point_loss else float("nan")
     return {
         "loss": loss_out,
         "miou": res.miou,
@@ -1506,6 +1563,7 @@ def train(cfg_path: str):
             val_metrics = {
                 "loss": float("nan"),
                 "miou": float("nan"),
+                "miou_valid": float("nan"),  # <-- add this
                 "macro_f1": float("nan"),
                 "per_class_iou": [float("nan")] * num_classes,
                 "per_class_f1": [float("nan")] * num_classes,
@@ -1572,7 +1630,7 @@ def train(cfg_path: str):
             print(
                 f"[epoch {epoch:03d}] train_loss={train_loss:.4f} "
                 f"val_miou={val_metrics['miou']:.4f}"
-                f" val_miou_valid={val_metrics['miou_valid']:.4f}"
+                f"val_miou_valid={float(val_metrics.get('miou_valid', float('nan'))):.4f}"
                 f"val_macro_f1={val_metrics['macro_f1']:.4f} "
                 f"best={best_val_miou:.4f} time={format_seconds(epoch_s)}"
             )

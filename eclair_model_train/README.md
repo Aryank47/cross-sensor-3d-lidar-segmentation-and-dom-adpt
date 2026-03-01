@@ -319,3 +319,102 @@ crop-center/recenter into crop frame, or
 use symmetric bounds [-10,10] and shift indices like LiDOG
 
 Otherwise BEV will “see” an empty map for most crops.
+
+### Quick summary
+
+The _order_ doesn’t matter **only if you remap both sides consistently**: you must convert the dataset’s native labels into your train-ID space **before computing loss**, and during evaluation you must interpret predictions **in that same train-ID space** (or map both prediction+GT into a common space). If you ever mix spaces (GT in native IDs but model outputs in train IDs), then yes—the model will “learn the wrong thing”.
+
+---
+
+You’re thinking about it exactly the right way: **a class index is just a name-tag**. If the name-tags are swapped on the ground truth, the model will learn swapped semantics.
+
+So why do people say “order doesn’t matter”?
+
+Because in segmentation, the model never sees the _string_ “car” or “building”. It sees:
+
+- an integer label per point (ground truth): `y ∈ {0,1,2,...,C-1}`
+- a vector of logits per point (prediction): `z ∈ R^C`
+
+Loss compares them by index.
+
+### The only thing that matters is the mapping function
+
+Let:
+
+- `native_id` = what’s stored in DALES `.las` (0..8)
+- `train_id` = what your model uses internally (0..7, plus ignore)
+
+You define a mapping:
+
+[
+f:\ \text{native_id} \rightarrow \text{train_id}
+]
+
+Example (conceptually):
+`native 8 (buildings) -> train 4 (buildings)`
+`native 3 (cars) -> train 2 (cars)`
+etc.
+
+Now the training pipeline is correct if it does:
+
+1. **Ground-truth mapping**
+   [
+   y_{\text{train}} = f(y_{\text{native}})
+   ]
+
+2. **Model predicts in train space**
+   [
+   \hat{y}_{\text{train}} = \arg\max_k z_k
+   ]
+
+3. **Loss uses train labels**
+   Cross-entropy (or focal) is computed with `y_train` indexing into the logits.
+
+If all three happen, then whether “cars” is train index 2 or 7 is irrelevant. It’s just a permutation of labels.
+
+### When order _does_ matter (the failure mode you’re describing)
+
+It breaks if you accidentally do this:
+
+- Ground truth stays in native IDs (e.g., “cars” = 3)
+- But your model outputs train IDs (e.g., “cars” = 2)
+
+Then loss will punish the model for predicting the “correct semantic class” because it’s using the wrong index reference frame.
+
+Concretely:
+
+- A point is truly “car”.
+- In DALES native labels, that’s `3`.
+- Your model predicts train index `2` (because you decided train_id 2 = car).
+- If you forgot to map GT to train space, the loss compares `2` vs `3` and says “wrong”, and the model learns nonsense.
+
+### Simple mental model: label spaces are coordinate systems
+
+Think of label IDs as coordinate systems:
+
+- DALES native space: (\mathcal{Y}\_{native})
+- Your model train space: (\mathcal{Y}\_{train})
+
+Training and evaluation must never mix coordinate systems without converting.
+
+### How to sanity-check you’re not mixing spaces
+
+You can do a brutally effective check:
+
+- Pick a batch.
+- Print unique GT labels **after mapping** and confirm they are exactly in `{0..7} ∪ {-100}`.
+- Print unique predicted labels (argmax) and confirm they are in `{0..7}`.
+- If you ever see `8` in mapped GT or `-100` in predictions, something is off.
+
+Also: if you have a `class_names` array, it must match the **train-id ordering**, not the native ordering.
+
+---
+
+### Bottom line (your exact question)
+
+> “If I say index 3 is building and tiles are encoded with index 3 as cars… model learns wrong, right?”
+
+✅ Correct — **unless** you remap the tiles’ `3 (cars)` into your internal train-id for cars before training/eval.
+If you do that mapping correctly everywhere, then index numbers are arbitrary labels and order doesn’t matter.
+
+You’re not missing anything — you’re just correctly spotting the one way this goes off the rails: **mismatched label spaces**.
