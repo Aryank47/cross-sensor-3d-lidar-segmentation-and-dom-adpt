@@ -34,6 +34,17 @@ from src.voxelization import VoxelizationConfig, voxelize_from_q
 from torch.utils.data import DataLoader
 
 
+def _read_manifest(p: Path) -> List[Path]:
+    lines = p.read_text().splitlines()
+    out = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        out.append(Path(ln))
+    return out
+
+
 def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
     data = cfg["data"]
     dataset = str(data.get("dataset", "eclair")).lower()
@@ -168,22 +179,38 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
                 "With cache_kind='voxel', cached samples can bypass runtime augmentations."
             )
 
-        if dales_val_root is not None and dales_val_root.exists():
-            train_files = _find_dales_files(dales_train_root)
-            val_files = _find_dales_files(dales_val_root)
+        split_manifest_dir = data.get("split_manifest_dir", None)
+        if split_manifest_dir is not None:
+            smd = Path(str(split_manifest_dir))
+            tr = smd / "train.txt"
+            va = smd / "val.txt"
+            if tr.exists() and va.exists():
+                train_files = _read_manifest(tr)
+                val_files = _read_manifest(va)
+            else:
+                raise RuntimeError(f"split_manifest_dir set but train.txt/val.txt missing: {smd}")
         else:
-            all_train = _find_dales_files(dales_train_root)
-            # If DALES test is ~20% of data, val-from-train should
-            # be 0.10/0.80 = 0.125.
-            val_frac = float(data.get("val_fraction_from_train", 0.125))
-            rng = random.Random(int(cfg["run"]["seed"]) + 777)
-            all_train = sorted(all_train)
-            rng.shuffle(all_train)
-            n_val = max(1, int(round(len(all_train) * val_frac)))
-            val_files = all_train[:n_val]
-            train_files = all_train[n_val:]
+            if dales_val_root is not None and dales_val_root.exists():
+                train_files = _find_dales_files(dales_train_root)
+                val_files = _find_dales_files(dales_val_root)
+            else:
+                all_train = _find_dales_files(dales_train_root)
+                val_frac = float(data.get("val_fraction_from_train", 0.125))
+                rng = random.Random(int(cfg["run"]["seed"]) + 777)
+                all_train = sorted(all_train)
+                rng.shuffle(all_train)
+                n_val = max(1, int(round(len(all_train) * val_frac)))
+                val_files = all_train[:n_val]
+                train_files = all_train[n_val:]
 
-        test_files = _find_dales_files(dales_test_root)
+        test_manifest = None
+        if split_manifest_dir is not None:
+            test_manifest = Path(str(split_manifest_dir)) / "test.txt"
+
+        if test_manifest is not None and test_manifest.exists():
+            test_files = _read_manifest(test_manifest)
+        else:
+            test_files = _find_dales_files(dales_test_root)
 
         train_ds = DalesTiles(
             dales_root=dales_train_root,
@@ -285,6 +312,9 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
         collate_fn=collate,
         persistent_workers=int(data["num_workers"]) > 0,
     )
+    # Speed: prefetch more batches per worker (PyTorch default is 2).
+    if int(data["num_workers"]) > 0:
+        dl_kwargs["prefetch_factor"] = int(data.get("prefetch_factor", 4))
 
     train_loader = DataLoader(
         train_ds,
@@ -1350,8 +1380,15 @@ def train(cfg_path: str):
 
     best_val_miou = -1.0
     global_step = 0
+    track_train_cm = bool(run.get("track_train_cm", False))
+    ds_tr, ds_va, ds_te = train_loader.dataset, val_loader.dataset, test_loader.dataset
+    print("train tiles:", len(ds_tr.files))
+    print("val tiles:", len(ds_va.files))
+    print("test tiles:", len(ds_te.files))
+    print("val files head:", [p.name for p in ds_va.files[:10]])
 
     for epoch in range(1, epochs + 1):
+
         model.train()
         if dist_env.enabled:
             # ensures shuffling differs each epoch
@@ -1372,7 +1409,7 @@ def train(cfg_path: str):
         if is_main_process(dist_env) and hasattr(criterion, "current_weight"):
             print(f"[loss] epoch={epoch:03d} lovasz_w={criterion.current_weight():.4f}", flush=True)
 
-        cm_train = ConfusionMatrix(num_classes=num_classes, ignore_index=ignore_index)
+        cm_train = ConfusionMatrix(num_classes=num_classes, ignore_index=ignore_index) if track_train_cm else None
         train_loss_sum = 0.0
         train_n_sum = 0
         # --- NEW: crop debug accumulators (DALES crop-mode only) ---
@@ -1407,6 +1444,9 @@ def train(cfg_path: str):
 
         for step, batch in enumerate(train_loader, start=1):
             with torch.autocast(device_type="cuda", enabled=amp):
+                if is_main_process(dist_env) and global_step % 20 == 0:
+                    print("batch meta_n_vox shape:", batch.get("meta_n_vox", None).shape if "meta_n_vox" in batch else None)
+
                 logits, labels, bev_pred = _forward_batch(model, batch, device, is_train=True)
                 seg_loss = criterion(logits, labels)
                 # Always defined, even when BEV disabled
@@ -1444,8 +1484,9 @@ def train(cfg_path: str):
 
             scaler.scale(loss_scaled).backward()
 
-            preds = logits.argmax(dim=1)
-            cm_train.update(preds, labels)
+            if cm_train is not None:
+                preds = logits.argmax(dim=1)
+                cm_train.update(preds, labels)
 
             valid = labels != ignore_index
             n = int(valid.sum().item())

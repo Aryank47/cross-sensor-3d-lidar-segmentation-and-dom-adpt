@@ -20,18 +20,41 @@ from src.features import FeatureConfig
 from src.utils import atomic_save_torch, read_las_arrays_robust
 
 
+def _read_manifest(p: Path) -> List[Path]:
+    lines = p.read_text().splitlines()
+    out = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        out.append(Path(ln))
+    return out
+
+
 def _split_train_val(
     *,
     train_root: Path,
     val_root: Optional[Path],
     seed: int,
     val_fraction_from_train: float,
+    split_manifest_dir: Optional[Path] = None,
 ) -> Tuple[List[Path], List[Path]]:
+    # 0) Preferred: use frozen manifests
+    if split_manifest_dir is not None:
+        tr = split_manifest_dir / "train.txt"
+        va = split_manifest_dir / "val.txt"
+        if tr.exists() and va.exists():
+            train_files = _read_manifest(tr)
+            val_files = _read_manifest(va)
+            return train_files, val_files
+
+    # 1) If user provides explicit val folder
     if val_root is not None and val_root.exists():
         train_files = _find_dales_files(train_root)
         val_files = _find_dales_files(val_root)
         return train_files, val_files
 
+    # 2) Fallback: deterministic random split
     all_train = sorted(_find_dales_files(train_root))
     rng = random.Random(int(seed) + 777)
     rng.shuffle(all_train)
@@ -173,13 +196,23 @@ def main() -> None:
         raise ValueError("data.dales_label_map_native_to_train is required for DALES.")
     label_map = {int(k): int(v) for k, v in label_map_cfg.items()}
 
+    split_manifest_dir = None
+    if "split_manifest_dir" in data:
+        split_manifest_dir = Path(str(data["split_manifest_dir"]))
+
     train_files, val_files = _split_train_val(
         train_root=dales_train_root,
         val_root=dales_val_root,
         seed=seed,
         val_fraction_from_train=val_frac,
+        split_manifest_dir=split_manifest_dir,
     )
-    test_files = _find_dales_files(dales_test_root)
+
+    test_manifest = (split_manifest_dir / "test.txt") if split_manifest_dir else None
+    if test_manifest is not None and test_manifest.exists():
+        test_files = _read_manifest(test_manifest)
+    else:
+        test_files = _find_dales_files(dales_test_root)
 
     cache_kind = str(data.get("cache_kind", "voxel")).lower().strip()
     if cache_kind not in ("raw", "voxel"):

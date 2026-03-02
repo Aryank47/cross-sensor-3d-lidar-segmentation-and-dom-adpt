@@ -81,6 +81,22 @@ echo "CWD: $(pwd)"
 # data.dales_train_root: ${DALES_TRAIN_ROOT}
 # data.dales_test_root: ${DALES_TEST_ROOT}
 # data.cache_root: ${DALES_CACHE_ROOT}
+
+python -m scripts.dales_compute_tile_stats \
+  --config configs/e0_dales_dropI.yaml \
+  --out_csv /scratch/m23csa510/dales/tile_stats.csv
+
+python -m scripts.build_dales_splits_hybrid \
+  --config configs/e0_dales_dropI.yaml \
+  --stats_csv /scratch/m23csa510/dales/tile_stats.csv \
+  --out_dir /scratch/m23csa510/dales/manifests \
+  --val_fraction 0.10 \
+  --block_size_m 2000 \
+  --seed_trials 50 \
+  --weight_beta 0.5 \
+  --min_points "5:5000,6:5000"
+
+
 python -m scripts.precompute_dales_cache \
   --config "configs/e0_dales_dropI.yaml"
 
