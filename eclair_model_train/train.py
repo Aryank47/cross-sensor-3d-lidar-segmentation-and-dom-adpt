@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import inspect
+import json
 import random
+import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,6 +39,70 @@ from src.voxelization import VoxelizationConfig, voxelize_from_q
 from torch.utils.data import DataLoader
 
 
+def _eclair_run_cache_key(cfg: Dict[str, Any]) -> str:
+    """
+    Hash only the parts that affect ECLAIR invariants we cache.
+    If any of these change, we must regenerate the run-cache.
+    """
+    data = cfg.get("data", {}) or {}
+    ls = data.get("label_space", {}) or {}
+    patch = data.get("patch", {}) or {}
+    feats = data.get("features", {}) or {}
+
+    obj = {
+        "patch": {
+            "make_local_coords": bool(patch.get("make_local_coords", True)),
+            "coord_norm_factor": float(patch.get("coord_norm_factor", 10.0)),
+        },
+        "label_space": {
+            "ignore_index": int(ls.get("ignore_index", -100)),
+            "eclair_undefined_id": int(ls.get("eclair_undefined_id", 0)),
+            "num_classes": int(ls.get("num_classes", 11)),
+        },
+        "features": {
+            "use_intensity": bool(feats.get("use_intensity", False)),
+            "intensity_divisor": float(feats.get("intensity_divisor", 65535.0)),
+            "use_return_number": bool(feats.get("use_return_number", True)),
+            "use_number_of_returns": bool(feats.get("use_number_of_returns", True)),
+            "returns_onehot_k": int(feats.get("returns_onehot_k", 5)),
+            "use_rgb": bool(feats.get("use_rgb", False)),
+            "include_coords": bool(feats.get("include_coords", False)),
+        },
+    }
+    s = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha1(s).hexdigest()[:12]
+
+
+def _model_forward_safe(
+    model: torch.nn.Module,
+    st: ME.SparseTensor,
+    *,
+    is_train: bool,
+    bev_selected_idx=None,
+    compute_bev: Optional[bool] = None,
+):
+    """
+    Call model.forward() with only supported kwargs.
+    Works with DDP wrappers, explicit params, and **kwargs forwards.
+    """
+    m = model.module if hasattr(model, "module") else model
+    sig = inspect.signature(m.forward)
+    params = sig.parameters
+    has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+    kwargs = {}
+    if has_varkw or ("is_train" in params):
+        # Only include if explicitly supported OR forward has **kwargs.
+        if "is_train" in params or has_varkw:
+            kwargs["is_train"] = is_train
+    if bev_selected_idx is not None and (has_varkw or ("bev_selected_idx" in params)):
+        kwargs["bev_selected_idx"] = bev_selected_idx
+    if compute_bev is not None and (has_varkw or ("compute_bev" in params)):
+        kwargs["compute_bev"] = bool(compute_bev)
+
+    return model(st, **kwargs)
+
+
 def _read_manifest(p: Path) -> List[Path]:
     lines = p.read_text().splitlines()
     out = []
@@ -45,7 +114,7 @@ def _read_manifest(p: Path) -> List[Path]:
     return out
 
 
-def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
+def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cache_dir: Optional[Path] = None):
     data = cfg["data"]
     dataset = str(data.get("dataset", "eclair")).lower()
 
@@ -98,6 +167,10 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             voxel_cfg=voxel_cfg,
             bev_cfg=bev_cfg,
             num_classes=int(ls["num_classes"]),
+            run_cache_root=str(eclair_run_cache_dir) if eclair_run_cache_dir is not None else None,
+            run_cache_precompute_returns_onehot=(
+                eclair_run_cache_dir is not None and (feat_cfg.use_return_number or feat_cfg.use_number_of_returns)
+            ),
         )
         val_ds = EclairTiles(
             eclair_root=data["eclair_root"],
@@ -116,6 +189,10 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             voxel_cfg=voxel_cfg,
             bev_cfg=bev_cfg,
             num_classes=int(ls["num_classes"]),
+            run_cache_root=str(eclair_run_cache_dir) if eclair_run_cache_dir is not None else None,
+            run_cache_precompute_returns_onehot=(
+                eclair_run_cache_dir is not None and (feat_cfg.use_return_number or feat_cfg.use_number_of_returns)
+            ),
         )
         test_ds = EclairTiles(
             eclair_root=data["eclair_root"],
@@ -134,6 +211,10 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv):
             voxel_cfg=voxel_cfg,
             bev_cfg=bev_cfg,
             num_classes=int(ls["num_classes"]),
+            run_cache_root=str(eclair_run_cache_dir) if eclair_run_cache_dir is not None else None,
+            run_cache_precompute_returns_onehot=(
+                eclair_run_cache_dir is not None and (feat_cfg.use_return_number or feat_cfg.use_number_of_returns)
+            ),
         )
 
         collate = minkowski_collate_fn
@@ -559,11 +640,12 @@ def eval_and_visualize_bev(
 
         # ---------- Forward (force BEV in eval) ----------
         with torch.autocast(device_type="cuda", enabled=amp):
-            try:
-                out_st, bev_pred = model(st, is_train=False, bev_selected_idx=bev_sel_dev, compute_bev=True)
-            except TypeError:
-                # fallback if you didn't patch model signature yet
-                out_st, bev_pred = model(st, is_train=True, bev_selected_idx=bev_sel_dev)
+            out = _model_forward_safe(model, st, is_train=False, bev_selected_idx=bev_sel_dev, compute_bev=True)
+            if isinstance(out, (tuple, list)) and len(out) == 2:
+                out_st, bev_pred = out
+            else:
+                # If the model doesn't return BEV even when requested, skip
+                out_st, bev_pred = out, None
 
         if bev_pred is None:
             continue
@@ -684,10 +766,7 @@ def _forward_batch(
     elif torch.is_tensor(bev_sel):
         bev_sel = bev_sel.to(device, non_blocking=True)
 
-    try:
-        out = model(st, is_train=is_train, bev_selected_idx=bev_sel)
-    except TypeError:
-        out = model(st)
+    out = _model_forward_safe(model, st, is_train=is_train, bev_selected_idx=bev_sel, compute_bev=None)
 
     bev_pred = None
     if isinstance(out, (tuple, list)) and len(out) == 2:
@@ -827,7 +906,7 @@ def evaluate_voxel_windowed(
             continue
 
         raw = dataset_obj.get_raw(ti)
-        xyz = raw["xyz"].astype(np.float32, copy=False)
+        xyz = raw["xyz"].astype(np.float64, copy=False)
 
         # --- labels per POINT in train-id space ---
         if hasattr(dataset_obj, "label_lut") and dataset_obj.label_lut is not None:
@@ -1062,7 +1141,7 @@ def evaluate_pointwise(
             continue
 
         raw = dataset_obj.get_raw(ti)
-        xyz_base = raw["xyz"].astype(np.float32, copy=False)
+        xyz_base = raw["xyz"].astype(np.float64, copy=False)
         Np = int(xyz_base.shape[0])
 
         # --- labels per POINT in train-id space (computed once) ---
@@ -1263,6 +1342,22 @@ def train(cfg_path: str):
 
     dist_env = init_distributed()  # <-- move this UP before any writes
 
+    dataset = str(cfg.get("data", {}).get("dataset", "eclair")).lower()
+    eclair_run_cache_dir: Optional[Path] = None
+    eclair_run_cache_base: Optional[Path] = None
+
+    if dataset == "eclair":
+        key = _eclair_run_cache_key(cfg)
+        eclair_run_cache_base = out_dir / "_run_cache" / f"eclair_{key}"
+        rank_tag = f"rank{dist_env.rank}" if dist_env.enabled else "single"
+        eclair_run_cache_dir = eclair_run_cache_base / rank_tag
+        if is_main_process(dist_env):
+            eclair_run_cache_dir.mkdir(parents=True, exist_ok=True)
+        # each rank creates its own dir (avoid shared-writer issues)
+        eclair_run_cache_dir.mkdir(parents=True, exist_ok=True)
+        if dist_env.enabled:
+            torch.distributed.barrier()
+
     # Only rank0 writes files
     if is_main_process(dist_env):
         save_json(out_dir / "config_resolved.json", cfg)
@@ -1276,7 +1371,7 @@ def train(cfg_path: str):
 
     amp = bool(run.get("amp", True))
 
-    train_loader, val_loader, test_loader = build_dataloaders(cfg, dist_env)
+    train_loader, val_loader, test_loader = build_dataloaders(cfg, dist_env, eclair_run_cache_dir=eclair_run_cache_dir)
 
     model_cfg = cfg["model"]
     model = build_model(
@@ -1382,17 +1477,36 @@ def train(cfg_path: str):
     global_step = 0
     track_train_cm = bool(run.get("track_train_cm", False))
     ds_tr, ds_va, ds_te = train_loader.dataset, val_loader.dataset, test_loader.dataset
-    print("train tiles:", len(ds_tr.files))
-    print("val tiles:", len(ds_va.files))
-    print("test tiles:", len(ds_te.files))
-    print("val files head:", [p.name for p in ds_va.files[:10]])
+
+    def _ds_items(ds):
+        # DALES exposes `files: List[Path]`; ECLAIR exposes `names: List[str]`
+        if hasattr(ds, "files"):
+            return list(ds.files)
+        if hasattr(ds, "names"):
+            return list(ds.names)
+        return None
+
+    tr_items = _ds_items(ds_tr)
+    va_items = _ds_items(ds_va)
+    te_items = _ds_items(ds_te)
+
+    print("train tiles:", None if tr_items is None else len(tr_items))
+    print("val tiles:", None if va_items is None else len(va_items))
+    print("test tiles:", None if te_items is None else len(te_items))
+
+    if va_items is not None:
+        head = va_items[:10]
+        # Paths -> show .name; strings -> show directly
+        print("val files head:", [getattr(p, "name", str(p)) for p in head])
 
     for epoch in range(1, epochs + 1):
 
         model.train()
+
         if dist_env.enabled:
             # ensures shuffling differs each epoch
             train_loader.sampler.set_epoch(epoch)
+
         # Ensure crop RNG changes per epoch (and is stable)
         ds = train_loader.dataset
         if hasattr(ds, "set_epoch"):
@@ -1409,6 +1523,12 @@ def train(cfg_path: str):
         if is_main_process(dist_env) and hasattr(criterion, "current_weight"):
             print(f"[loss] epoch={epoch:03d} lovasz_w={criterion.current_weight():.4f}", flush=True)
 
+        if torch.cuda.is_available() and is_main_process(dist_env):
+            peak_alloc = torch.cuda.max_memory_allocated() / (1024**3)
+            peak_reserved = torch.cuda.max_memory_reserved() / (1024**3)
+            print(f"[gpu] peak_alloc={peak_alloc:.2f} GB peak_reserved={peak_reserved:.2f} GB", flush=True)
+            torch.cuda.reset_peak_memory_stats()
+
         cm_train = ConfusionMatrix(num_classes=num_classes, ignore_index=ignore_index) if track_train_cm else None
         train_loss_sum = 0.0
         train_n_sum = 0
@@ -1423,9 +1543,13 @@ def train(cfg_path: str):
         dbg_resample_sum = 0.0
         optimizer.zero_grad(set_to_none=True)
 
-        t0 = torch.cuda.Event(enable_timing=True)
-        t1 = torch.cuda.Event(enable_timing=True)
-        t0.record()
+        use_cuda_timer = torch.cuda.is_available()
+        if use_cuda_timer:
+            t0 = torch.cuda.Event(enable_timing=True)
+            t1 = torch.cuda.Event(enable_timing=True)
+            t0.record()
+        else:
+            t0_wall = time.perf_counter()
 
         bev_cfg = _bev_cfg(cfg)
         bev_enabled = _bev_enabled(cfg)
@@ -1524,7 +1648,9 @@ def train(cfg_path: str):
                     msg += (
                         f" | n_vox={int(batch['meta_n_vox'].float().mean().item())}"
                         f" crop_m={batch['meta_crop_size_xy_m'].float().mean().item():.1f}"
-                        f" shrink={int(batch['meta_shrink_steps'].float().mean().item())}"
+                        f" shrink_min={int(batch['meta_shrink_steps'].float().min().item())}"
+                        f" shrink_mean={int(batch['meta_shrink_steps'].float().mean().item())}"
+                        f" shrink_max={int(batch['meta_shrink_steps'].float().max().item())}"
                         f" rare_frac={batch['meta_rare_frac'].float().mean().item():.3f}"
                         f" rare_center={int(batch['meta_used_rare_center'].float().mean().item())}"
                         f" fallback={int(batch['meta_used_fallback'].float().mean().item())}"
@@ -1541,10 +1667,14 @@ def train(cfg_path: str):
         if scheduler is not None:
             scheduler.step()
 
-        t1.record()
-        torch.cuda.synchronize()
-        epoch_ms = t0.elapsed_time(t1)
-        epoch_s = epoch_ms / 1000.0
+        if use_cuda_timer:
+            t1.record()
+            torch.cuda.synchronize()
+            epoch_ms = t0.elapsed_time(t1)
+            epoch_s = epoch_ms / 1000.0
+        else:
+            epoch_s = time.perf_counter() - t0_wall
+
         bev_metrics = None
         train_loss = train_loss_sum / max(1, train_n_sum)
 
@@ -1723,6 +1853,15 @@ def train(cfg_path: str):
             f"[TEST] loss={test_metrics['loss']:.4f} mIoU={test_metrics['miou']:.4f} "
             f"macroF1={test_metrics['macro_f1']:.4f} miou_valid={test_metrics['miou_valid']:.4f}"
         )
+
+    # ---- Cleanup run-scoped ECLAIR cache (prevents staleness across runs) ----
+    if dataset == "eclair":
+        if dist_env.enabled:
+            torch.distributed.barrier()
+        if is_main_process(dist_env):
+            shutil.rmtree(eclair_run_cache_base, ignore_errors=True)
+        if dist_env.enabled:
+            torch.distributed.barrier()
 
 
 def main():

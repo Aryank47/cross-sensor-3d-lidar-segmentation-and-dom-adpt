@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Union
@@ -18,7 +19,7 @@ from .bev_head import BEVHeadConfig
 from .bev_labels import build_bev_labels_and_selected_idx
 from .features import FeatureConfig, build_features
 from .label_maps import eclair_native_to_train_ids
-from .utils import read_las_arrays_robust
+from .utils import atomic_save_torch, read_las_arrays_robust
 from .voxelization import VoxelizationConfig, voxelize_from_q
 
 
@@ -142,6 +143,15 @@ def _sha1_hex(x: bytes) -> str:
     return hashlib.sha1(x).hexdigest()
 
 
+def _onehot_u8(vals: np.ndarray, k: int) -> np.ndarray:
+    # vals are expected 1..k, clamp to [1..k], then shift to 0..k-1
+    v = vals.astype(np.int64, copy=False)
+    v = np.clip(v, 1, k) - 1
+    out = np.zeros((v.shape[0], k), dtype=np.uint8)
+    out[np.arange(v.shape[0]), v] = 1
+    return out
+
+
 def _cache_key_for_eclair_raw(pc_path: Path) -> str:
     st = pc_path.stat()
     key_obj = {
@@ -182,6 +192,8 @@ class EclairTiles(Dataset):
         allowed_review_categories: Optional[Sequence[str]] = ("approved",),
         voxel_cfg: Optional[VoxelizationConfig] = None,
         bev_cfg: Optional[BEVHeadConfig] = None,
+        run_cache_root: Optional[str | Path] = None,
+        run_cache_precompute_returns_onehot: bool = False,
     ):
         self.eclair_root = Path(eclair_root)
         self.split = split
@@ -208,6 +220,62 @@ class EclairTiles(Dataset):
         self.cache_kind = "raw"  # ECLAIR cache stores raw arrays only
         if self.use_cache and self.cache_root is not None:
             (self.cache_root / self.split / "raw").mkdir(parents=True, exist_ok=True)
+        self.run_cache_root = Path(run_cache_root) if run_cache_root is not None else None
+        self.run_cache_precompute_returns_onehot = bool(run_cache_precompute_returns_onehot)
+        self._run_cache_dir = None
+        if self.run_cache_root is not None:
+            # run_cache_root is run-scoped (under out_dir/_run_cache/...), so no staleness across runs
+            self._run_cache_dir = self.run_cache_root / "eclair" / str(self.split)
+            self._run_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.seed = int(seed)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def _run_cache_path(self, fname: str) -> Path:
+        assert self._run_cache_dir is not None
+        key = _sha1_hex(fname.encode("utf-8"))[:24]
+        return self._run_cache_dir / f"{key}.pt"
+
+    def _materialize_invariant(self, raw: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        # xyz in float64, localize once per run-config
+        xyz = raw["xyz"].astype(np.float64, copy=False)
+        if self.patch_cfg.make_local_coords:
+            xyz = xyz - xyz.min(axis=0, keepdims=True)
+
+        # labels in TRAIN-ID space (undefined -> ignore)
+        y_native = raw.get("native_labels", None)
+        if y_native is None:
+            y_native = raw.get("labels", None)
+        if y_native is None:
+            raise KeyError("ECLAIR raw must include native_labels or labels")
+        y_native = y_native.astype(np.int64, copy=False)
+
+        y_train = y_native - 1
+        y_train[y_native == int(self.undefined_id)] = int(self.ignore_index)
+
+        out = {
+            # IMPORTANT: keep existing interface keys
+            "xyz": xyz,  # float64, localized if enabled
+            "native_labels": y_native.astype(np.int64, copy=False),
+            "y_train": y_train.astype(np.int64, copy=False),
+            "intensity": raw.get("intensity", None),
+            "return_number": raw.get("return_number", None),
+            "number_of_returns": raw.get("number_of_returns", None),
+            "rgb": raw.get("rgb", None),
+        }
+
+        if self.run_cache_precompute_returns_onehot:
+            k = int(self.feat_cfg.returns_onehot_k)
+            rn = out["return_number"]
+            nor = out["number_of_returns"]
+            if rn is not None:
+                out["rn_1h_u8"] = _onehot_u8(rn, k)
+            if nor is not None:
+                out["nor_1h_u8"] = _onehot_u8(nor, k)
+
+        return out
 
     def __len__(self) -> int:
         return len(self.names)
@@ -226,7 +294,12 @@ class EclairTiles(Dataset):
         key = _cache_key_for_eclair_raw(pc_path)
         return self.cache_root / self.split / "raw" / f"{key}.pt"
 
-    def _load_raw(self, fname: str):
+    def _load_raw_base(self, fname: str) -> Dict[str, np.ndarray]:
+        """
+        Original raw-loading behavior: disk-cache (if enabled) else LAS/LAZ.
+        Returns dict with keys: xyz, native_labels, intensity, return_number, number_of_returns, rgb.
+        """
+
         # 1) Try cache
         cpath = self._cache_path(fname)
         if cpath is not None and cpath.exists():
@@ -297,8 +370,22 @@ class EclairTiles(Dataset):
                 try:
                     pc_path = _resolve_pc_path(self.eclair_root, fname)
                     if not _is_cache_fresh(obj.get("_cache_meta", None), pc_path):
-                        # stale cache -> fall back to reading LAS/LAZ
-                        return _read_las_arrays(pc_path)
+                        # stale cache -> fall back to reading LAS/LAZ (WITH dtype hygiene)
+                        raw = _read_las_arrays(pc_path)
+
+                        raw["xyz"] = raw["xyz"].astype(np.float64, copy=False)
+                        if "native_labels" in raw and raw["native_labels"] is not None:
+                            raw["native_labels"] = raw["native_labels"].astype(np.int64, copy=False)
+                        if raw.get("intensity", None) is not None:
+                            raw["intensity"] = raw["intensity"].astype(np.float32, copy=False)
+                        if raw.get("return_number", None) is not None:
+                            raw["return_number"] = raw["return_number"].astype(np.int64, copy=False)
+                        if raw.get("number_of_returns", None) is not None:
+                            raw["number_of_returns"] = raw["number_of_returns"].astype(np.int64, copy=False)
+                        if raw.get("rgb", None) is not None:
+                            raw["rgb"] = raw["rgb"].astype(np.float32, copy=False)
+
+                        return raw
                 except Exception:
                     pass  # don't break training if meta check fails
 
@@ -337,7 +424,50 @@ class EclairTiles(Dataset):
 
         # 2) No cache -> read LAS/LAZ
         pc_path = _resolve_pc_path(self.eclair_root, fname)
-        return _read_las_arrays(pc_path)
+        raw = _read_las_arrays(pc_path)
+
+        # dtype hygiene (robustness)
+        raw["xyz"] = raw["xyz"].astype(np.float64, copy=False)
+        if "native_labels" in raw and raw["native_labels"] is not None:
+            raw["native_labels"] = raw["native_labels"].astype(np.int64, copy=False)
+        if raw.get("intensity", None) is not None:
+            raw["intensity"] = raw["intensity"].astype(np.float32, copy=False)
+        if raw.get("return_number", None) is not None:
+            raw["return_number"] = raw["return_number"].astype(np.int64, copy=False)
+        if raw.get("number_of_returns", None) is not None:
+            raw["number_of_returns"] = raw["number_of_returns"].astype(np.int64, copy=False)
+        if raw.get("rgb", None) is not None:
+            raw["rgb"] = raw["rgb"].astype(np.float32, copy=False)
+        return raw
+
+    def _load_raw(self, fname: str) -> Dict[str, np.ndarray]:
+        """
+        If run-cache enabled: return per-run invariants (xyz localized, y_train, optional onehots),
+        otherwise return the base raw dict.
+        """
+        if self._run_cache_dir is not None:
+            rp = self._run_cache_path(fname)
+            if rp.exists():
+                obj = torch.load(rp, map_location="cpu")
+                if not isinstance(obj, dict) or "xyz" not in obj or "y_train" not in obj:
+                    raise TypeError(f"Bad ECLAIR run-cache payload: {rp}")
+                return obj
+
+            base = self._load_raw_base(fname)
+            inv = self._materialize_invariant(base)
+            try:
+                atomic_save_torch(inv, rp)
+            except Exception as e:
+                # do not kill training for cache I/O issues
+                if not getattr(self, "_warned_run_cache_write", False):
+                    print(
+                        f"[warn] ECLAIR run-cache write failed once: {e}. Continuing without caching for this item.", flush=True
+                    )
+                    self._warned_run_cache_write = True
+
+            return inv
+
+        return self._load_raw_base(fname)
 
     def get_raw(self, idx: int) -> Dict[str, np.ndarray]:
         """
@@ -347,7 +477,8 @@ class EclairTiles(Dataset):
         fname = self.names[idx]
         raw = self._load_raw(fname)
 
-        xyz = raw["xyz"].astype(np.float32, copy=False)
+        xyz = raw["xyz"].astype(np.float64, copy=False)
+        # If run-cache is enabled, xyz is already localized; this is idempotent either way.
         if self.patch_cfg.make_local_coords:
             xyz = xyz - xyz.min(axis=0, keepdims=True)
 
@@ -361,12 +492,13 @@ class EclairTiles(Dataset):
         raw = self._load_raw(fname)
 
         xyz = raw["xyz"]
+        # idempotent if run-cache already localized
         if self.patch_cfg.make_local_coords:
             xyz = xyz - xyz.min(axis=0, keepdims=True)
 
-        # Deterministic RNG per sample (compatible with voxel_feat_pool=random)
-        sample_seed = int(self._rng.integers(0, 2**31 - 1))
-        rng = np.random.default_rng(sample_seed)
+        h = zlib.crc32(fname.encode("utf-8")) & 0xFFFFFFFF
+        sample_seed = (self.seed * 1000003 + self.epoch * 9176 + h) & 0x7FFFFFFF
+        rng = np.random.default_rng(int(sample_seed))
 
         if self.is_train:
             xyz = augment_xyz(xyz, self.aug_cfg, rng)
@@ -376,11 +508,15 @@ class EclairTiles(Dataset):
         xyz_norm = np.ascontiguousarray(xyz_norm, dtype=np.float32)
 
         # Labels: native -> contiguous train ids (ignore undefined)
-        y_pts = eclair_native_to_train_ids(
-            raw["native_labels"],
-            undefined_id=self.undefined_id,
-            ignore_index=self.ignore_index,
-        ).astype(np.int64, copy=False)
+        y_pts = raw.get("y_train", None)
+        if y_pts is None:
+            y_pts = eclair_native_to_train_ids(
+                raw["native_labels"],
+                undefined_id=self.undefined_id,
+                ignore_index=self.ignore_index,
+            ).astype(np.int64, copy=False)
+        else:
+            y_pts = y_pts.astype(np.int64, copy=False)
 
         # Build per-point features (only pass what is needed)
         intensity_arg = raw["intensity"] if self.feat_cfg.use_intensity else None
@@ -395,6 +531,8 @@ class EclairTiles(Dataset):
             number_of_returns=nor_arg,
             rgb=rgb_arg,
             cfg=self.feat_cfg,
+            return_number_1h=raw.get("rn_1h_u8", None),
+            number_of_returns_1h=raw.get("nor_1h_u8", None),
         ).astype(np.float32, copy=False)
 
         # Quantize coords (int32 contiguous)

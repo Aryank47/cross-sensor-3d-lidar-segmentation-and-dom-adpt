@@ -316,9 +316,10 @@ class SparseToBEVProjector(nn.Module):
             sums = torch.zeros((B_all * HW, Cin), dtype=torch.float32, device=device)
             idx = flat.view(-1, 1).expand(-1, Cin)
             sums.scatter_add_(0, idx, feats.to(torch.float32))
-            counts = torch.bincount(flat, minlength=B_all * HW).to(torch.float32).clamp_min(1.0)
+            counts_raw = torch.bincount(flat, minlength=B_all * HW).to(torch.float32)
+            valid = counts_raw > 0
+            counts = counts_raw.clamp_min(1.0)
             out = sums / counts.view(-1, 1)
-            valid = counts > 0
             out = out.view(B_all, H, W, Cin).permute(0, 3, 1, 2).contiguous()
             valid = valid.view(B_all, H, W)
             return out.to(feats.dtype), valid

@@ -46,6 +46,7 @@ def _split_train_val(
         if tr.exists() and va.exists():
             train_files = _read_manifest(tr)
             val_files = _read_manifest(va)
+            print(f"Using train/val split from manifests: {tr} ({len(train_files)} files), {va} ({len(val_files)} files)")
             return train_files, val_files
 
     # 1) If user provides explicit val folder
@@ -198,6 +199,7 @@ def main() -> None:
 
     split_manifest_dir = None
     if "split_manifest_dir" in data:
+        print(f"Using split manifests from {data['split_manifest_dir']}", flush=True)
         split_manifest_dir = Path(str(data["split_manifest_dir"]))
 
     train_files, val_files = _split_train_val(
@@ -221,6 +223,7 @@ def main() -> None:
     print(f"[precompute] cache_kind={cache_kind} cache_root={cache_root} cache_subdir={cache_subdir}", flush=True)
 
     if cache_kind == "raw":
+        print(f"computing raw caches with ignore_index={ignore_index}", flush=True)
         _precompute_raw(
             split_name="train",
             files=train_files,
@@ -243,6 +246,10 @@ def main() -> None:
             overwrite=bool(args.overwrite),
         )
     else:
+        print(
+            f"computing voxel caches with patch_cfg={patch_cfg} feat_cfg={feat_cfg} preproc_cfg={preproc_cfg} ignore_index={ignore_index} seed={seed}",
+            flush=True,
+        )
         _precompute_voxel(
             split_name="train",
             files=train_files,
