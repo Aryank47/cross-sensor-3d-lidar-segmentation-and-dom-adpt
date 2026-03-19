@@ -215,21 +215,19 @@ def main() -> None:
         loader = test_loader
 
     # Build model
-    model = _call_with_supported_kwargs(train_mod.build_model, cfg=cfg, in_channels=10, out_channels=8)
+    num_classes = int(cfg_raw["data"]["label_space"]["num_classes"])
+    ignore_index = int(cfg_raw["data"]["label_space"]["ignore_index"])
+    in_channels = int(cfg_raw["model"]["in_channels"])
+    out_channels = int(cfg_raw["model"]["out_channels"])
+
+    model = _call_with_supported_kwargs(
+        train_mod.build_model,
+        cfg=cfg,
+        in_channels=in_channels,
+        out_channels=out_channels,
+    )
     model.to(device)
     model.eval()
-
-    # Load checkpoint
-    # ckpt = torch.load(str(ckpt_path), map_location="cpu")
-    # state = _pick_state_dict(ckpt)
-    # state = _strip_module_prefix(state)
-    # missing, unexpected = model.load_state_dict(state, strict=False)
-    # if missing or unexpected:
-    #     print(f"[ckpt] load_state_dict strict=False | missing={len(missing)} unexpected={len(unexpected)}")
-    #     if len(missing) < 50:
-    #         print("  missing:", missing)
-    #     if len(unexpected) < 50:
-    #         print("  unexpected:", unexpected)
 
     ckpt_obj = torch.load(args.ckpt, map_location="cpu")
     sd, used_key = _extract_state_dict(ckpt_obj)
@@ -244,49 +242,60 @@ def main() -> None:
         print("[ckpt] unexpected (head):", unexpected[:20])
 
     # Decide eval mode
-    eval_mode = cfg_raw.get("eval", {}).get("mode", "point")
-    if isinstance(eval_mode, str):
-        eval_mode = eval_mode.lower()
-    else:
+    eval_mode = str(cfg_raw.get("eval", {}).get("mode", "point")).lower()
+
+    if eval_mode in ("point", "points"):
         eval_mode = "point"
+    elif eval_mode in ("voxel", "voxel_windowed"):
+        eval_mode = "voxel_windowed"
+    else:
+        raise ValueError(f"Unsupported eval_mode='{eval_mode}'. Use 'point'/'points' or 'voxel'/'voxel_windowed'.")
 
     out_path = Path(args.out) if args.out else ckpt_path.with_name(f"{ckpt_path.stem}_{args.split}_{eval_mode}.json")
     criterion_cpu = train_mod.build_loss(cfg).cpu()
-    
-    print(f"Starting evaluation | split={args.split} eval_mode={eval_mode} amp={amp_enabled} device={device} loss={type(criterion_cpu).__name__}")
+
+    ckpt_epoch = None
+    if isinstance(ckpt_obj, dict):
+        ckpt_epoch = ckpt_obj.get("epoch", None)
+
+    if ckpt_epoch is not None and hasattr(criterion_cpu, "set_epoch"):
+        criterion_cpu.set_epoch(int(ckpt_epoch))
+
+    print(
+        f"Starting evaluation | split={args.split} eval_mode={eval_mode} amp={amp_enabled} device={device} loss={type(criterion_cpu).__name__}"
+    )
     # Run evaluation using your train.py eval functions
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", enabled=amp_enabled):
-            if eval_mode == "point":
-                metrics = _call_with_supported_kwargs(
-                    train_mod.evaluate_pointwise,
-                    dataset_obj=loader.dataset,
-                    model=model,
-                    device=device,
-                    cfg=cfg,
-                    split=args.split,
-                    dist_env=dist_env,
-                    criterion_cpu=criterion_cpu,
-                    num_classes=8,
-                    ignore_index=-100,
-                    amp=True,
-                )
-            elif eval_mode == "voxel_windowed":
-                metrics = _call_with_supported_kwargs(
-                    train_mod.evaluate_voxel_windowed,
-                    dataset_obj=loader.dataset,
-                    model=model,
-                    device=device,
-                    cfg=cfg,
-                    split=args.split,
-                    dist_env=dist_env,
-                    criterion_cpu=criterion_cpu,
-                    num_classes=8,
-                    ignore_index=-100,
-                    amp=True,
-                )
-            else:
-                raise ValueError(f"Unsupported eval_mode='{eval_mode}'. Use 'point' or 'voxel_windowed'.")
+        if eval_mode == "point":
+            metrics = _call_with_supported_kwargs(
+                train_mod.evaluate_pointwise,
+                dataset_obj=loader.dataset,
+                model=model,
+                device=device,
+                cfg=cfg,
+                split=args.split,
+                dist_env=dist_env,
+                criterion_cpu=criterion_cpu,
+                num_classes=num_classes,
+                ignore_index=ignore_index,
+                amp=amp_enabled,
+            )
+        elif eval_mode == "voxel_windowed":
+            metrics = _call_with_supported_kwargs(
+                train_mod.evaluate_voxel_windowed,
+                dataset_obj=loader.dataset,
+                model=model,
+                device=device,
+                cfg=cfg,
+                split=args.split,
+                dist_env=dist_env,
+                criterion_cpu=criterion_cpu,
+                num_classes=num_classes,
+                ignore_index=ignore_index,
+                amp=amp_enabled,
+            )
+        else:
+            raise ValueError(f"Unsupported eval_mode='{eval_mode}'. Use 'point' or 'voxel_windowed'.")
 
     # Normalize to JSON-serializable
     def _jsonify(x):

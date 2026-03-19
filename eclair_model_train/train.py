@@ -1758,10 +1758,15 @@ def train(cfg_path: str):
                 "best_val_miou": best_val_miou,
             }
             ckpt_dir = out_dir / "checkpoints"
-            atomic_save_torch(state, ckpt_dir / f"epoch_{epoch:03d}.pt")
+            # atomic_save_torch(state, ckpt_dir / f"epoch_{epoch:03d}.pt")
+            atomic_save_torch(state, ckpt_dir / "last.pt")
             if is_best:
                 atomic_save_torch(state, ckpt_dir / "best.pt")
-            atomic_save_torch(state, ckpt_dir / "last.pt")
+
+            # Optional periodic "epoch snapshots" (off by default)
+            keep_epoch_snapshots = bool(run.get("keep_epoch_snapshots", False))
+            if keep_epoch_snapshots and (epoch % save_every == 0 or epoch == epochs):
+                atomic_save_torch(state, ckpt_dir / f"epoch_{epoch:03d}.pt")
 
         if dist_env.enabled:
             torch.distributed.barrier()  # optional but nice: sync after saving
@@ -1853,6 +1858,16 @@ def train(cfg_path: str):
             f"[TEST] loss={test_metrics['loss']:.4f} mIoU={test_metrics['miou']:.4f} "
             f"macroF1={test_metrics['macro_f1']:.4f} miou_valid={test_metrics['miou_valid']:.4f}"
         )
+
+    # ---- Optional: cleanup epoch checkpoints to save disk ----
+    if is_main_process(dist_env):
+        import glob
+
+        for p in glob.glob(str(out_dir / "checkpoints" / "epoch_*.pt")):
+            try:
+                Path(p).unlink()
+            except FileNotFoundError:
+                pass
 
     # ---- Cleanup run-scoped ECLAIR cache (prevents staleness across runs) ----
     if dataset == "eclair":
