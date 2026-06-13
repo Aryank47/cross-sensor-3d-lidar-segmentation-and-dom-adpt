@@ -1,5 +1,5 @@
 #/eclair_model_train/configs/e0_dales_dropI.yaml
-epochs: 180
+epochs: 200
 
 run:
   name: e0_dales_dropI
@@ -8,17 +8,19 @@ run:
   device: cuda
   amp: true
   log_every_steps: 50
-  eval_every_epochs: 1
-  save_every_epochs: 5
+  eval_every_epochs: 2
+  save_every_epochs: 25
+  keep_last_k_epoch_snapshots: 3
 
 eval:
-  mode: voxel_windowed # voxel_windowed | point
+  mode: point # voxel_windowed | point
   window:
     size_xy_m: 50.0
-    stride_xy_m: 50.0 # start non-overlap; later try 25.0 for overlap
+    stride_xy_m: 25.0 # start non-overlap; later try 25.0 for overlap
     aggregation: mean_logits
     accum_dtype: float32 # float16 saves RAM, float32 safest
-    compute_point_loss: flase
+    compute_point_loss: true # whether to compute point-level eval loss (in point eval mode)
+
   bev:
     enabled: false
     every_epochs: 5 # run BEV eval/vis every N epochs
@@ -27,13 +29,20 @@ eval:
     save_png: true
     levels: null # null => use cfg.model.aux_heads.bev.levels
 
+  tta:
+    enabled: false
+    rotations_deg: [0.0, 90.0, 180.0, 270.0] # "rot4"
+    scales: [1.0] # KPConv varies scale; start with 1.0 for sanity
+    vote_aggregation: mean_logits # average logits across TTA runs
+
 data:
   voxelization:
-    feat_pool: sample_first # sample_first | mean_all | max_all | random
-    label_pool: first # first | majority
+    feat_pool: mean_all # sample_first | mean_all | max_all | random
+    label_pool: majority # first | majority
     random_seed_offset: 0
 
   dataset: dales
+  split_manifest_dir: /scratch/m23csa510/dales/manifests
   dales_label_map_native_to_train:
     0: -100 # unknown -> ignore
     1: 0 # ground
@@ -56,37 +65,44 @@ data:
 
   num_workers: 4
   batch_size: 1
-  grad_accum_steps: 4
+  grad_accum_steps: 3
 
   # If you add DALES caching params to DalesTiles, keep these:
   use_cache: true
   cache_root: ${DALES_CACHE_ROOT_DROP_I}
   cache_subdir: dales_dropI
   cache_key_extra: e0_dales_dropI_v2_labels8
-  cache_kind: raw # NEW
-  require_cache: true # NEW (recommended for training)
-  write_cache: false # NEW (recommended for training)
+  cache_kind: raw
+  require_cache: true
+  write_cache: false
 
   patch:
     make_local_coords: true
     coord_norm_factor: 10.0
     voxel_size: 0.02
 
+  prefetch_factor: 4
+
   sampling:
     mode: crops
-    crop_size_xy_m: 20.0
+    crop_size_xy_m: 140.0
     crop_min_points: 2000
-    crops_per_tile_per_epoch: 8
-    rare_center_prob: 0.5
-    rare_center_class_ids: [5, 6]
+    crops_per_tile_per_epoch: 12
+    crops_per_item: 1
+    rare_center_prob: 0.6
+    rare_center_class_ids: [3, 5, 6]
+    rare_center_class_weights:
+      6: 3.0 # power_lines
+      5: 2.0 # poles
+    rare_center_balance_beta: 0.5
 
     # OOM safety (recommended)
-    max_voxels_per_crop_soft: 120000
-    max_voxels_per_crop_hard: 160000
+    max_voxels_per_crop_soft: 650000
+    max_voxels_per_crop_hard: 700000
     min_crop_size_xy_m: 8.0
-    shrink_ratio: 0.8
-    max_shrink_steps: 5
-    hard_max_points: 200000
+    shrink_ratio: 0.85
+    max_shrink_steps: 6
+    hard_max_points: 300000
     max_points_per_crop_soft: null # optional; saves time by shrinking before voxelization
     resample_tries: 25
 
@@ -99,9 +115,9 @@ data:
     rare_class_ids: [2, 3, 5, 6, 7]
 
   aug:
-    enabled: false
+    enabled: true
     random_flip_xy: true
-    random_rotate_deg: [0.0, 0.0]
+    random_rotate_deg: [0.0, 360.0]
     scale_range: [0.95, 1.05]
     jitter_std: 0.01
 
@@ -180,26 +196,23 @@ sched:
   gamma: 0.8
 
 loss:
-  # name: focal
-  # gamma: 2.0
-  # # Per-class alpha (sum-normalized to ~8) to emphasize rare classes
-  # # order matches label_space.class_names:
-  # #   ground, vegetation, cars, trucks, buildings, poles, power_lines, fences
-  # alpha:
-  #   - 0.53 # ground
-  #   - 0.53 # vegetation
-  #   - 1.07 # cars
-  #   - 1.60 # trucks
-  #   - 0.53 # buildings
-  #   - 1.60 # poles
-  #   - 1.07 # power_lines
-  #   - 1.07 # fences
   name: focal
   gamma: 2.0
-  alpha: null # or your per-class alpha list
+  # Per-class alpha (sum-normalized to ~8) to emphasize rare classes
+  # order matches label_space.class_names:
+  # ground, vegetation, cars, trucks, buildings, poles, power_lines, fences
+  alpha:
+    - 0.53 # ground
+    - 0.53 # vegetation
+    - 1.07 # cars
+    - 1.60 # trucks
+    - 0.53 # buildings
+    - 1.60 # poles
+    - 1.07 # power_lines
+    - 1.07 # fences
   lovasz:
-    enabled: false
-    weight: 0.5
+    enabled: true
+    weight: 0.7
     warmup_epochs: 10
     ramp_epochs: 10
     classes: present

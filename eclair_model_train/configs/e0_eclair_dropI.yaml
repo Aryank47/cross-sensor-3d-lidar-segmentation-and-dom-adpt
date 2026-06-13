@@ -1,3 +1,4 @@
+# /eclair_model_train/configs/e0_eclair_dropI.yaml
 # E0 — ECLAIR reproduction baseline (paper-like)
 # Model: Res16UNet14C (MinkowskiEngine)
 # Loss: focal
@@ -15,10 +16,10 @@
 # We expose them as config so you can tune to exactly match the reported mIoU.
 # ECLAIR: training on classes 1..11; native 0 (Undefined) mapped to ignore_index.
 
-epochs: 80
+epochs: 100
 
 eval:
-  mode: voxel # voxel | point
+  mode: point # voxel | point
   window:
     size_xy_m: 50.0
     stride_xy_m: 50.0 # start non-overlap; later try 25.0 for overlap
@@ -37,17 +38,20 @@ eval:
 run:
   name: e0_eclair_dropI
   out_dir: ./runs/e0_eclair_dropI
-  seed: 1337
+  seed: 2027
   device: cuda
   amp: true
   log_every_steps: 50
-  eval_every_epochs: 1
-  save_every_epochs: 5
+  eval_every_epochs: 2
+  save_every_epochs: 25
+  keep_last_k_epoch_snapshots: 3
 
 data:
+  run_cache_precompute_returns_onehot: true
+
   voxelization:
-    feat_pool: sample_first # sample_first | mean_all | max_all | random
-    label_pool: first # first | majority
+    feat_pool: mean_all # sample_first | mean_all | max_all | random
+    label_pool: majority # first | majority
     random_seed_offset: 0
 
   dataset: eclair
@@ -71,13 +75,13 @@ data:
     # ECLAIR tiles are 100m x 100m by construction; we still make local coords per tile.
     make_local_coords: true # subtract per-tile min xyz -> local coords (numerically stable)
     coord_norm_factor: 10.0
-    voxel_size: 0.05 # quantization voxel size (in normalized coordinate space)
+    voxel_size: 0.04 # quantization voxel size (in normalized coordinate space)
 
   # Augmentation (paper says scale+jitter+flip; ranges not specified in text)
   aug:
     enabled: true
     random_flip_xy: true
-    random_rotate_deg: [0.0, 0.0]
+    random_rotate_deg: [0.0, 360.0]
     scale_range: [0.95, 1.05]
     jitter_std: 0.01
 
@@ -88,6 +92,8 @@ data:
     use_rgb: false
     # rgb_divisor: 65535.0
     include_coords: false # keep false for paper-like feature stack
+    use_return_number: true
+    use_number_of_returns: true
 
 model:
   in_channels: 10 # 5 (return_number) + 5 (num_returns)
@@ -145,7 +151,7 @@ loss:
   gamma: 2.0
   alpha: null # or your per-class alpha list
   lovasz:
-    enabled: false
+    enabled: true
     weight: 0.5
     warmup_epochs: 10
     ramp_epochs: 10
