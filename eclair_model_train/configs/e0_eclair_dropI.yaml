@@ -38,7 +38,7 @@ eval:
 run:
   name: e0_eclair_dropI
   out_dir: ./runs/e0_eclair_dropI
-  seed: 2027
+  seed: 1337
   device: cuda
   amp: true
   log_every_steps: 50
@@ -75,7 +75,7 @@ data:
     # ECLAIR tiles are 100m x 100m by construction; we still make local coords per tile.
     make_local_coords: true # subtract per-tile min xyz -> local coords (numerically stable)
     coord_norm_factor: 10.0
-    voxel_size: 0.04 # quantization voxel size (in normalized coordinate space)
+    voxel_size: 0.05 # quantization voxel size (in normalized coordinate space)
 
   # Augmentation (paper says scale+jitter+flip; ranges not specified in text)
   aug:
@@ -94,6 +94,33 @@ data:
     include_coords: false # keep false for paper-like feature stack
     use_return_number: true
     use_number_of_returns: true
+
+  sampling:
+    mode: weighted_tiles
+    epoch_size_multiplier: 1.0
+
+    # ECLAIR train ids:
+    # 5 transmission wires
+    # 6 distribution wires
+    # 7 poles
+    # 8 transmission towers
+    # 9 fence
+    # 10 vehicle
+    rare_class_ids: [5, 6, 7, 8, 9, 10]
+
+    rare_class_weights:
+      5: 3.0
+      6: 3.0
+      7: 4.0
+      8: 4.0
+      9: 2.0
+      10: 2.0
+
+    rare_balance_beta: 0.5
+    strength: 1.0
+    min_weight: 0.25
+    max_weight: 5.0
+    use_stats_cache: true
 
 model:
   in_channels: 10 # 5 (return_number) + 5 (num_returns)
@@ -149,7 +176,32 @@ sched:
 loss:
   name: focal
   gamma: 2.0
-  alpha: null # or your per-class alpha list
+
+  # ECLAIR 11-class train-id order:
+  # 0 Unassigned
+  # 1 Ground
+  # 2 Vegetation
+  # 3 Buildings
+  # 4 Noise
+  # 5 Transmission wires
+  # 6 Distribution wires
+  # 7 Poles
+  # 8 Transmission towers
+  # 9 Fence
+  # 10 Vehicle
+  alpha:
+    - 0.50 # 0 Unassigned
+    - 0.50 # 1 Ground
+    - 0.50 # 2 Vegetation
+    - 0.75 # 3 Buildings
+    - 0.50 # 4 Noise
+    - 1.50 # 5 Transmission wires
+    - 1.50 # 6 Distribution wires
+    - 1.50 # 7 Poles
+    - 1.50 # 8 Transmission towers
+    - 1.13 # 9 Fence
+    - 1.13 # 10 Vehicle
+
   lovasz:
     enabled: true
     weight: 0.5

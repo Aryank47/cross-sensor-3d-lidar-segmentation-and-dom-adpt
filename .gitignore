@@ -209,3 +209,6 @@ __marimo__/
 dales_mini/*
 eclair_mini/*
 .vscode/
+runs/
+*.patch
+*.before_mix3d

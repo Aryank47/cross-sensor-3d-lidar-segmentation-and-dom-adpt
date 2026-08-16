@@ -42,13 +42,7 @@ except Exception as e:
 from .augment import AugmentConfig
 from .bev_head import BEVHeadConfig
 from .config_loader import load_yaml
-from .data_dales import (
-    DalesCropConfig,
-    DalesPatchConfig,
-    DalesPreprocConfig,
-    DalesTiles,
-    _find_dales_files,
-)
+from .data_dales import DalesCropConfig, DalesPatchConfig, DalesPreprocConfig, DalesTiles, _find_dales_files
 from .data_eclair import EclairTiles, PatchConfig
 from .features import FeatureConfig, build_features, infer_in_channels
 from .model import build_model
@@ -1250,6 +1244,7 @@ def infer_tile_point_logits(
     max_voxels_per_forward: int,
     max_split_depth: int,
     logger: logging.Logger,
+    target_domain: str,
 ) -> np.ndarray:
     """
     Returns point logits [N_points, source_num_classes].
@@ -1271,13 +1266,30 @@ def infer_tile_point_logits(
     coord_norm_factor = float(patch["coord_norm_factor"])
     voxel_size = float(patch["voxel_size"])
 
-    xyz = np.asarray(raw["xyz"], dtype=np.float32)
-    if xyz.ndim != 2 or xyz.shape[1] != 3:
-        raise RuntimeError(f"raw['xyz'] must be [N,3], got {xyz.shape}")
+    xyz64 = np.asarray(raw["xyz"], dtype=np.float64)
 
-    n_points = int(xyz.shape[0])
+    if xyz64.ndim != 2 or xyz64.shape[1] != 3:
+        raise RuntimeError(f"raw['xyz'] must be [N,3], got {xyz64.shape}")
+
+    n_points = int(xyz64.shape[0])
     if n_points == 0:
         return np.zeros((0, num_classes), dtype=np.float32)
+
+    if not np.isfinite(xyz64).all():
+        raise RuntimeError(f"raw['xyz'] contains NaN/Inf for target_domain={target_domain}")
+
+    if bool(patch.get("make_local_coords", True)):
+        xyz_min = xyz64.min(axis=0)
+
+        if np.max(np.abs(xyz_min)) > 1e-4:
+            raise RuntimeError(
+                "get_raw() violated local-coordinate contract: "
+                f"target_domain={target_domain}, "
+                f"xyz_min={xyz_min.tolist()}, "
+                "while source patch.make_local_coords=True."
+            )
+
+    xyz = xyz64.astype(np.float32, copy=False)
 
     # get_raw() from your dataset classes already applies make_local_coords according to patch_cfg.
     xyz_norm = (xyz / coord_norm_factor).astype(np.float32, copy=False)
@@ -1465,6 +1477,7 @@ def evaluate_common(
             max_voxels_per_forward=max_voxels_per_forward,
             max_split_depth=max_split_depth,
             logger=logger,
+            target_domain=target_domain,
         )
 
         pred_train = logits_pts.argmax(axis=1).astype(np.int64, copy=False)

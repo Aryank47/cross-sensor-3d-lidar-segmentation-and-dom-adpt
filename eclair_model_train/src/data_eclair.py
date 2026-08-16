@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing as mp
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import MinkowskiEngine as ME
 import numpy as np
@@ -19,6 +20,17 @@ from .bev_head import BEVHeadConfig
 from .bev_labels import build_bev_labels_and_selected_idx
 from .features import FeatureConfig, build_features
 from .label_maps import eclair_native_to_train_ids
+from .mix3d import (
+    MIX_SKIP_NO_DONOR,
+    MIX_SKIP_PROBABILITY,
+    ALSMix3DConfig,
+    MixDiagnostics,
+    choose_different_source_index,
+    compose_crop_replace,
+    should_apply_mix,
+    stable_seed,
+    unchanged_mix_result,
+)
 from .utils import atomic_save_torch, read_las_arrays_robust
 from .voxelization import VoxelizationConfig, voxelize_from_q
 
@@ -28,6 +40,68 @@ class PatchConfig:
     make_local_coords: bool = True
     coord_norm_factor: float = 10.0
     voxel_size: float = 0.05
+
+
+@dataclass
+class EclairSamplingConfig:
+    """
+    ECLAIR training sampler config.
+
+    mode:
+      - "tiles": original behavior; one dataset item = one ECLAIR tile.
+      - "weighted_tiles": virtual weighted tile resampling for train split only.
+
+    This does NOT crop ECLAIR tiles. It only changes how often each full tile
+    appears in the training epoch.
+    """
+
+    mode: str = "tiles"  # tiles | weighted_tiles
+
+    # Multiplier over the base number of tiles.
+    # Keep 1.0 for C1-E to avoid changing the number of optimizer steps too much.
+    epoch_size_multiplier: float = 1.0
+
+    # ECLAIR train ids:
+    # 5 transmission wires, 6 distribution wires, 7 poles,
+    # 8 transmission towers, 9 fence, 10 vehicle.
+    rare_class_ids: Tuple[int, ...] = (5, 6, 7, 8, 9, 10)
+
+    # Optional manual class multipliers.
+    rare_class_weights: Optional[Dict[int, float]] = None
+
+    # beta=0 disables inverse-frequency correction;
+    # beta=1 uses full inverse-frequency correction.
+    rare_balance_beta: float = 0.5
+
+    # Overall strength of the rare-tile boost.
+    strength: float = 1.0
+
+    # Safety clamp on final tile weights after normalization.
+    min_weight: float = 0.25
+    max_weight: float = 5.0
+
+    # Stats cache is optional; it is stored under the run-cache root when available.
+    use_stats_cache: bool = True
+
+    @staticmethod
+    def from_cfg(cfg: Optional[Dict[str, Any]]) -> "EclairSamplingConfig":
+        cfg = cfg or {}
+
+        raw_weights = cfg.get("rare_class_weights", None)
+        if raw_weights is not None:
+            raw_weights = {int(k): float(v) for k, v in dict(raw_weights).items()}
+
+        return EclairSamplingConfig(
+            mode=str(cfg.get("mode", "tiles")).lower().strip(),
+            epoch_size_multiplier=float(cfg.get("epoch_size_multiplier", 1.0)),
+            rare_class_ids=tuple(int(x) for x in cfg.get("rare_class_ids", [5, 6, 7, 8, 9, 10])),
+            rare_class_weights=raw_weights,
+            rare_balance_beta=float(cfg.get("rare_balance_beta", 0.5)),
+            strength=float(cfg.get("strength", 1.0)),
+            min_weight=float(cfg.get("min_weight", 0.25)),
+            max_weight=float(cfg.get("max_weight", 5.0)),
+            use_stats_cache=bool(cfg.get("use_stats_cache", True)),
+        )
 
 
 def _load_eclair_split_list(
@@ -194,6 +268,8 @@ class EclairTiles(Dataset):
         bev_cfg: Optional[BEVHeadConfig] = None,
         run_cache_root: Optional[str | Path] = None,
         run_cache_precompute_returns_onehot: bool = False,
+        sampling_cfg: Optional[EclairSamplingConfig] = None,
+        mix3d_cfg: Optional[ALSMix3DConfig] = None,
     ):
         self.eclair_root = Path(eclair_root)
         self.split = split
@@ -228,10 +304,103 @@ class EclairTiles(Dataset):
             self._run_cache_dir = self.run_cache_root / "eclair" / str(self.split)
             self._run_cache_dir.mkdir(parents=True, exist_ok=True)
         self.seed = int(seed)
-        self.epoch = 0
+        self._epoch_shared = mp.Value("q", 0, lock=False)
+        self.sampling_cfg = sampling_cfg or EclairSamplingConfig()
+        self.mix3d_cfg = mix3d_cfg or ALSMix3DConfig(enabled=False)
+        self._virtual_indices: Optional[np.ndarray] = None
+        self._sampling_summary: Optional[Dict[str, Any]] = None
+
+        if self.mix3d_cfg.enabled and not self.is_train:
+            raise ValueError("Mix3D may be enabled only for the ECLAIR training split.")
+        if self.mix3d_cfg.enabled and self.bev_cfg is not None and self.bev_cfg.enabled:
+            raise ValueError("Initial M1 forbids BEV auxiliary supervision.")
+
+        if self.is_train and str(self.sampling_cfg.mode).lower() in ("weighted_tiles", "rare_tiles"):
+            self._init_weighted_tile_sampling()
+        elif str(self.sampling_cfg.mode).lower() not in ("tiles", "weighted_tiles", "rare_tiles"):
+            raise ValueError(f"Unknown ECLAIR sampling mode='{self.sampling_cfg.mode}'. " "Expected 'tiles' or 'weighted_tiles'.")
+
+    def _init_weighted_tile_sampling(self) -> None:
+        cfg = self.sampling_cfg
+
+        if self._base_len() <= 0:
+            raise RuntimeError("ECLAIR weighted sampling requested but dataset is empty.")
+
+        counts = self._load_or_compute_label_counts()
+
+        rare_ids = [int(c) for c in cfg.rare_class_ids if 0 <= int(c) < int(self.num_classes)]
+        if len(rare_ids) == 0:
+            raise ValueError("ECLAIR sampling.mode='weighted_tiles' requires at least one valid rare_class_id.")
+
+        global_counts = counts.sum(axis=0).astype(np.float64)
+
+        rare_global = np.array(
+            [max(1.0, float(global_counts[c])) for c in rare_ids],
+            dtype=np.float64,
+        )
+
+        # Relative reference among rare classes.
+        # Median is safer than max because max can over-amplify the rarest class.
+        rare_ref = float(np.median(rare_global))
+        beta = float(cfg.rare_balance_beta)
+
+        score = np.ones((self._base_len(),), dtype=np.float64)
+
+        for c in rare_ids:
+            present = counts[:, c] > 0
+            if not np.any(present):
+                continue
+
+            user_w = 1.0
+            if cfg.rare_class_weights is not None:
+                user_w = float(cfg.rare_class_weights.get(int(c), 1.0))
+
+            # Corrected relative inverse-frequency term.
+            # This avoids the near-zero-weight bug from raw 1 / count^beta.
+            freq_w = (rare_ref / max(1.0, float(global_counts[c]))) ** beta
+
+            score[present] += float(cfg.strength) * user_w * float(freq_w)
+
+        if not np.isfinite(score).all() or float(score.sum()) <= 0:
+            raise RuntimeError("Invalid ECLAIR weighted sampling scores.")
+
+        # Normalize to mean ~1, then clamp.
+        score = score / max(float(score.mean()), 1e-12)
+        score = np.clip(score, float(cfg.min_weight), float(cfg.max_weight))
+
+        prob = score / max(float(score.sum()), 1e-12)
+
+        epoch_size = int(round(self._base_len() * float(cfg.epoch_size_multiplier)))
+        epoch_size = max(self._base_len(), epoch_size)
+
+        rng = np.random.default_rng(int(self.seed) + 73021)
+        self._virtual_indices = rng.choice(
+            np.arange(self._base_len(), dtype=np.int64),
+            size=epoch_size,
+            replace=True,
+            p=prob,
+        ).astype(np.int64, copy=False)
+
+        self._sampling_summary = {
+            "mode": str(cfg.mode),
+            "base_tiles": int(self._base_len()),
+            "virtual_epoch_size": int(epoch_size),
+            "rare_class_ids": [int(c) for c in rare_ids],
+            "rare_global_counts": {str(int(c)): int(global_counts[c]) for c in rare_ids},
+            "weight_min": float(score.min()),
+            "weight_mean": float(score.mean()),
+            "weight_max": float(score.max()),
+            "n_tiles_with_any_rare": int(np.any(counts[:, rare_ids] > 0, axis=1).sum()),
+        }
+
+        print(f"[ECLAIR sampling] {json.dumps(self._sampling_summary, indent=2)}", flush=True)
 
     def set_epoch(self, epoch: int) -> None:
-        self.epoch = int(epoch)
+        self._epoch_shared.value = int(epoch)
+
+    @property
+    def epoch(self) -> int:
+        return int(self._epoch_shared.value)
 
     def _run_cache_path(self, fname: str) -> Path:
         assert self._run_cache_dir is not None
@@ -278,7 +447,34 @@ class EclairTiles(Dataset):
         return out
 
     def __len__(self) -> int:
+        if self._virtual_indices is not None:
+            return int(self._virtual_indices.shape[0])
         return len(self.names)
+
+    def _base_len(self) -> int:
+        return len(self.names)
+
+    def _resolve_item_index(self, idx: int) -> int:
+        """
+        Resolve virtual dataset index -> base tile index.
+
+        For normal mode:
+          idx maps to itself.
+
+        For weighted_tiles:
+          idx maps through self._virtual_indices.
+        """
+        if self._virtual_indices is None:
+            return int(idx)
+
+        if int(self._virtual_indices.shape[0]) <= 0:
+            raise RuntimeError("ECLAIR weighted sampling has empty virtual index array.")
+
+        return int(self._virtual_indices[int(idx) % int(self._virtual_indices.shape[0])])
+
+    @property
+    def sampling_summary(self) -> Optional[Dict[str, Any]]:
+        return self._sampling_summary
 
     def _cache_path(self, fname: str) -> Optional[Path]:
         if not self.use_cache or self.cache_root is None:
@@ -469,45 +665,148 @@ class EclairTiles(Dataset):
 
         return self._load_raw_base(fname)
 
-    def get_raw(self, idx: int) -> Dict[str, np.ndarray]:
-        """
-        Return raw arrays for a tile (NO augmentation).
-        Used by point-wise eval / window inference.
-        """
-        fname = self.names[idx]
-        raw = self._load_raw(fname)
+    def _get_raw_by_base_index(self, base_idx: int) -> Dict[str, np.ndarray]:
+        if base_idx < 0 or base_idx >= self._base_len():
+            raise IndexError(base_idx)
 
-        xyz = raw["xyz"].astype(np.float64, copy=False)
-        # If run-cache is enabled, xyz is already localized; this is idempotent either way.
-        if self.patch_cfg.make_local_coords:
-            xyz = xyz - xyz.min(axis=0, keepdims=True)
+        fname = self.names[int(base_idx)]
+        raw = self._load_raw(fname)
 
         out = dict(raw)
-        out["xyz"] = xyz
-        out["tile_name"] = str(fname)
+        out.setdefault("tile_name", str(fname))
         return out
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        fname = self.names[idx]
-        raw = self._load_raw(fname)
+    def get_raw(self, idx: int) -> Dict[str, np.ndarray]:
+        """
+        Raw access used by evaluation code.
 
-        xyz = raw["xyz"]
-        # idempotent if run-cache already localized
+        Returns an unaugmented tile using the same local-coordinate
+        convention expected by evaluation and training preprocessing.
+
+        In normal mode, idx is a base tile index.
+        In weighted train mode, idx may be a virtual index, so resolve it.
+        """
+        base_idx = self._resolve_item_index(int(idx))
+        out = self._get_raw_by_base_index(base_idx)
+
+        out = dict(out)
+
+        xyz_raw = np.asarray(out["xyz"])
+
+        if xyz_raw.dtype != np.float64:
+            raise TypeError(f"[ECLAIR get_raw] expected raw xyz float64, " f"got {xyz_raw.dtype}, tile={out.get('tile_name')}")
+
+        xyz = xyz_raw
+
         if self.patch_cfg.make_local_coords:
             xyz = xyz - xyz.min(axis=0, keepdims=True)
 
-        h = zlib.crc32(fname.encode("utf-8")) & 0xFFFFFFFF
-        sample_seed = (self.seed * 1000003 + self.epoch * 9176 + h) & 0x7FFFFFFF
-        rng = np.random.default_rng(int(sample_seed))
+        out["xyz"] = xyz
 
+        return out
+
+    def _sampling_stats_cache_path(self) -> Optional[Path]:
+        """
+        Store label-count stats in the run cache when available.
+
+        This avoids unsafe shared writes to the global raw cache under DDP.
+        """
+        if not bool(self.sampling_cfg.use_stats_cache):
+            return None
+
+        root = getattr(self, "run_cache_root", None)
+        if root is None:
+            return None
+
+        root = Path(root)
+        root.mkdir(parents=True, exist_ok=True)
+
+        key_obj = {
+            "v": "eclair_sampling_label_counts_v1",
+            "split": str(self.split),
+            "num_classes": int(self.num_classes),
+            "ignore_index": int(self.ignore_index),
+            "undefined_id": int(self.undefined_id),
+            "n_tiles": int(self._base_len()),
+            "names": list(self.names),
+        }
+        key = _sha1_hex(json.dumps(key_obj, sort_keys=True, separators=(",", ":")).encode("utf-8"))[:16]
+        return root / f"eclair_label_counts_{self.split}_{key}.npz"
+
+    def _load_or_compute_label_counts(self) -> np.ndarray:
+        cache_path = self._sampling_stats_cache_path()
+
+        if cache_path is not None and cache_path.exists():
+            data = np.load(cache_path)
+            counts = np.asarray(data["counts"], dtype=np.int64)
+            if counts.shape == (self._base_len(), int(self.num_classes)):
+                return counts
+
+        counts = self._compute_label_counts()
+
+        if cache_path is not None:
+            tmp = cache_path.with_name(cache_path.name + ".tmp")
+            with tmp.open("wb") as f:
+                np.savez_compressed(f, counts=counts)
+            tmp.replace(cache_path)
+
+        return counts
+
+    def _compute_label_counts(self) -> np.ndarray:
+        """
+        Compute per-tile class counts in ECLAIR TRAIN-ID space.
+
+        Shape:
+          [num_base_tiles, num_classes]
+        """
+        counts = np.zeros((self._base_len(), int(self.num_classes)), dtype=np.int64)
+
+        for i in range(self._base_len()):
+            fname = self.names[int(i)]
+            raw = self._load_raw_base(fname)
+
+            if "y_train" in raw:
+                y = raw["y_train"].astype(np.int64, copy=False)
+            else:
+                y_native = raw.get("native_labels", None)
+                if y_native is None:
+                    y_native = raw.get("labels", None)
+                if y_native is None:
+                    raise KeyError("ECLAIR raw must include native_labels, labels, or y_train for sampling stats.")
+
+                y = eclair_native_to_train_ids(
+                    y_native,
+                    undefined_id=int(self.undefined_id),
+                    ignore_index=int(self.ignore_index),
+                ).astype(np.int64, copy=False)
+
+            valid = (y != int(self.ignore_index)) & (y >= 0) & (y < int(self.num_classes))
+            if np.any(valid):
+                binc = np.bincount(y[valid], minlength=int(self.num_classes))
+                counts[i, :] = binc[: int(self.num_classes)].astype(np.int64, copy=False)
+
+        return counts
+
+    def _prepare_training_payload(
+        self,
+        *,
+        fname: str,
+        sample_seed: int,
+    ):
+        raw = self._load_raw(fname)
+        xyz = raw["xyz"].astype(np.float64, copy=False)
+        if self.patch_cfg.make_local_coords:
+            xyz = xyz - xyz.min(axis=0, keepdims=True)
+
+        # Context side is measured before rotation, because rotating a square
+        # enlarges its axis-aligned bounding box by up to sqrt(2).
+        span_xy = np.ptp(xyz[:, :2], axis=0)
+        context_side = float(np.min(span_xy))
+
+        rng = np.random.default_rng(int(sample_seed))
         if self.is_train:
             xyz = augment_xyz(xyz, self.aug_cfg, rng)
 
-        # Normalize coordinates before quantization
-        xyz_norm = (xyz / float(self.patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
-        xyz_norm = np.ascontiguousarray(xyz_norm, dtype=np.float32)
-
-        # Labels: native -> contiguous train ids (ignore undefined)
         y_pts = raw.get("y_train", None)
         if y_pts is None:
             y_pts = eclair_native_to_train_ids(
@@ -518,35 +817,136 @@ class EclairTiles(Dataset):
         else:
             y_pts = y_pts.astype(np.int64, copy=False)
 
-        # Build per-point features (only pass what is needed)
-        intensity_arg = raw["intensity"] if self.feat_cfg.use_intensity else None
-        rn_arg = raw["return_number"] if self.feat_cfg.use_return_number else None
-        nor_arg = raw["number_of_returns"] if self.feat_cfg.use_number_of_returns else None
-        rgb_arg = raw["rgb"] if self.feat_cfg.use_rgb else None
+        payload = {
+            "xyz": np.ascontiguousarray(xyz),
+            "y_train": np.ascontiguousarray(y_pts, dtype=np.int64),
+            "intensity": raw.get("intensity", None),
+            "return_number": raw.get("return_number", None),
+            "number_of_returns": raw.get("number_of_returns", None),
+            "rgb": raw.get("rgb", None),
+            "rn_1h_u8": raw.get("rn_1h_u8", None),
+            "nor_1h_u8": raw.get("nor_1h_u8", None),
+            "source_id": str(fname),
+            "context_side_xy_m": context_side,
+            "sample_seed": int(sample_seed),
+        }
+        return payload, rng
+
+    @staticmethod
+    def _attach_mix_meta(
+        out: Dict[str, torch.Tensor],
+        d: MixDiagnostics,
+        *,
+        donor_index: int,
+    ) -> None:
+        out["meta_mix_applied"] = torch.tensor(d.applied, dtype=torch.int64)
+        out["meta_mix_skip_code"] = torch.tensor(d.skip_code, dtype=torch.int64)
+        out["meta_mix_host_points"] = torch.tensor(d.host_points, dtype=torch.int64)
+        out["meta_mix_host_removed"] = torch.tensor(d.host_removed, dtype=torch.int64)
+        out["meta_mix_donor_inserted"] = torch.tensor(d.donor_inserted, dtype=torch.int64)
+        out["meta_mix_output_points"] = torch.tensor(d.output_points, dtype=torch.int64)
+        out["meta_mix_replacement_side_m"] = torch.tensor(d.replacement_side_m, dtype=torch.float32)
+        out["meta_mix_guard_band_m"] = torch.tensor(d.guard_band_m, dtype=torch.float32)
+        out["meta_mix_height_shift_m"] = torch.tensor(d.height_shift_m, dtype=torch.float32)
+        out["meta_mix_cross_provenance_voxels"] = torch.tensor(d.cross_provenance_voxels, dtype=torch.int64)
+        out["meta_mix_removed_class_counts"] = torch.tensor(d.host_removed_class_counts, dtype=torch.int64)
+        out["meta_mix_donor_class_counts"] = torch.tensor(d.donor_inserted_class_counts, dtype=torch.int64)
+        out["meta_mix_output_class_counts"] = torch.tensor(d.output_class_counts, dtype=torch.int64)
+        n_classes = len(d.output_class_counts)
+        out["meta_mix_context_pairs"] = torch.tensor(d.donor_host_context_pairs, dtype=torch.int64).reshape(n_classes, n_classes)
+        out["meta_mix_donor_index"] = torch.tensor(donor_index, dtype=torch.int64)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        virtual_idx = int(idx)
+        base_idx = self._resolve_item_index(virtual_idx)
+        fname = self.names[base_idx]
+
+        # Preserve the existing worker-local augmentation diversity, including
+        # distinct augmentations for repeated weighted appearances of one tile.
+        base_seed = int(self._rng.integers(0, 2**31 - 1))
+        h = zlib.crc32(f"{fname}:{virtual_idx}:{self.seed}".encode("utf-8")) & 0x7FFFFFFF
+        sample_seed = (base_seed ^ int(h)) & 0x7FFFFFFF
+        payload, voxel_rng = self._prepare_training_payload(
+            fname=fname,
+            sample_seed=int(sample_seed),
+        )
+
+        mix_diag = None
+        mix_donor_index = -1
+        if self.mix3d_cfg.enabled:
+            mix_rng = np.random.default_rng(stable_seed(self.seed, self.epoch, fname, virtual_idx, "mix3d"))
+            voxel_edge_m = float(self.patch_cfg.voxel_size) * float(self.patch_cfg.coord_norm_factor)
+            if not should_apply_mix(self.mix3d_cfg, mix_rng):
+                result = unchanged_mix_result(
+                    payload,
+                    skip_code=MIX_SKIP_PROBABILITY,
+                    guard_band_m=float(self.mix3d_cfg.guard_band_voxels) * voxel_edge_m,
+                    num_classes=int(self.num_classes),
+                )
+            else:
+                donor_idx = choose_different_source_index(
+                    source_ids=self.names,
+                    host_index=int(base_idx),
+                    rng=mix_rng,
+                    max_attempts=int(self.mix3d_cfg.max_donor_attempts),
+                )
+                if donor_idx is None:
+                    result = unchanged_mix_result(
+                        payload,
+                        skip_code=MIX_SKIP_NO_DONOR,
+                        guard_band_m=float(self.mix3d_cfg.guard_band_voxels) * voxel_edge_m,
+                        num_classes=int(self.num_classes),
+                    )
+                else:
+                    mix_donor_index = int(donor_idx)
+                    donor_name = self.names[int(donor_idx)]
+                    donor_seed = stable_seed(
+                        self.seed,
+                        self.epoch,
+                        fname,
+                        donor_name,
+                        virtual_idx,
+                        "donor_augment",
+                    )
+                    donor_payload, _ = self._prepare_training_payload(
+                        fname=donor_name,
+                        sample_seed=donor_seed,
+                    )
+                    result = compose_crop_replace(
+                        host=payload,
+                        donor=donor_payload,
+                        cfg=self.mix3d_cfg,
+                        num_classes=int(self.num_classes),
+                        voxel_edge_m=voxel_edge_m,
+                        rng=mix_rng,
+                    )
+            payload = result.sample
+            mix_diag = result.diagnostics
+
+        xyz = np.asarray(payload["xyz"])
+        xyz_norm = (xyz / float(self.patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
+        xyz_norm = np.ascontiguousarray(xyz_norm, dtype=np.float32)
 
         feats_p = build_features(
             xyz_local=xyz_norm,
-            intensity=intensity_arg,
-            return_number=rn_arg,
-            number_of_returns=nor_arg,
-            rgb=rgb_arg,
+            intensity=payload["intensity"] if self.feat_cfg.use_intensity else None,
+            return_number=(payload["return_number"] if self.feat_cfg.use_return_number else None),
+            number_of_returns=(payload["number_of_returns"] if self.feat_cfg.use_number_of_returns else None),
+            rgb=payload["rgb"] if self.feat_cfg.use_rgb else None,
             cfg=self.feat_cfg,
-            return_number_1h=raw.get("rn_1h_u8", None),
-            number_of_returns_1h=raw.get("nor_1h_u8", None),
+            return_number_1h=payload.get("rn_1h_u8", None),
+            number_of_returns_1h=payload.get("nor_1h_u8", None),
         ).astype(np.float32, copy=False)
 
-        # Quantize coords (int32 contiguous)
         q = np.floor(xyz_norm / float(self.patch_cfg.voxel_size)).astype(np.int32, copy=False)
         q = np.ascontiguousarray(q, dtype=np.int32)
-
-        # Pool to voxels according to Task-6 voxel_cfg
         vx = voxelize_from_q(
             q_int32=q,
             feats_p_f32=feats_p,
-            labels_p_i64=y_pts,
+            labels_p_i64=np.asarray(payload["y_train"], dtype=np.int64),
             ignore_index=int(self.ignore_index),
             cfg=self.voxel_cfg,
-            rng=rng,  # used if feat_pool='random'
+            rng=voxel_rng,
             return_maps=False,
             num_classes_hint=int(self.num_classes),
         )
@@ -572,7 +972,7 @@ class EclairTiles(Dataset):
                     bev_cfg=self.bev_cfg,
                     level=str(lvl),
                     meters_per_voxel=m_per_vox,
-                    rng=rng,  # deterministic per sample
+                    rng=voxel_rng,  # deterministic per sample
                 )
                 bev_labels[str(lvl)] = torch.from_numpy(lbl).long()
                 bev_selected[str(lvl)] = torch.from_numpy(sel).long()
@@ -595,6 +995,13 @@ class EclairTiles(Dataset):
             out["bev_labels"] = self_out_bev_labels
             out["bev_selected_idx"] = self_out_bev_sel
 
+        if mix_diag is not None:
+            self._attach_mix_meta(
+                out,
+                mix_diag,
+                donor_index=mix_donor_index,
+            )
+
         return out
 
 
@@ -607,6 +1014,10 @@ def minkowski_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torc
     fnames = [b["fname"] for b in batch]
 
     out = {"coords": coords, "feats": feats, "labels": labels, "fnames": fnames}
+
+    for k in batch[0].keys():
+        if k.startswith("meta_"):
+            out[k] = torch.stack([b[k] for b in batch], dim=0)
 
     # Optional BEV supervision (future LiDOG head)
     if "bev_labels" in batch[0]:

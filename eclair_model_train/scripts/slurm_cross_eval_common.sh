@@ -125,6 +125,7 @@ STRIDE_M="${STRIDE_M:-${WINDOW_M}}"
 MAX_VOX="${MAX_VOX:-180000}"
 MAX_SPLIT_DEPTH="${MAX_SPLIT_DEPTH:-8}"
 AMP_FLAG="${AMP_FLAG:-0}"
+EVAL_TAG="${EVAL_TAG:-default}"
 
 if [[ "${AMP_FLAG}" == "1" ]]; then
   AMP_ARG="--amp"
@@ -140,6 +141,7 @@ echo "STRIDE_M=${STRIDE_M}"
 echo "MAX_VOX=${MAX_VOX}"
 echo "MAX_SPLIT_DEPTH=${MAX_SPLIT_DEPTH}"
 echo "AMP_FLAG=${AMP_FLAG}"
+echo "EVAL_TAG=${EVAL_TAG}"
 
 ########################
 # 7) DEFAULT RUN PATHS
@@ -147,11 +149,17 @@ echo "AMP_FLAG=${AMP_FLAG}"
 # Override these from sbatch if needed:
 # sbatch --export=ALL,CASE=eclair_to_dales,ECLAIR_RUN_DIR=/scratch/... scripts/...
 
-ECLAIR_RUN_DIR="${ECLAIR_RUN_DIR:-/scratch/m23csa510/e0_results/e0_eclair_repro_29306}"
+# ECLAIR_RUN_DIR="${ECLAIR_RUN_DIR:-/scratch/m23csa510/e0_results/e0_eclair_repro_29306}"
+ECLAIR_RUN_DIR="${ECLAIR_RUN_DIR:-/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162}"
 ECLAIR_CKPT="${ECLAIR_CKPT:-${ECLAIR_RUN_DIR}/checkpoints/best.pt}"
 ECLAIR_CFG="${ECLAIR_CFG:-${ECLAIR_RUN_DIR}/config_resolved.json}"
 
-DALES_RUN_DIR="${DALES_RUN_DIR:-/scratch/m23csa510/e0_results/e0_dales_train_29364}"
+# Fixed canonical target config
+ECLAIR_TARGET_CFG="${ECLAIR_TARGET_CFG:-/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json}"
+DALES_TARGET_CFG="${DALES_TARGET_CFG:-/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json}"
+
+# DALES_RUN_DIR="${DALES_RUN_DIR:-/scratch/m23csa510/e0_results/e0_dales_train_29364}"
+DALES_RUN_DIR="${DALES_RUN_DIR:-/scratch/m23csa510/e0_results/m1_dales_mix3d_38163}"
 DALES_CKPT="${DALES_CKPT:-${DALES_RUN_DIR}/checkpoints/best.pt}"
 DALES_CFG="${DALES_CFG:-${DALES_RUN_DIR}/config_resolved.json}"
 
@@ -187,6 +195,11 @@ else
   echo "TARGET_SPLIT=${TARGET_SPLIT}; not using DALES test manifest."
 fi
 
+echo "ECLAIR_RUN_DIR=${ECLAIR_RUN_DIR}"
+echo "ECLAIR_CKPT=${ECLAIR_CKPT}"
+echo "ECLAIR_CFG=${ECLAIR_CFG}"
+echo "ECLAIR_TARGET_CFG=${ECLAIR_TARGET_CFG}"
+
 ########################
 # 9) RESOLVE CASE-SPECIFIC ARGS
 ########################
@@ -194,52 +207,52 @@ case "${CASE}" in
   dales_to_dales)
     CKPT="${DALES_CKPT}"
     SOURCE_CFG="${DALES_CFG}"
-    TARGET_CFG="${DALES_CFG}"
+    TARGET_CFG="${DALES_TARGET_CFG}"
     SOURCE_DOMAIN="dales"
     TARGET_DOMAIN="dales"
     SOURCE_TRAIN_TO_COMMON="${MAP_DALES_TRAIN_TO_COMMON}"
     SOURCE_NATIVE_TO_COMMON="${MAP_DALES_NATIVE_TO_COMMON}"
     TARGET_NATIVE_TO_COMMON="${MAP_DALES_NATIVE_TO_COMMON}"
-    OUT_DIR="${CROSS_EVAL_ROOT}/${CASE}_${TARGET_SPLIT}_${SLURM_JOB_ID:-manual}"
+    OUT_DIR="${CROSS_EVAL_ROOT}/${CASE}_${EVAL_TAG}_${TARGET_SPLIT}_${SLURM_JOB_ID:-manual}"
     MANIFEST_ARGS=("${EXTRA_DALES_MANIFEST_ARGS[@]}")
     ;;
 
   eclair_to_eclair)
     CKPT="${ECLAIR_CKPT}"
     SOURCE_CFG="${ECLAIR_CFG}"
-    TARGET_CFG="${ECLAIR_CFG}"
+    TARGET_CFG="${ECLAIR_TARGET_CFG}"
     SOURCE_DOMAIN="eclair"
     TARGET_DOMAIN="eclair"
     SOURCE_TRAIN_TO_COMMON="${MAP_ECLAIR_TRAIN_TO_COMMON}"
     SOURCE_NATIVE_TO_COMMON="${MAP_ECLAIR_NATIVE_TO_COMMON}"
     TARGET_NATIVE_TO_COMMON="${MAP_ECLAIR_NATIVE_TO_COMMON}"
-    OUT_DIR="${CROSS_EVAL_ROOT}/${CASE}_${TARGET_SPLIT}_${SLURM_JOB_ID:-manual}"
+    OUT_DIR="${CROSS_EVAL_ROOT}/${CASE}_${EVAL_TAG}_${TARGET_SPLIT}_${SLURM_JOB_ID:-manual}"
     MANIFEST_ARGS=()
     ;;
 
   eclair_to_dales)
     CKPT="${ECLAIR_CKPT}"
     SOURCE_CFG="${ECLAIR_CFG}"
-    TARGET_CFG="${DALES_CFG}"
+    TARGET_CFG="${DALES_TARGET_CFG}"
     SOURCE_DOMAIN="eclair"
     TARGET_DOMAIN="dales"
     SOURCE_TRAIN_TO_COMMON="${MAP_ECLAIR_TRAIN_TO_COMMON}"
     SOURCE_NATIVE_TO_COMMON="${MAP_ECLAIR_NATIVE_TO_COMMON}"
     TARGET_NATIVE_TO_COMMON="${MAP_DALES_NATIVE_TO_COMMON}"
-    OUT_DIR="${CROSS_EVAL_ROOT}/${CASE}_${TARGET_SPLIT}_${SLURM_JOB_ID:-manual}"
+    OUT_DIR="${CROSS_EVAL_ROOT}/${CASE}_${EVAL_TAG}_${TARGET_SPLIT}_${SLURM_JOB_ID:-manual}"
     MANIFEST_ARGS=("${EXTRA_DALES_MANIFEST_ARGS[@]}")
     ;;
 
   dales_to_eclair)
     CKPT="${DALES_CKPT}"
     SOURCE_CFG="${DALES_CFG}"
-    TARGET_CFG="${ECLAIR_CFG}"
+    TARGET_CFG="${ECLAIR_TARGET_CFG}"
     SOURCE_DOMAIN="dales"
     TARGET_DOMAIN="eclair"
     SOURCE_TRAIN_TO_COMMON="${MAP_DALES_TRAIN_TO_COMMON}"
     SOURCE_NATIVE_TO_COMMON="${MAP_DALES_NATIVE_TO_COMMON}"
     TARGET_NATIVE_TO_COMMON="${MAP_ECLAIR_NATIVE_TO_COMMON}"
-    OUT_DIR="${CROSS_EVAL_ROOT}/${CASE}_${TARGET_SPLIT}_${SLURM_JOB_ID:-manual}"
+    OUT_DIR="${CROSS_EVAL_ROOT}/${CASE}_${EVAL_TAG}_${TARGET_SPLIT}_${SLURM_JOB_ID:-manual}"
     MANIFEST_ARGS=()
     ;;
 

@@ -5,9 +5,11 @@ import argparse
 import hashlib
 import inspect
 import json
+import math
 import random
 import shutil
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,16 +29,55 @@ from src.data_dales import (
     _find_dales_files,
     minkowski_collate_dales,
 )
-from src.data_eclair import EclairTiles, PatchConfig, minkowski_collate_fn
+from src.data_eclair import EclairSamplingConfig, EclairTiles, PatchConfig, minkowski_collate_fn
 from src.dist import DistEnv, all_reduce_sum, init_distributed, is_main_process
 from src.features import FeatureConfig, build_features, infer_in_channels
 from src.label_maps import ECLAIR_CLASS_NAMES_11
 from src.losses import FocalLoss, FocalLossConfig, FocalLovaszLoss, LovaszSoftmaxLoss, LovaszWarmupConfig
 from src.metrics import ConfusionMatrix
+from src.mix3d import ALSMix3DConfig
 from src.model import build_model
 from src.utils import CSVLogger, atomic_save_torch, format_seconds, save_json, set_seed, unwrap_model
 from src.voxelization import VoxelizationConfig, voxelize_from_q
 from torch.utils.data import DataLoader
+
+
+def _directory_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            if p.is_file():
+                total += int(p.stat().st_size)
+        except FileNotFoundError:
+            continue
+    return total
+
+
+def _prune_epoch_snapshots(checkpoint_dir: Path, keep_last_k: int) -> List[str]:
+    snapshots = sorted(checkpoint_dir.glob("epoch_*.pt"), key=lambda p: p.name)
+    keep = max(0, int(keep_last_k))
+    doomed = snapshots if keep == 0 else snapshots[:-keep]
+    removed = []
+    for path in doomed:
+        try:
+            path.unlink()
+            removed.append(path.name)
+        except FileNotFoundError:
+            pass
+    return removed
+
+
+def _cleanup_checkpoint_temp_files(checkpoint_dir: Path) -> List[str]:
+    removed = []
+    for path in checkpoint_dir.glob("*.tmp"):
+        try:
+            path.unlink()
+            removed.append(path.name)
+        except FileNotFoundError:
+            pass
+    return removed
 
 
 def _eclair_run_cache_key(cfg: Dict[str, Any]) -> str:
@@ -122,6 +163,9 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
     voxel_cfg = VoxelizationConfig.from_cfg(data)
 
     bev_cfg = BEVHeadConfig.from_cfg(cfg)
+    mix3d_cfg = ALSMix3DConfig.from_cfg(data.get("mix3d", {}))
+    if mix3d_cfg.enabled and bev_cfg.enabled:
+        raise ValueError("Initial M1 forbids model.aux_heads.bev.enabled=true.")
 
     # -------------------------
     # Feature-stack sanity check (prevents silent channel bugs)
@@ -140,6 +184,9 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
 
     if dataset == "eclair":
         eclair_aug_cfg = AugmentConfig(**data["aug"])
+
+        eclair_sampling_cfg = EclairSamplingConfig.from_cfg(data.get("sampling", {}))
+
         eclair_cfg = cfg.get("eclair", {})
         meta_filename = eclair_cfg.get("meta_filename", "labels.json")
         train_cats = eclair_cfg.get("train_review_categories", None)  # None = no filtering
@@ -169,8 +216,12 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             num_classes=int(ls["num_classes"]),
             run_cache_root=str(eclair_run_cache_dir) if eclair_run_cache_dir is not None else None,
             run_cache_precompute_returns_onehot=(
-                eclair_run_cache_dir is not None and (feat_cfg.use_return_number or feat_cfg.use_number_of_returns)
+                eclair_run_cache_dir is not None
+                and bool(data.get("run_cache_precompute_returns_onehot", False))
+                and (feat_cfg.use_return_number or feat_cfg.use_number_of_returns)
             ),
+            sampling_cfg=eclair_sampling_cfg,
+            mix3d_cfg=mix3d_cfg,
         )
         val_ds = EclairTiles(
             eclair_root=data["eclair_root"],
@@ -191,8 +242,12 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             num_classes=int(ls["num_classes"]),
             run_cache_root=str(eclair_run_cache_dir) if eclair_run_cache_dir is not None else None,
             run_cache_precompute_returns_onehot=(
-                eclair_run_cache_dir is not None and (feat_cfg.use_return_number or feat_cfg.use_number_of_returns)
+                eclair_run_cache_dir is not None
+                and bool(data.get("run_cache_precompute_returns_onehot", False))
+                and (feat_cfg.use_return_number or feat_cfg.use_number_of_returns)
             ),
+            sampling_cfg=EclairSamplingConfig(mode="tiles"),
+            mix3d_cfg=ALSMix3DConfig(enabled=False),
         )
         test_ds = EclairTiles(
             eclair_root=data["eclair_root"],
@@ -213,8 +268,12 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             num_classes=int(ls["num_classes"]),
             run_cache_root=str(eclair_run_cache_dir) if eclair_run_cache_dir is not None else None,
             run_cache_precompute_returns_onehot=(
-                eclair_run_cache_dir is not None and (feat_cfg.use_return_number or feat_cfg.use_number_of_returns)
+                eclair_run_cache_dir is not None
+                and bool(data.get("run_cache_precompute_returns_onehot", False))
+                and (feat_cfg.use_return_number or feat_cfg.use_number_of_returns)
             ),
+            sampling_cfg=EclairSamplingConfig(mode="tiles"),
+            mix3d_cfg=ALSMix3DConfig(enabled=False),
         )
 
         collate = minkowski_collate_fn
@@ -316,6 +375,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             crop_cfg=crop_cfg,
             voxel_cfg=voxel_cfg,
             bev_cfg=bev_cfg,
+            mix3d_cfg=mix3d_cfg,
         )
         val_ds = DalesTiles(
             dales_root=dales_train_root,
@@ -340,6 +400,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             crop_cfg=crop_cfg,
             voxel_cfg=voxel_cfg,
             bev_cfg=bev_cfg,
+            mix3d_cfg=ALSMix3DConfig(enabled=False),
         )
         test_ds = DalesTiles(
             dales_root=dales_test_root,
@@ -364,6 +425,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             crop_cfg=crop_cfg,
             voxel_cfg=voxel_cfg,
             bev_cfg=bev_cfg,
+            mix3d_cfg=ALSMix3DConfig(enabled=False),
         )
 
         # NOTE: caching is handled inside DalesTiles only if you add the
@@ -843,6 +905,8 @@ def evaluate(
         "macro_f1": res.macro_f1,
         "per_class_iou": res.per_class_iou,
         "per_class_f1": res.per_class_f1,
+        "per_class_precision": res.per_class_precision,
+        "per_class_recall": res.per_class_recall,
         "miou_valid": res.miou_valid,
     }
 
@@ -906,7 +970,12 @@ def evaluate_voxel_windowed(
             continue
 
         raw = dataset_obj.get_raw(ti)
-        xyz = raw["xyz"].astype(np.float64, copy=False)
+        xyz = np.asarray(raw["xyz"], dtype=np.float64)
+
+        patch_cfg = dataset_obj.patch_cfg
+
+        if bool(patch_cfg.make_local_coords):
+            xyz = xyz - xyz.min(axis=0, keepdims=True)
 
         # --- labels per POINT in train-id space ---
         if hasattr(dataset_obj, "label_lut") and dataset_obj.label_lut is not None:
@@ -929,7 +998,6 @@ def evaluate_voxel_windowed(
             y_pts[y_native == undefined_id] = ignore_index
 
         # --- features per POINT ---
-        patch_cfg = dataset_obj.patch_cfg
         feat_cfg = dataset_obj.feat_cfg
 
         xyz_norm = (xyz / float(patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
@@ -1022,6 +1090,10 @@ def evaluate_voxel_windowed(
                 voxel_counts[sel] += 1
 
         # finalize voxel logits
+        missed = np.where(voxel_counts == 0)[0]
+
+        if missed.size > 0:
+            raise RuntimeError(f"Evaluation window scheduler missed " f"{missed.size}/{nv} voxels.")
         counts = voxel_counts.astype(np.float32)
         counts[counts == 0] = 1.0
         if agg == "mean_logits":
@@ -1067,6 +1139,8 @@ def evaluate_voxel_windowed(
         "macro_f1": res.macro_f1,
         "per_class_iou": res.per_class_iou,
         "per_class_f1": res.per_class_f1,
+        "per_class_precision": res.per_class_precision,
+        "per_class_recall": res.per_class_recall,
         "miou_valid": res.miou_valid,
     }
 
@@ -1275,11 +1349,20 @@ def evaluate_pointwise(
                             out = model(st)
 
                     out_st = out[0] if isinstance(out, (tuple, list)) and len(out) == 2 else out
+                    cin = coords_b.cpu().numpy()
+                    cout = out_st.C.detach().cpu().numpy()
+
+                    if not np.array_equal(cin, cout):
+                        raise RuntimeError("Minkowski output coordinate order differs from input.")
                     logits_sub_np = out_st.F.detach().float().cpu().numpy()
 
                     voxel_logits_sum[sel] += logits_sub_np.astype(sum_dtype, copy=False)
                     voxel_counts[sel] += 1
 
+            missed = np.where(voxel_counts == 0)[0]
+
+            if missed.size > 0:
+                raise RuntimeError(f"Evaluation window scheduler missed " f"{missed.size}/{nv} voxels.")
             counts = voxel_counts.astype(np.float32)
             counts[counts == 0] = 1.0
 
@@ -1329,6 +1412,8 @@ def evaluate_pointwise(
         "macro_f1": res.macro_f1,
         "per_class_iou": res.per_class_iou,
         "per_class_f1": res.per_class_f1,
+        "per_class_precision": res.per_class_precision,
+        "per_class_recall": res.per_class_recall,
         "miou_valid": res.miou_valid,
     }
 
@@ -1346,7 +1431,8 @@ def train(cfg_path: str):
     eclair_run_cache_dir: Optional[Path] = None
     eclair_run_cache_base: Optional[Path] = None
 
-    if dataset == "eclair":
+    run_cache_enabled = bool(cfg.get("data", {}).get("run_cache_enabled", True))
+    if dataset == "eclair" and run_cache_enabled:
         key = _eclair_run_cache_key(cfg)
         eclair_run_cache_base = out_dir / "_run_cache" / f"eclair_{key}"
         rank_tag = f"rank{dist_env.rank}" if dist_env.enabled else "single"
@@ -1361,7 +1447,20 @@ def train(cfg_path: str):
     # Only rank0 writes files
     if is_main_process(dist_env):
         save_json(out_dir / "config_resolved.json", cfg)
-        (out_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+        checkpoint_dir = out_dir / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        removed_tmp = _cleanup_checkpoint_temp_files(checkpoint_dir)
+        keep_snapshots = bool(run.get("keep_epoch_snapshots", False))
+        keep_last_k = int(run.get("keep_last_k_epoch_snapshots", 0))
+        removed_epochs = _prune_epoch_snapshots(
+            checkpoint_dir,
+            keep_last_k if keep_snapshots else 0,
+        )
+        if removed_tmp or removed_epochs:
+            print(
+                f"[storage] startup cleanup temp={removed_tmp} epoch_snapshots={removed_epochs}",
+                flush=True,
+            )
 
     if dist_env.enabled:
         torch.distributed.barrier()  # ensure dirs exist before others proceed
@@ -1372,6 +1471,14 @@ def train(cfg_path: str):
     amp = bool(run.get("amp", True))
 
     train_loader, val_loader, test_loader = build_dataloaders(cfg, dist_env, eclair_run_cache_dir=eclair_run_cache_dir)
+
+    if is_main_process(dist_env):
+        ds = train_loader.dataset
+        # Under DistributedSampler, dataset may be the original EclairTiles.
+        summary = getattr(ds, "sampling_summary", None)
+        if summary is not None:
+            save_json(out_dir / "eclair_sampling_summary.json", summary)
+            print(f"[ECLAIR sampling summary] {json.dumps(summary, indent=2)}", flush=True)
 
     model_cfg = cfg["model"]
     model = build_model(
@@ -1437,6 +1544,9 @@ def train(cfg_path: str):
         "val_macro_f1",
         "time_epoch_s",
         "best_val_miou",
+        "checkpoint_dir_gb",
+        "run_dir_gb",
+        "run_cache_gb",
     ]
 
     # BEV scalar metric (row currently writes it; add column so it actually appears)
@@ -1457,11 +1567,43 @@ def train(cfg_path: str):
             "train_resample_attempt_mean",
         ]
 
+    mix_enabled = bool((cfg.get("data", {}).get("mix3d", {}) or {}).get("enabled", False))
+    if mix_enabled:
+        fields += [
+            "mix_rate",
+            "mix_skip_rate",
+            "mix_host_points_mean",
+            "mix_host_removed_mean",
+            "mix_donor_inserted_mean",
+            "mix_output_points_mean",
+            "mix_replacement_side_m_mean",
+            "mix_guard_band_m_mean",
+            "mix_height_shift_m_mean",
+            "mix_cross_provenance_voxels",
+            "mix_output_budget_skip_rate",
+            "mix_probability_skip_rate",
+            "mix_no_donor_skip_rate",
+            "mix_invalid_region_skip_rate",
+            "mix_collision_skip_rate",
+            "mix_replacement_side_m_std",
+            "mix_height_shift_m_std",
+            "mix_abs_height_shift_m_mean",
+            "mix_output_to_host_points_ratio_mean",
+            "mix_output_to_host_points_ratio_std",
+            "mix_donor_unique_count",
+            "mix_donor_selection_entropy",
+            "mix_donor_max_share",
+        ]
+
     # per-class columns
     for name in class_names:
         fields.append(f"val_iou_{name.replace(' ', '_').replace('.', '')}")
     for name in class_names:
         fields.append(f"val_f1_{name.replace(' ', '_').replace('.', '')}")
+    for name in class_names:
+        fields.append(f"val_precision_{name.replace(' ', '_').replace('.', '')}")
+    for name in class_names:
+        fields.append(f"val_recall_{name.replace(' ', '_').replace('.', '')}")
 
     if is_main_process(dist_env):
         logger = CSVLogger(out_dir / "metrics.csv", fields)
@@ -1473,8 +1615,75 @@ def train(cfg_path: str):
 
         logger = _NoOp()
 
+    if mix_enabled and is_main_process(dist_env):
+        mix_class_logger = CSVLogger(
+            out_dir / "mix_class_diagnostics.csv",
+            [
+                "epoch",
+                "class_id",
+                "class_name",
+                "host_removed_points",
+                "donor_inserted_points",
+                "mixed_output_points",
+                "donor_presence_samples",
+            ],
+        )
+    else:
+        mix_class_logger = None
+    mix_context_history: List[Dict[str, Any]] = []
+
     best_val_miou = -1.0
     global_step = 0
+    start_epoch = 1
+
+    resume_from = run.get("resume_from", None)
+    if resume_from:
+        resume_path = Path(str(resume_from)).expanduser()
+        if not resume_path.is_file():
+            raise FileNotFoundError(f"Resume checkpoint does not exist: {resume_path}")
+
+        checkpoint = torch.load(resume_path, map_location="cpu")
+        required = {"epoch", "model_state", "optimizer_state"}
+        missing = sorted(required.difference(checkpoint.keys()))
+        if missing:
+            raise KeyError(f"Resume checkpoint is missing required keys {missing}: {resume_path}")
+
+        unwrap_model(model).load_state_dict(checkpoint["model_state"], strict=True)
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        # Optimizer checkpoints were loaded on CPU; move tensor states to the
+        # current rank's device before the first optimizer step.
+        for state in optimizer.state.values():
+            for key, value in list(state.items()):
+                if torch.is_tensor(value):
+                    state[key] = value.to(device=device, non_blocking=True)
+
+        scheduler_state = checkpoint.get("scheduler_state", None)
+        if scheduler is not None and scheduler_state is not None:
+            scheduler.load_state_dict(scheduler_state)
+
+        scaler_state = checkpoint.get("scaler_state", None)
+        if scaler_state is not None:
+            scaler.load_state_dict(scaler_state)
+
+        completed_epoch = int(checkpoint["epoch"])
+        start_epoch = completed_epoch + 1
+        best_val_miou = float(checkpoint.get("best_val_miou", -1.0))
+        global_step = int(checkpoint.get("global_step", 0))
+
+        if start_epoch > epochs:
+            raise ValueError(
+                f"Checkpoint already completed epoch {completed_epoch}, but epochs={epochs}. "
+                "Increase epochs or remove run.resume_from."
+            )
+        if is_main_process(dist_env):
+            print(
+                f"[resume] loaded={resume_path} completed_epoch={completed_epoch} "
+                f"start_epoch={start_epoch} best_val_miou={best_val_miou:.6f}",
+                flush=True,
+            )
+        if dist_env.enabled:
+            torch.distributed.barrier()
+
     track_train_cm = bool(run.get("track_train_cm", False))
     ds_tr, ds_va, ds_te = train_loader.dataset, val_loader.dataset, test_loader.dataset
 
@@ -1499,7 +1708,7 @@ def train(cfg_path: str):
         # Paths -> show .name; strings -> show directly
         print("val files head:", [getattr(p, "name", str(p)) for p in head])
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
 
         model.train()
 
@@ -1541,6 +1750,28 @@ def train(cfg_path: str):
         dbg_fallback_sum = 0.0
         dbg_rare_center_sum = 0.0
         dbg_resample_sum = 0.0
+        mix_count = 0.0
+        mix_applied_sum = 0.0
+        mix_host_points_sum = 0.0
+        mix_host_removed_sum = 0.0
+        mix_donor_inserted_sum = 0.0
+        mix_output_points_sum = 0.0
+        mix_side_sum = 0.0
+        mix_side_sq_sum = 0.0
+        mix_guard_sum = 0.0
+        mix_height_shift_sum = 0.0
+        mix_height_shift_sq_sum = 0.0
+        mix_abs_height_shift_sum = 0.0
+        mix_output_ratio_sum = 0.0
+        mix_output_ratio_sq_sum = 0.0
+        mix_collision_sum = 0.0
+        mix_skip_code_counts = np.zeros((6,), dtype=np.float64)
+        mix_removed_class_counts = torch.zeros(num_classes, dtype=torch.float64)
+        mix_donor_class_counts = torch.zeros(num_classes, dtype=torch.float64)
+        mix_output_class_counts = torch.zeros(num_classes, dtype=torch.float64)
+        mix_donor_presence_counts = torch.zeros(num_classes, dtype=torch.float64)
+        mix_context_pair_counts = torch.zeros((num_classes, num_classes), dtype=torch.float64)
+        mix_donor_counter: Counter[int] = Counter()
         optimizer.zero_grad(set_to_none=True)
 
         use_cuda_timer = torch.cuda.is_available()
@@ -1628,6 +1859,51 @@ def train(cfg_path: str):
                 dbg_fallback_sum += float(batch["meta_used_fallback"].float().mean().item())
                 dbg_rare_center_sum += float(batch["meta_used_rare_center"].float().mean().item())
                 dbg_resample_sum += float(batch["meta_resample_attempt"].float().mean().item())
+
+            if "meta_mix_applied" in batch:
+                applied = batch["meta_mix_applied"].to(torch.bool).reshape(-1)
+                n_mix = float(applied.numel())
+                mix_count += n_mix
+                mix_applied_sum += float(applied.double().sum().item())
+                mix_host_points_sum += float(batch["meta_mix_host_points"].double().sum().item())
+                mix_host_removed_sum += float(batch["meta_mix_host_removed"].double().sum().item())
+                mix_donor_inserted_sum += float(batch["meta_mix_donor_inserted"].double().sum().item())
+                mix_output_points_sum += float(batch["meta_mix_output_points"].double().sum().item())
+                mix_guard_sum += float(batch["meta_mix_guard_band_m"].double().sum().item())
+                mix_collision_sum += float(batch["meta_mix_cross_provenance_voxels"].double().sum().item())
+
+                skip_codes = batch["meta_mix_skip_code"].to(torch.int64).reshape(-1)
+                skip_bc = torch.bincount(skip_codes.clamp(0, 5), minlength=6)
+                mix_skip_code_counts += skip_bc.cpu().numpy().astype(np.float64)
+                host_points = batch["meta_mix_host_points"].double().reshape(-1).clamp_min(1.0)
+                output_points = batch["meta_mix_output_points"].double().reshape(-1)
+                ratios = output_points / host_points
+                mix_output_ratio_sum += float(ratios.sum().item())
+                mix_output_ratio_sq_sum += float((ratios * ratios).sum().item())
+
+                if bool(applied.any()):
+                    side = batch["meta_mix_replacement_side_m"].double().reshape(-1)[applied]
+                    shift = batch["meta_mix_height_shift_m"].double().reshape(-1)[applied]
+                    mix_side_sum += float(side.sum().item())
+                    mix_side_sq_sum += float((side * side).sum().item())
+                    mix_height_shift_sum += float(shift.sum().item())
+                    mix_height_shift_sq_sum += float((shift * shift).sum().item())
+                    mix_abs_height_shift_sum += float(shift.abs().sum().item())
+
+                removed = batch["meta_mix_removed_class_counts"].double()
+                donor = batch["meta_mix_donor_class_counts"].double()
+                output_cls = batch["meta_mix_output_class_counts"].double()
+                context_pairs = batch["meta_mix_context_pairs"].double()
+                mix_removed_class_counts += removed.sum(dim=0)
+                mix_donor_class_counts += donor.sum(dim=0)
+                mix_output_class_counts += output_cls.sum(dim=0)
+                mix_donor_presence_counts += (donor > 0).double().sum(dim=0)
+                mix_context_pair_counts += context_pairs.sum(dim=0)
+
+                donor_indices = batch["meta_mix_donor_index"].to(torch.int64).reshape(-1)
+                for was_applied, donor_idx in zip(applied.tolist(), donor_indices.tolist()):
+                    if was_applied and int(donor_idx) >= 0:
+                        mix_donor_counter[int(donor_idx)] += 1
 
             if step % grad_accum == 0:
                 scaler.step(optimizer)
@@ -1738,6 +2014,8 @@ def train(cfg_path: str):
                 "macro_f1": float("nan"),
                 "per_class_iou": [float("nan")] * num_classes,
                 "per_class_f1": [float("nan")] * num_classes,
+                "per_class_precision": [float("nan")] * num_classes,
+                "per_class_recall": [float("nan")] * num_classes,
             }
 
         # ---- Checkpointing ----
@@ -1748,28 +2026,68 @@ def train(cfg_path: str):
         save_every = int(run.get("save_every_epochs", 5))
 
         if is_main_process(dist_env) and (epoch % save_every == 0 or epoch == epochs or is_best):
-            state = {
+            common_checkpoint = {
                 "epoch": epoch,
+                "global_step": global_step,
                 "model_state": unwrap_model(model).state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "scheduler_state": (None if scheduler is None else scheduler.state_dict()),
-                "scaler_state": scaler.state_dict(),
                 "cfg": cfg,
                 "best_val_miou": best_val_miou,
             }
+            resumable_state = {
+                **common_checkpoint,
+                "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": (None if scheduler is None else scheduler.state_dict()),
+                "scaler_state": scaler.state_dict(),
+            }
             ckpt_dir = out_dir / "checkpoints"
-            # atomic_save_torch(state, ckpt_dir / f"epoch_{epoch:03d}.pt")
-            atomic_save_torch(state, ckpt_dir / "last.pt")
+            # last.pt is resumable and is atomically overwritten; it never accumulates.
+            atomic_save_torch(resumable_state, ckpt_dir / "last.pt")
             if is_best:
-                atomic_save_torch(state, ckpt_dir / "best.pt")
+                best_model_only = bool(run.get("best_checkpoint_model_only", False))
+                atomic_save_torch(
+                    common_checkpoint if best_model_only else resumable_state,
+                    ckpt_dir / "best.pt",
+                )
 
-            # Optional periodic "epoch snapshots" (off by default)
             keep_epoch_snapshots = bool(run.get("keep_epoch_snapshots", False))
             if keep_epoch_snapshots and (epoch % save_every == 0 or epoch == epochs):
-                atomic_save_torch(state, ckpt_dir / f"epoch_{epoch:03d}.pt")
+                snapshot_model_only = bool(run.get("epoch_snapshots_model_only", True))
+                atomic_save_torch(
+                    common_checkpoint if snapshot_model_only else resumable_state,
+                    ckpt_dir / f"epoch_{epoch:03d}.pt",
+                )
+
+            keep_last_k = int(run.get("keep_last_k_epoch_snapshots", 0))
+            removed = _prune_epoch_snapshots(
+                ckpt_dir,
+                keep_last_k if keep_epoch_snapshots else 0,
+            )
+            if removed:
+                print(f"[storage] pruned epoch checkpoints: {removed}", flush=True)
 
         if dist_env.enabled:
             torch.distributed.barrier()  # optional but nice: sync after saving
+
+        storage_gb = torch.zeros(3, dtype=torch.float64, device=device)
+        if is_main_process(dist_env):
+            checkpoint_bytes = _directory_size_bytes(out_dir / "checkpoints")
+            run_cache_bytes = _directory_size_bytes(out_dir / "_run_cache")
+            run_bytes = _directory_size_bytes(out_dir)
+            storage_gb[:] = torch.tensor(
+                [checkpoint_bytes, run_bytes, run_cache_bytes],
+                dtype=torch.float64,
+                device=device,
+            ) / float(1024**3)
+        if dist_env.enabled:
+            torch.distributed.broadcast(storage_gb, src=0)
+        checkpoint_dir_gb, run_dir_gb, run_cache_gb = [float(x) for x in storage_gb.detach().cpu().tolist()]
+        max_run_dir_gb = float(run.get("max_run_dir_gb", 0.0) or 0.0)
+        if max_run_dir_gb > 0.0 and run_dir_gb > max_run_dir_gb:
+            raise RuntimeError(
+                f"Run directory exceeded run.max_run_dir_gb: "
+                f"{run_dir_gb:.2f} GiB > {max_run_dir_gb:.2f} GiB. "
+                "Training stopped before exhausting quota."
+            )
 
         lr = optimizer.param_groups[0]["lr"]
 
@@ -1782,8 +2100,147 @@ def train(cfg_path: str):
             "val_macro_f1": val_metrics["macro_f1"],
             "time_epoch_s": epoch_s,
             "best_val_miou": best_val_miou,
+            "checkpoint_dir_gb": checkpoint_dir_gb,
+            "run_dir_gb": run_dir_gb,
+            "run_cache_gb": run_cache_gb,
             "bev_miou": bev_metrics["bev_miou"] if bev_metrics is not None else float("nan"),
         }
+
+        if mix_enabled:
+            mix_totals = torch.tensor(
+                [
+                    mix_count,
+                    mix_applied_sum,
+                    mix_host_points_sum,
+                    mix_host_removed_sum,
+                    mix_donor_inserted_sum,
+                    mix_output_points_sum,
+                    mix_side_sum,
+                    mix_side_sq_sum,
+                    mix_guard_sum,
+                    mix_height_shift_sum,
+                    mix_height_shift_sq_sum,
+                    mix_abs_height_shift_sum,
+                    mix_output_ratio_sum,
+                    mix_output_ratio_sq_sum,
+                    mix_collision_sum,
+                    *mix_skip_code_counts.tolist(),
+                ],
+                device=device,
+                dtype=torch.float64,
+            )
+            mix_totals = all_reduce_sum(dist_env, mix_totals)
+            mt = mix_totals.detach().cpu().numpy()
+            denom = max(1.0, float(mt[0]))
+            applied_denom = max(1.0, float(mt[1]))
+            side_mean = float(mt[6] / applied_denom)
+            side_std = math.sqrt(max(0.0, float(mt[7] / applied_denom) - side_mean**2))
+            shift_mean = float(mt[9] / applied_denom)
+            shift_std = math.sqrt(max(0.0, float(mt[10] / applied_denom) - shift_mean**2))
+            ratio_mean = float(mt[12] / denom)
+            ratio_std = math.sqrt(max(0.0, float(mt[13] / denom) - ratio_mean**2))
+            skip_counts = mt[15:21]
+
+            class_totals = torch.cat(
+                [
+                    mix_removed_class_counts,
+                    mix_donor_class_counts,
+                    mix_output_class_counts,
+                    mix_donor_presence_counts,
+                    mix_context_pair_counts.reshape(-1),
+                ]
+            ).to(device=device, dtype=torch.float64)
+            class_totals = all_reduce_sum(dist_env, class_totals).cpu()
+            pos = 0
+            removed_global = class_totals[pos : pos + num_classes]
+            pos += num_classes
+            donor_global = class_totals[pos : pos + num_classes]
+            pos += num_classes
+            output_global = class_totals[pos : pos + num_classes]
+            pos += num_classes
+            donor_presence_global = class_totals[pos : pos + num_classes]
+            pos += num_classes
+            context_global = class_totals[pos:].reshape(num_classes, num_classes)
+
+            if dist_env.enabled:
+                gathered_counters = [None for _ in range(dist_env.world_size)]
+                torch.distributed.all_gather_object(
+                    gathered_counters,
+                    dict(mix_donor_counter),
+                )
+                donor_counter_global: Counter[int] = Counter()
+                for counter_dict in gathered_counters:
+                    donor_counter_global.update(counter_dict or {})
+            else:
+                donor_counter_global = mix_donor_counter
+
+            donor_total = float(sum(donor_counter_global.values()))
+            donor_unique = len(donor_counter_global)
+            if donor_total > 0.0:
+                probs = [float(v) / donor_total for v in donor_counter_global.values()]
+                entropy = -sum(p * math.log(max(p, 1e-12)) for p in probs)
+                entropy_norm = entropy / math.log(donor_unique) if donor_unique > 1 else 1.0
+                donor_max_share = max(probs)
+            else:
+                entropy_norm = 0.0
+                donor_max_share = 0.0
+
+            row.update(
+                {
+                    "mix_rate": float(mt[1] / denom),
+                    "mix_skip_rate": float(1.0 - mt[1] / denom),
+                    "mix_host_points_mean": float(mt[2] / denom),
+                    "mix_host_removed_mean": float(mt[3] / denom),
+                    "mix_donor_inserted_mean": float(mt[4] / denom),
+                    "mix_output_points_mean": float(mt[5] / denom),
+                    "mix_replacement_side_m_mean": side_mean,
+                    "mix_guard_band_m_mean": float(mt[8] / denom),
+                    "mix_height_shift_m_mean": shift_mean,
+                    "mix_cross_provenance_voxels": float(mt[14]),
+                    "mix_output_budget_skip_rate": float(skip_counts[5] / denom),
+                    "mix_probability_skip_rate": float(skip_counts[1] / denom),
+                    "mix_no_donor_skip_rate": float(skip_counts[2] / denom),
+                    "mix_invalid_region_skip_rate": float(skip_counts[3] / denom),
+                    "mix_collision_skip_rate": float(skip_counts[4] / denom),
+                    "mix_replacement_side_m_std": side_std,
+                    "mix_height_shift_m_std": shift_std,
+                    "mix_abs_height_shift_m_mean": float(mt[11] / applied_denom),
+                    "mix_output_to_host_points_ratio_mean": ratio_mean,
+                    "mix_output_to_host_points_ratio_std": ratio_std,
+                    "mix_donor_unique_count": int(donor_unique),
+                    "mix_donor_selection_entropy": float(entropy_norm),
+                    "mix_donor_max_share": float(donor_max_share),
+                }
+            )
+
+            if is_main_process(dist_env):
+                assert mix_class_logger is not None
+                for class_id, class_name in enumerate(class_names):
+                    mix_class_logger.log(
+                        {
+                            "epoch": epoch,
+                            "class_id": class_id,
+                            "class_name": class_name,
+                            "host_removed_points": int(removed_global[class_id].item()),
+                            "donor_inserted_points": int(donor_global[class_id].item()),
+                            "mixed_output_points": int(output_global[class_id].item()),
+                            "donor_presence_samples": int(donor_presence_global[class_id].item()),
+                        }
+                    )
+                mix_context_history.append(
+                    {
+                        "epoch": int(epoch),
+                        "donor_class_by_host_context_class": context_global.to(torch.int64).tolist(),
+                        "donor_usage_counts": {str(k): int(v) for k, v in sorted(donor_counter_global.items())},
+                    }
+                )
+                save_json(
+                    out_dir / "mix_context_diagnostics.json",
+                    {
+                        "class_names": class_names,
+                        "epochs": mix_context_history,
+                    },
+                )
 
         # --- NEW: DALES crop debug epoch aggregates ---
         if dbg_n > 0:
@@ -1799,6 +2256,10 @@ def train(cfg_path: str):
             row[f"val_iou_{name.replace(' ', '_').replace('.', '')}"] = v
         for name, v in zip(class_names, val_metrics["per_class_f1"]):
             row[f"val_f1_{name.replace(' ', '_').replace('.', '')}"] = v
+        for name, v in zip(class_names, val_metrics["per_class_precision"]):
+            row[f"val_precision_{name.replace(' ', '_').replace('.', '')}"] = v
+        for name, v in zip(class_names, val_metrics["per_class_recall"]):
+            row[f"val_recall_{name.replace(' ', '_').replace('.', '')}"] = v
 
         logger.log(row)
 
@@ -1859,18 +2320,17 @@ def train(cfg_path: str):
             f"macroF1={test_metrics['macro_f1']:.4f} miou_valid={test_metrics['miou_valid']:.4f}"
         )
 
-    # ---- Optional: cleanup epoch checkpoints to save disk ----
+    # ---- Final checkpoint retention enforcement ----
     if is_main_process(dist_env):
-        import glob
-
-        for p in glob.glob(str(out_dir / "checkpoints" / "epoch_*.pt")):
-            try:
-                Path(p).unlink()
-            except FileNotFoundError:
-                pass
+        keep_epoch_snapshots = bool(run.get("keep_epoch_snapshots", False))
+        keep_last_k = int(run.get("keep_last_k_epoch_snapshots", 0))
+        _prune_epoch_snapshots(
+            out_dir / "checkpoints",
+            keep_last_k if keep_epoch_snapshots else 0,
+        )
 
     # ---- Cleanup run-scoped ECLAIR cache (prevents staleness across runs) ----
-    if dataset == "eclair":
+    if dataset == "eclair" and eclair_run_cache_base is not None:
         if dist_env.enabled:
             torch.distributed.barrier()
         if is_main_process(dist_env):

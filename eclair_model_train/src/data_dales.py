@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing as mp
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import MinkowskiEngine as ME
 import numpy as np
@@ -16,6 +17,18 @@ from .augment import AugmentConfig, augment_xyz
 from .bev_head import BEVHeadConfig
 from .bev_labels import build_bev_labels_and_selected_idx
 from .features import FeatureConfig, build_features
+from .mix3d import (
+    MIX_SKIP_NO_DONOR,
+    MIX_SKIP_OUTPUT_BUDGET,
+    MIX_SKIP_PROBABILITY,
+    ALSMix3DConfig,
+    MixDiagnostics,
+    choose_different_source_index,
+    compose_crop_replace,
+    should_apply_mix,
+    stable_seed,
+    unchanged_mix_result,
+)
 from .utils import atomic_save_torch, read_las_arrays_robust
 from .voxelization import VoxelizationConfig, voxelize_from_q
 
@@ -146,7 +159,8 @@ def _points_to_sparse(
     crop_center_xy_m: Optional[Tuple[float, float]] = None,
     do_aug: bool = False,
     aug_cfg: Optional[AugmentConfig] = None,
-) -> Dict[str, torch.Tensor]:
+    return_prepared: bool = False,
+) -> Dict[str, Any]:
     xyz = xyz_m[point_idx].astype(np.float64, copy=False)
 
     # --- LiDOG-faithful crop centering (XY only): center crop at (0,0) ---
@@ -212,7 +226,17 @@ def _points_to_sparse(
     coords_t = torch.from_numpy(np.ascontiguousarray(vx["coords_u"], dtype=np.int32)).int()
     feats_t = torch.from_numpy(np.ascontiguousarray(vx["feats_u"], dtype=np.float32)).float()
     labels_t = torch.from_numpy(np.ascontiguousarray(vx["labels_u"], dtype=np.int64)).long()
-    return {"coords": coords_t, "feats": feats_t, "labels": labels_t}
+    out = {"coords": coords_t, "feats": feats_t, "labels": labels_t}
+    if return_prepared:
+        out["_prepared"] = {
+            "xyz": np.ascontiguousarray(xyz),
+            "y_train": np.ascontiguousarray(y_train_pts, dtype=np.int64),
+            "intensity": (None if intensity_scaled is None else np.ascontiguousarray(intensity_scaled, dtype=np.float32)),
+            "return_number": np.ascontiguousarray(raw["return_number"][point_idx], dtype=np.int64),
+            "number_of_returns": np.ascontiguousarray(raw["number_of_returns"][point_idx], dtype=np.int64),
+            "rgb": None,
+        }
+    return out
 
 
 def _pick_center_index(
@@ -614,6 +638,7 @@ class DalesTiles(torch.utils.data.Dataset):
         crop_cfg: DalesCropConfig = DalesCropConfig(),
         voxel_cfg: Optional[VoxelizationConfig] = None,
         bev_cfg: Optional[BEVHeadConfig] = None,
+        mix3d_cfg: Optional[ALSMix3DConfig] = None,
     ):
         self.root = Path(dales_root)
         if files is not None:
@@ -682,9 +707,10 @@ class DalesTiles(torch.utils.data.Dataset):
 
         self.sampling_mode = str(sampling_mode).lower().strip()
         self.crop_cfg = crop_cfg
-        self.epoch = 0
+        self._epoch_shared = mp.Value("q", 0, lock=False)
         self.voxel_cfg = voxel_cfg or VoxelizationConfig()
         self.bev_cfg = bev_cfg
+        self.mix3d_cfg = mix3d_cfg or ALSMix3DConfig(enabled=False)
 
         # Helpful safety: voxel-cache cannot apply per-epoch augmentation correctly.
         if self.is_train and self.sampling_mode == "crops":
@@ -694,6 +720,14 @@ class DalesTiles(torch.utils.data.Dataset):
                 raise ValueError("sampling_mode='crops' requires cache_kind='raw' (raw point cache).")
             if self.label_lut is None:
                 raise ValueError("sampling_mode='crops' requires label_map (label_lut).")
+
+        if self.mix3d_cfg.enabled:
+            if not self.is_train or self.sampling_mode != "crops":
+                raise ValueError("DALES M1 requires the training split with sampling.mode='crops'.")
+            if int(getattr(self.crop_cfg, "crops_per_item", 1)) != 1:
+                raise ValueError("Initial DALES M1 requires sampling.crops_per_item=1.")
+            if self.bev_cfg is not None and self.bev_cfg.enabled:
+                raise ValueError("Initial M1 forbids BEV auxiliary supervision.")
 
     def _stable_seed(self, *, path: Path, tile_i: int, rep_i: int) -> int:
         h = zlib.crc32(path.name.encode("utf-8")) & 0xFFFFFFFF
@@ -708,7 +742,11 @@ class DalesTiles(torch.utils.data.Dataset):
 
     def set_epoch(self, epoch: int) -> None:
         """Call from training loop so crop RNG changes each epoch (important with DDP)."""
-        self.epoch = int(epoch)
+        self._epoch_shared.value = int(epoch)
+
+    @property
+    def epoch(self) -> int:
+        return int(self._epoch_shared.value)
 
     def __len__(self) -> int:
         if self.is_train and self.sampling_mode == "crops":
@@ -765,6 +803,481 @@ class DalesTiles(torch.utils.data.Dataset):
         out["path"] = str(path)
         return out
 
+    def _load_mix_tile(self, path: Path):
+        """Load one DALES source file exactly through the canonical raw-cache path."""
+        raw_from_cache = None
+        if self.use_cache:
+            if self.cache_kind != "raw":
+                raise ValueError("DALES M1 requires cache_kind='raw'.")
+            key = _cache_key_for_dales_raw(path=path)
+            cache_path = self._cache_dir / f"{key}.pt"
+            if cache_path.exists():
+                obj = torch.load(cache_path, map_location="cpu")
+                if not isinstance(obj, dict) or "xyz" not in obj:
+                    raise TypeError(f"Bad raw cache payload: {cache_path}")
+                raw_from_cache = _ensure_raw_dtypes(obj)
+            elif self.require_cache:
+                raise RuntimeError(f"[DALES raw cache missing] {cache_path}")
+
+        raw = raw_from_cache if raw_from_cache is not None else _ensure_raw_dtypes(_read_dales_las(path))
+        raw = _ensure_raw_dtypes(raw)
+        xyz = raw["xyz"]
+        if self.patch_cfg.make_local_coords:
+            xyz = xyz - xyz.min(axis=0, keepdims=True)
+
+        intensity_scaled = None
+        if self.feat_cfg.use_intensity:
+            intensity = raw.get("intensity", None)
+            if intensity is None:
+                raise RuntimeError("DALES: feat_cfg.use_intensity=True but raw intensity is missing/None.")
+            intensity = intensity.astype(np.float32, copy=False)
+            div = (
+                float(self.preproc.intensity_divisor_override)
+                if self.preproc.intensity_divisor_override
+                else float(self.feat_cfg.intensity_divisor)
+            )
+            intensity_scaled = intensity if intensity.max() <= 1.0 + 1e-3 else intensity / div
+            mode = (self.preproc.intensity_mode or "none").lower()
+            if mode == "none":
+                pass
+            elif mode == "constant":
+                intensity_scaled = np.full_like(
+                    intensity_scaled,
+                    float(self.preproc.intensity_constant),
+                    dtype=np.float32,
+                )
+            elif mode == "robust_standardize":
+                z = _robust_standardize(intensity_scaled)
+                intensity_scaled = 1.0 / (1.0 + np.exp(-z))
+            elif mode == "quantile_match":
+                if (
+                    self.preproc.ref_quantiles is None
+                    or self.preproc.ref_probs is None
+                    or self.preproc.tgt_quantiles is None
+                    or self.preproc.tgt_probs is None
+                ):
+                    raise RuntimeError("quantile_match requires ref_quantiles/ref_probs and tgt_quantiles/tgt_probs")
+                intensity_scaled = _quantile_match(
+                    intensity_scaled,
+                    self.preproc.ref_quantiles,
+                    self.preproc.ref_probs,
+                    self.preproc.tgt_quantiles,
+                    self.preproc.tgt_probs,
+                )
+            else:
+                raise ValueError(f"Unknown intensity_mode: {self.preproc.intensity_mode}")
+            intensity_scaled = np.clip(intensity_scaled, 0.0, 1.0).astype(np.float32, copy=False)
+        return raw, xyz, intensity_scaled
+
+    def _sample_mix_crop(
+        self,
+        *,
+        path: Path,
+        tile_i: int,
+        rep_i: int,
+        raw: Dict[str, np.ndarray],
+        xyz: np.ndarray,
+        intensity_scaled: Optional[np.ndarray],
+        sample_seed_override: Optional[int] = None,
+    ):
+        """Canonical DALES crop selection, returning accepted post-augmentation points."""
+        y_native_pts = raw["native_labels"].astype(np.int64, copy=False)
+        y_safe_pts = np.clip(y_native_pts, 0, 255).astype(np.int64, copy=False)
+        y_train_pts = self.label_lut[y_safe_pts]
+
+        crop_cfg = self.crop_cfg
+        max_vox_soft = int(crop_cfg.max_voxels_per_crop_soft)
+        max_vox_hard = int(getattr(crop_cfg, "max_voxels_per_crop_hard", max_vox_soft))
+        if max_vox_hard < max_vox_soft:
+            raise ValueError(f"max_voxels_per_crop_hard ({max_vox_hard}) must be >= soft ({max_vox_soft}).")
+        hard_max_points = int(getattr(crop_cfg, "hard_max_points", 0) or 0)
+        if hard_max_points and hard_max_points < int(crop_cfg.crop_min_points):
+            raise ValueError("hard_max_points must be >= crop_min_points.")
+
+        min_size = float(crop_cfg.min_crop_size_xy_m)
+        base_size = float(crop_cfg.crop_size_xy_m)
+        rare_ids = crop_cfg.rare_center_class_ids
+        if rare_ids is None or len(rare_ids) == 0:
+            rare_ids = tuple(self.preproc.rare_class_ids)
+        rare_ids_arr = np.asarray(rare_ids, dtype=np.int64)
+
+        sample_seed = (
+            int(sample_seed_override)
+            if sample_seed_override is not None
+            else self._stable_seed(path=path, tile_i=tile_i, rep_i=rep_i)
+        )
+        rng = np.random.default_rng(sample_seed)
+        out = None
+        chosen_meta = None
+
+        for attempt in range(int(crop_cfg.resample_tries)):
+            c_idx, used_rare_center = _pick_center_index(
+                y_train_pts=y_train_pts,
+                ignore_index=int(self.ignore_index),
+                crop_cfg=crop_cfg,
+                fallback_rare_ids=tuple(self.preproc.rare_class_ids),
+                rng=rng,
+            )
+            cx, cy = float(xyz[c_idx, 0]), float(xyz[c_idx, 1])
+            tried_min_size = False
+            size = base_size
+
+            for shrink in range(int(crop_cfg.max_shrink_steps) + 1):
+                pt_idx = _points_in_xy_square(xyz, cx=cx, cy=cy, half=0.5 * size)
+                if pt_idx.size < int(crop_cfg.crop_min_points):
+                    break
+
+                if crop_cfg.max_points_per_crop_soft is not None and pt_idx.size > int(crop_cfg.max_points_per_crop_soft):
+                    new_size = max(min_size, size * float(crop_cfg.shrink_ratio))
+                    if new_size <= min_size + 1e-6:
+                        if tried_min_size:
+                            break
+                        tried_min_size = True
+                        size = min_size
+                    else:
+                        size = new_size
+                    continue
+
+                y_crop = y_train_pts[pt_idx]
+                valid = y_crop != int(self.ignore_index)
+                denom = int(valid.sum())
+                rare_frac = float((valid & np.isin(y_crop, rare_ids_arr)).sum()) / float(denom) if denom > 0 else 0.0
+
+                out_try = _points_to_sparse(
+                    xyz_m=xyz,
+                    raw={
+                        "intensity": intensity_scaled,
+                        "return_number": raw["return_number"],
+                        "number_of_returns": raw["number_of_returns"],
+                        "native_labels": raw["native_labels"],
+                    },
+                    point_idx=pt_idx,
+                    patch_cfg=self.patch_cfg,
+                    feat_cfg=self.feat_cfg,
+                    ignore_index=int(self.ignore_index),
+                    label_lut=self.label_lut,
+                    voxel_cfg=self.voxel_cfg,
+                    rng=rng,
+                    crop_center_xy_m=(cx, cy),
+                    do_aug=True,
+                    aug_cfg=self.aug_cfg if self.aug_cfg.enabled else None,
+                    return_prepared=True,
+                )
+                n_vox = int(out_try["coords"].shape[0])
+                if n_vox <= max_vox_soft:
+                    out = out_try
+                    chosen_meta = {
+                        "crop_size_xy_m": float(size),
+                        "shrink_steps": int(shrink),
+                        "resample_attempt": int(attempt),
+                        "n_points": int(pt_idx.size),
+                        "n_vox": n_vox,
+                        "rare_frac": float(rare_frac),
+                        "used_rare_center": int(used_rare_center),
+                        "used_fallback": 0,
+                        "accepted_over_soft": 0,
+                    }
+                    break
+
+                out_of_runway = shrink >= int(crop_cfg.max_shrink_steps) or size <= min_size + 1e-6
+                if out_of_runway and n_vox <= max_vox_hard:
+                    out = out_try
+                    chosen_meta = {
+                        "crop_size_xy_m": float(size),
+                        "shrink_steps": int(shrink),
+                        "resample_attempt": int(attempt),
+                        "n_points": int(pt_idx.size),
+                        "n_vox": n_vox,
+                        "rare_frac": float(rare_frac),
+                        "used_rare_center": int(used_rare_center),
+                        "used_fallback": 0,
+                        "accepted_over_soft": 1,
+                    }
+                    break
+
+                if out_of_runway and n_vox > max_vox_hard:
+                    if hard_max_points > 0:
+                        pt_idx2 = _subsample_points_keep_rare(
+                            idx=pt_idx,
+                            y_train_pts=y_train_pts,
+                            ignore_index=int(self.ignore_index),
+                            rare_ids=tuple(rare_ids),
+                            max_points=min(hard_max_points, int(pt_idx.size)),
+                            rng=rng,
+                        )
+                        y_crop2 = y_train_pts[pt_idx2]
+                        valid2 = y_crop2 != int(self.ignore_index)
+                        denom2 = int(valid2.sum())
+                        rare_frac2 = float((valid2 & np.isin(y_crop2, rare_ids_arr)).sum()) / float(denom2) if denom2 > 0 else 0.0
+                        out_try2 = _points_to_sparse(
+                            xyz_m=xyz,
+                            raw={
+                                "intensity": intensity_scaled,
+                                "return_number": raw["return_number"],
+                                "number_of_returns": raw["number_of_returns"],
+                                "native_labels": raw["native_labels"],
+                            },
+                            point_idx=pt_idx2,
+                            patch_cfg=self.patch_cfg,
+                            feat_cfg=self.feat_cfg,
+                            ignore_index=int(self.ignore_index),
+                            label_lut=self.label_lut,
+                            voxel_cfg=self.voxel_cfg,
+                            rng=rng,
+                            crop_center_xy_m=(cx, cy),
+                            do_aug=True,
+                            aug_cfg=self.aug_cfg if self.aug_cfg.enabled else None,
+                            return_prepared=True,
+                        )
+                        n_vox2 = int(out_try2["coords"].shape[0])
+                        if n_vox2 <= max_vox_hard:
+                            out = out_try2
+                            chosen_meta = {
+                                "crop_size_xy_m": float(size),
+                                "shrink_steps": int(shrink),
+                                "resample_attempt": int(attempt),
+                                "n_points": int(pt_idx2.size),
+                                "n_vox": n_vox2,
+                                "rare_frac": float(rare_frac2),
+                                "used_rare_center": int(used_rare_center),
+                                "used_fallback": 1,
+                                "accepted_over_soft": int(n_vox2 > max_vox_soft),
+                            }
+                    break
+
+                new_size = max(min_size, size * float(crop_cfg.shrink_ratio))
+                if new_size <= min_size + 1e-6:
+                    if tried_min_size:
+                        break
+                    tried_min_size = True
+                    size = min_size
+                else:
+                    size = new_size
+
+            if out is not None:
+                break
+
+        if out is None or chosen_meta is None:
+            raise RuntimeError(f"[DALES M1] No valid crop for file={path}, epoch={self.epoch}, rep={rep_i}.")
+        prepared = out.pop("_prepared")
+        prepared["source_id"] = str(path.resolve())
+        prepared["context_side_xy_m"] = float(chosen_meta["crop_size_xy_m"])
+        prepared["sample_seed"] = int(sample_seed)
+        return out, prepared, chosen_meta
+
+    def _prepared_to_sparse(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        rng: np.random.Generator,
+    ) -> Dict[str, torch.Tensor]:
+        xyz = np.asarray(payload["xyz"])
+        xyz_norm = (xyz / float(self.patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
+        feats = build_features(
+            xyz_local=xyz_norm,
+            intensity=(payload.get("intensity", None) if self.feat_cfg.use_intensity else None),
+            return_number=payload.get("return_number", None),
+            number_of_returns=payload.get("number_of_returns", None),
+            rgb=None,
+            cfg=self.feat_cfg,
+        ).astype(np.float32, copy=False)
+        q = np.floor(xyz_norm / float(self.patch_cfg.voxel_size)).astype(np.int32, copy=False)
+        vx = voxelize_from_q(
+            q_int32=np.ascontiguousarray(q, dtype=np.int32),
+            feats_p_f32=feats,
+            labels_p_i64=np.asarray(payload["y_train"], dtype=np.int64),
+            ignore_index=int(self.ignore_index),
+            cfg=self.voxel_cfg,
+            rng=rng,
+            return_maps=False,
+            num_classes_hint=8,
+        )
+        return {
+            "coords": torch.from_numpy(np.ascontiguousarray(vx["coords_u"], dtype=np.int32)).int(),
+            "feats": torch.from_numpy(np.ascontiguousarray(vx["feats_u"], dtype=np.float32)).float(),
+            "labels": torch.from_numpy(np.ascontiguousarray(vx["labels_u"], dtype=np.int64)).long(),
+        }
+
+    @staticmethod
+    def _attach_mix_meta(
+        out: Dict[str, torch.Tensor],
+        d: MixDiagnostics,
+        *,
+        donor_index: int,
+    ) -> None:
+        values = {
+            "meta_mix_applied": (d.applied, torch.int64),
+            "meta_mix_skip_code": (d.skip_code, torch.int64),
+            "meta_mix_host_points": (d.host_points, torch.int64),
+            "meta_mix_host_removed": (d.host_removed, torch.int64),
+            "meta_mix_donor_inserted": (d.donor_inserted, torch.int64),
+            "meta_mix_output_points": (d.output_points, torch.int64),
+            "meta_mix_replacement_side_m": (d.replacement_side_m, torch.float32),
+            "meta_mix_guard_band_m": (d.guard_band_m, torch.float32),
+            "meta_mix_height_shift_m": (d.height_shift_m, torch.float32),
+            "meta_mix_cross_provenance_voxels": (
+                d.cross_provenance_voxels,
+                torch.int64,
+            ),
+        }
+        for key, (value, dtype) in values.items():
+            out[key] = torch.tensor(value, dtype=dtype)
+        out["meta_mix_removed_class_counts"] = torch.tensor(d.host_removed_class_counts, dtype=torch.int64)
+        out["meta_mix_donor_class_counts"] = torch.tensor(d.donor_inserted_class_counts, dtype=torch.int64)
+        out["meta_mix_output_class_counts"] = torch.tensor(d.output_class_counts, dtype=torch.int64)
+        n_classes = len(d.output_class_counts)
+        out["meta_mix_context_pairs"] = torch.tensor(d.donor_host_context_pairs, dtype=torch.int64).reshape(n_classes, n_classes)
+        out["meta_mix_donor_index"] = torch.tensor(donor_index, dtype=torch.int64)
+
+    @staticmethod
+    def _attach_crop_meta(out: Dict[str, torch.Tensor], meta: Mapping[str, Any]) -> None:
+        out["meta_crop_size_xy_m"] = torch.tensor(meta["crop_size_xy_m"], dtype=torch.float32)
+        out["meta_shrink_steps"] = torch.tensor(meta["shrink_steps"], dtype=torch.int64)
+        out["meta_resample_attempt"] = torch.tensor(meta["resample_attempt"], dtype=torch.int64)
+        out["meta_n_points"] = torch.tensor(meta["n_points"], dtype=torch.int64)
+        out["meta_n_vox"] = torch.tensor(meta["n_vox"], dtype=torch.int64)
+        out["meta_rare_frac"] = torch.tensor(meta["rare_frac"], dtype=torch.float32)
+        out["meta_used_rare_center"] = torch.tensor(meta["used_rare_center"], dtype=torch.int64)
+        out["meta_used_fallback"] = torch.tensor(meta["used_fallback"], dtype=torch.int64)
+        out["meta_accepted_over_soft"] = torch.tensor(meta.get("accepted_over_soft", 0), dtype=torch.int64)
+
+    def _getitem_mix_crop(
+        self,
+        *,
+        host_tile_i: int,
+        host_rep_i: int,
+        host_path: Path,
+    ) -> Dict[str, torch.Tensor]:
+        host_raw, host_xyz, host_intensity = self._load_mix_tile(host_path)
+        host_out, host_payload, host_meta = self._sample_mix_crop(
+            path=host_path,
+            tile_i=host_tile_i,
+            rep_i=host_rep_i,
+            raw=host_raw,
+            xyz=host_xyz,
+            intensity_scaled=host_intensity,
+        )
+        voxel_edge_m = float(self.patch_cfg.voxel_size) * float(self.patch_cfg.coord_norm_factor)
+        mix_rng = np.random.default_rng(
+            stable_seed(
+                self.seed,
+                self.epoch,
+                str(host_path.resolve()),
+                host_rep_i,
+                "mix3d",
+            )
+        )
+        mix_donor_index = -1
+
+        if not should_apply_mix(self.mix3d_cfg, mix_rng):
+            result = unchanged_mix_result(
+                host_payload,
+                skip_code=MIX_SKIP_PROBABILITY,
+                guard_band_m=float(self.mix3d_cfg.guard_band_voxels) * voxel_edge_m,
+                num_classes=8,
+            )
+            out = host_out
+            donor_meta = None
+        else:
+            donor_tile_i = choose_different_source_index(
+                source_ids=[str(p.resolve()) for p in self.files],
+                host_index=host_tile_i,
+                rng=mix_rng,
+                max_attempts=int(self.mix3d_cfg.max_donor_attempts),
+            )
+            if donor_tile_i is None:
+                result = unchanged_mix_result(
+                    host_payload,
+                    skip_code=MIX_SKIP_NO_DONOR,
+                    guard_band_m=float(self.mix3d_cfg.guard_band_voxels) * voxel_edge_m,
+                    num_classes=8,
+                )
+                out = host_out
+                donor_meta = None
+            else:
+                mix_donor_index = int(donor_tile_i)
+                donor_path = self.files[int(donor_tile_i)]
+                donor_raw, donor_xyz, donor_intensity = self._load_mix_tile(donor_path)
+                donor_rep_i = int(mix_rng.integers(0, max(1, int(self.crop_cfg.crops_per_tile_per_epoch))))
+                donor_seed = stable_seed(
+                    self.seed,
+                    self.epoch,
+                    str(host_path.resolve()),
+                    str(donor_path.resolve()),
+                    host_rep_i,
+                    donor_rep_i,
+                    "donor_crop",
+                )
+                _donor_out, donor_payload, donor_meta = self._sample_mix_crop(
+                    path=donor_path,
+                    tile_i=int(donor_tile_i),
+                    rep_i=donor_rep_i,
+                    raw=donor_raw,
+                    xyz=donor_xyz,
+                    intensity_scaled=donor_intensity,
+                    sample_seed_override=donor_seed,
+                )
+                out = host_out
+                mixed_within_budget = False
+                result = None
+                hard_limit = int(self.crop_cfg.max_voxels_per_crop_hard)
+                for budget_attempt in range(int(self.mix3d_cfg.max_region_attempts)):
+                    candidate_result = compose_crop_replace(
+                        host=host_payload,
+                        donor=donor_payload,
+                        cfg=self.mix3d_cfg,
+                        num_classes=8,
+                        voxel_edge_m=voxel_edge_m,
+                        rng=mix_rng,
+                    )
+                    result = candidate_result
+                    if not candidate_result.diagnostics.applied:
+                        break
+                    candidate_out = self._prepared_to_sparse(
+                        candidate_result.sample,
+                        rng=np.random.default_rng(
+                            stable_seed(
+                                self.seed,
+                                self.epoch,
+                                str(host_path.resolve()),
+                                host_rep_i,
+                                budget_attempt,
+                                "mixed_voxel",
+                            )
+                        ),
+                    )
+                    if int(candidate_out["coords"].shape[0]) <= hard_limit:
+                        out = candidate_out
+                        mixed_within_budget = True
+                        break
+
+                if result is None:
+                    raise RuntimeError("DALES M1 composition produced no result.")
+                if result.diagnostics.applied and not mixed_within_budget:
+                    result = unchanged_mix_result(
+                        host_payload,
+                        skip_code=MIX_SKIP_OUTPUT_BUDGET,
+                        guard_band_m=float(self.mix3d_cfg.guard_band_voxels) * voxel_edge_m,
+                        num_classes=8,
+                    )
+                    out = host_out
+
+        final_meta = dict(host_meta)
+        final_meta["n_points"] = int(result.diagnostics.output_points)
+        final_meta["n_vox"] = int(out["coords"].shape[0])
+        out["path"] = str(host_path)
+        self._attach_crop_meta(out, final_meta)
+        self._attach_mix_meta(
+            out,
+            result.diagnostics,
+            donor_index=mix_donor_index,
+        )
+        out["meta_mix_donor_crop_size_xy_m"] = torch.tensor(
+            float("nan") if donor_meta is None else donor_meta["crop_size_xy_m"],
+            dtype=torch.float32,
+        )
+        return out
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # In crop-mode, __len__ already returns len(files) * groups where
         # groups = ceil(crops_per_tile_per_epoch / crops_per_item).
@@ -785,6 +1298,15 @@ class DalesTiles(torch.utils.data.Dataset):
             rep_start = 0
             rep_count = 1
             path = self.files[idx]
+
+        if self.mix3d_cfg.enabled:
+            if rep_count != 1:
+                raise RuntimeError("Initial DALES M1 requires exactly one crop per item.")
+            return self._getitem_mix_crop(
+                host_tile_i=tile_i,
+                host_rep_i=rep_start,
+                host_path=path,
+            )
 
         # Cache fast-path
         cache_path: Optional[Path] = None
