@@ -102,6 +102,24 @@ class MixDiagnostics:
 class MixResult:
     sample: Dict[str, Any]
     diagnostics: MixDiagnostics
+    trace: Optional["MixTrace"] = None
+
+
+@dataclass(frozen=True)
+class MixTrace:
+    """Geometry/provenance needed by offline seam audits.
+
+    This is deliberately opt-in: normal training does not allocate the masks.
+    All masks index the original host/donor point arrays.
+    """
+
+    host_xyxy_m: Tuple[float, float, float, float]
+    donor_xyxy_m: Tuple[float, float, float, float]
+    donor_translation_xyz_m: Tuple[float, float, float]
+    host_region_mask: np.ndarray
+    host_expanded_mask: np.ndarray
+    host_keep_mask: np.ndarray
+    donor_region_mask: np.ndarray
 
 
 _POINT_FIELDS: Tuple[str, ...] = (
@@ -286,6 +304,7 @@ def compose_crop_replace(
     num_classes: int,
     voxel_edge_m: float,
     rng: np.random.Generator,
+    return_trace: bool = False,
 ) -> MixResult:
     """Replace one host XY region with a translated region from a different source sample."""
     host_n = _validate_sample(host, "host")
@@ -422,6 +441,22 @@ def compose_crop_replace(
     context_pairs = np.outer(donor_presence, host_retained_presence).astype(
         np.int64, copy=False
     )
+    trace = None
+    if return_trace:
+        trace = MixTrace(
+            host_xyxy_m=(float(hx0), float(hy0), float(hx0 + side), float(hy0 + side)),
+            donor_xyxy_m=(float(dx0), float(dy0), float(dx0 + side), float(dy0 + side)),
+            donor_translation_xyz_m=(
+                float(hx0 - dx0),
+                float(hy0 - dy0),
+                float(height_shift),
+            ),
+            host_region_mask=np.asarray(host_region, dtype=bool),
+            host_expanded_mask=np.asarray(host_expanded, dtype=bool),
+            host_keep_mask=np.asarray(host_keep, dtype=bool),
+            donor_region_mask=np.asarray(donor_region, dtype=bool),
+        )
+
     return MixResult(
         sample=mixed,
         diagnostics=MixDiagnostics(
@@ -440,4 +475,5 @@ def compose_crop_replace(
             output_class_counts=output_counts,
             donor_host_context_pairs=tuple(int(x) for x in context_pairs.reshape(-1)),
         ),
+        trace=trace,
     )

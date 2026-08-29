@@ -1,7 +1,7 @@
 # src/bev_head.py
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -55,7 +55,7 @@ class BEVHeadConfig:
     # Optional: per-level BEV image size (LiDOG uses bev_img_sizes aligned with decoder_2d_levels)
     img_size_by_level: Optional[dict[str, int]] = None
 
-    projector: BEVProjectorConfig = BEVProjectorConfig()
+    projector: BEVProjectorConfig = field(default_factory=BEVProjectorConfig)
     hidden_dim: int = 64
 
     @staticmethod
