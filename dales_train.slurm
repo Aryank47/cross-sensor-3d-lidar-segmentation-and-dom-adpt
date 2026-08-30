@@ -94,13 +94,27 @@ echo "CWD: $(pwd)"
 ########################
 # 6) CREATE JOB RUN DIR + JOB-SPECIFIC YAML
 ########################
-RUN_DIR="${SCRATCH_OUTROOT}/e0_dales_train_${SLURM_JOB_ID}"
+# RUN_DIR="${SCRATCH_OUTROOT}/e0_dales_train_${SLURM_JOB_ID}"
+# mkdir -p "${RUN_DIR}"
+
+# # IMPORTANT: use your DALES training config here
+# # e.g. configs/e0_dales_dropI.yaml (the one we created earlier)
+# CONFIG_SRC="configs/e0_dales_dropI.yaml"
+# CONFIG_RUN="${RUN_DIR}/e0_dales_${SLURM_JOB_ID}.yaml"
+
+
+RUN_PREFIX="${RUN_PREFIX:-e0_dales_train}"
+DEFAULT_RUN_DIR="${SCRATCH_OUTROOT}/${RUN_PREFIX}_${SLURM_JOB_ID}"
+RUN_DIR="${RUN_DIR_OVERRIDE:-${DEFAULT_RUN_DIR}}"
+
+# RUN_DIR="${SCRATCH_OUTROOT}/${RUN_PREFIX}_${SLURM_JOB_ID}"
+
+# Required before writing CONFIG_RUN
 mkdir -p "${RUN_DIR}"
 
-# IMPORTANT: use your DALES training config here
-# e.g. configs/e0_dales_dropI.yaml (the one we created earlier)
-CONFIG_SRC="configs/e0_dales_dropI.yaml"
-CONFIG_RUN="${RUN_DIR}/e0_dales_${SLURM_JOB_ID}.yaml"
+CONFIG_SRC="${CONFIG_SRC:-configs/e0_dales_dropI.yaml}"
+CONFIG_STEM="$(basename "${CONFIG_SRC%.*}")"
+CONFIG_RUN="${RUN_DIR}/${CONFIG_STEM}_${SLURM_JOB_ID}.yaml"
 
 python - <<PY
 import yaml

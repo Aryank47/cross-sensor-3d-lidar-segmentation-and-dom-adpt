@@ -16,6 +16,8 @@ from torch.utils.data import Dataset
 from torch_geometric.data import Data
 
 from .augment import AugmentConfig, augment_xyz
+from .bev_als_config import ALSBEVConfig
+from .bev_als_targets import build_als_bev_target
 from .bev_head import BEVHeadConfig
 from .bev_labels import build_bev_labels_and_selected_idx
 from .features import FeatureConfig, build_features
@@ -225,7 +227,6 @@ def _onehot_u8(vals: np.ndarray, k: int) -> np.ndarray:
     out[np.arange(v.shape[0]), v] = 1
     return out
 
-
 def _cache_key_for_eclair_raw(pc_path: Path) -> str:
     st = pc_path.stat()
     key_obj = {
@@ -266,6 +267,7 @@ class EclairTiles(Dataset):
         allowed_review_categories: Optional[Sequence[str]] = ("approved",),
         voxel_cfg: Optional[VoxelizationConfig] = None,
         bev_cfg: Optional[BEVHeadConfig] = None,
+        bev_als_cfg: Optional[ALSBEVConfig] = None,
         run_cache_root: Optional[str | Path] = None,
         run_cache_precompute_returns_onehot: bool = False,
         sampling_cfg: Optional[EclairSamplingConfig] = None,
@@ -292,6 +294,7 @@ class EclairTiles(Dataset):
         self._rng = np.random.default_rng(seed + (0 if split == "train" else 10))
         self.voxel_cfg = voxel_cfg or VoxelizationConfig()
         self.bev_cfg = bev_cfg
+        self.bev_als_cfg = bev_als_cfg or ALSBEVConfig(enabled=False)
         self.num_classes = int(num_classes)
         self.cache_kind = "raw"  # ECLAIR cache stores raw arrays only
         if self.use_cache and self.cache_root is not None:
@@ -314,6 +317,8 @@ class EclairTiles(Dataset):
             raise ValueError("Mix3D may be enabled only for the ECLAIR training split.")
         if self.mix3d_cfg.enabled and self.bev_cfg is not None and self.bev_cfg.enabled:
             raise ValueError("Initial M1 forbids BEV auxiliary supervision.")
+        if self.mix3d_cfg.enabled and self.bev_als_cfg.enabled:
+            raise ValueError("The discovery BEV-ALS run must be isolated from Mix3D.")
 
         if self.is_train and str(self.sampling_cfg.mode).lower() in ("weighted_tiles", "rare_tiles"):
             self._init_weighted_tile_sampling()
@@ -955,6 +960,19 @@ class EclairTiles(Dataset):
         feats_t = torch.from_numpy(np.ascontiguousarray(vx["feats_u"], dtype=np.float32)).float()
         labels_t = torch.from_numpy(np.ascontiguousarray(vx["labels_u"], dtype=np.int64)).long()
 
+        if self.bev_als_cfg.enabled and self.is_train:
+            meters_per_voxel = float(self.patch_cfg.voxel_size) * float(self.patch_cfg.coord_norm_factor)
+            als_target = build_als_bev_target(
+                coords_t.cpu().numpy().astype(np.int32, copy=False),
+                labels_t.cpu().numpy().astype(np.int64, copy=False),
+                num_classes=int(self.num_classes),
+                meters_per_voxel=meters_per_voxel,
+                cfg=self.bev_als_cfg,
+                ignore_index=int(self.ignore_index),
+            )
+        else:
+            als_target = None
+
         # --- BEV supervision (Task 8) ---
         if self.bev_cfg is not None and self.bev_cfg.enabled and self.is_train:
             m_per_vox = float(self.patch_cfg.voxel_size) * float(self.patch_cfg.coord_norm_factor)
@@ -995,6 +1013,28 @@ class EclairTiles(Dataset):
             out["bev_labels"] = self_out_bev_labels
             out["bev_selected_idx"] = self_out_bev_sel
 
+        if als_target is not None:
+            d = als_target.diagnostics
+            out["bev_als_target"] = torch.from_numpy(als_target.target_u8)
+            out["bev_als_occupied"] = torch.from_numpy(als_target.occupied_u8)
+            out["bev_als_center_xy_m"] = torch.from_numpy(als_target.frame.center_xy_m).float()
+            out["bev_als_height_edges_m"] = torch.from_numpy(als_target.frame.height_edges_m).float()
+            out["meta_bev_als_input_valid_voxels"] = torch.tensor(d["input_valid_voxels"], dtype=torch.int64)
+            out["meta_bev_als_in_bounds_valid_voxels"] = torch.tensor(d["in_bounds_valid_voxels"], dtype=torch.int64)
+            out["meta_bev_als_in_bounds_fraction"] = torch.tensor(d["in_bounds_fraction"], dtype=torch.float32)
+            out["meta_bev_als_occupied_per_slice"] = torch.from_numpy(
+                np.asarray(d["occupied_cells_per_slice"], dtype=np.int64)
+            )
+            out["meta_bev_als_empty_slices"] = torch.tensor(d["empty_slices"], dtype=torch.int64)
+            out["meta_bev_als_multi_label_cells"] = torch.tensor(d["multi_label_cells"], dtype=torch.int64)
+            out["meta_bev_als_multi_label_fraction"] = torch.tensor(d["multi_label_fraction"], dtype=torch.float32)
+            out["meta_bev_als_class_before"] = torch.from_numpy(np.asarray(d["class_before"], dtype=np.int64))
+            out["meta_bev_als_class_in_bounds"] = torch.from_numpy(np.asarray(d["class_in_bounds"], dtype=np.int64))
+            out["meta_bev_als_class_retention"] = torch.from_numpy(np.asarray(d["class_retention"], dtype=np.float32))
+            out["meta_bev_als_positive_cells"] = torch.from_numpy(
+                np.asarray(d["positive_cells_per_slice_class"], dtype=np.int64)
+            )
+
         if mix_diag is not None:
             self._attach_mix_meta(
                 out,
@@ -1033,5 +1073,14 @@ def minkowski_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torc
                 out["bev_selected_idx"] = {k: torch.stack([b["bev_selected_idx"][k] for b in batch], dim=0) for k in sel0.keys()}
             else:
                 out["bev_selected_idx"] = torch.stack([b["bev_selected_idx"] for b in batch], dim=0)
+
+    if "bev_als_target" in batch[0]:
+        for key in (
+            "bev_als_target",
+            "bev_als_occupied",
+            "bev_als_center_xy_m",
+            "bev_als_height_edges_m",
+        ):
+            out[key] = torch.stack([b[key] for b in batch], dim=0)
 
     return out

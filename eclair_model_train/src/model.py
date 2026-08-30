@@ -6,6 +6,8 @@ from typing import Any, Optional
 import MinkowskiEngine as ME
 import torch
 import torch.nn as nn
+from src.bev_als_config import ALSBEVConfig
+from src.bev_als_head import ALSBEVHead
 from src.bev_head import BEVHead, BEVHeadConfig
 
 
@@ -427,19 +429,82 @@ class MinkUNetWithBEV(torch.nn.Module):
         return seg_out, bev_pred
 
 
+class MinkUNetWithALSBEV(torch.nn.Module):
+    """MinkUNet14C with a training-only, height-sliced multi-label ALS BEV head."""
+
+    def __init__(
+        self,
+        base: torch.nn.Module,
+        *,
+        out_classes: int,
+        bev_cfg: ALSBEVConfig,
+        meters_per_voxel: float,
+    ):
+        super().__init__()
+        self.base = base
+        self.bev_als_cfg = bev_cfg
+        self.meters_per_voxel = float(meters_per_voxel)
+        if self.bev_als_cfg.feature_level != "block8":
+            raise ValueError("BEV-ALS v1 supports block8 only.")
+        level = getattr(self.base, self.bev_als_cfg.feature_level, None)
+        if level is None:
+            raise ValueError(f"Base model has no {self.bev_als_cfg.feature_level!r} module.")
+        self._feature = None
+        self._hook = level.register_forward_hook(self._capture_feature)
+        self.bev_als_head = ALSBEVHead(self.bev_als_cfg, int(out_classes))
+
+    def _capture_feature(self, _module, _inputs, output):
+        self._feature = output
+
+    def forward(
+        self,
+        x,
+        *,
+        is_train: bool = False,
+        compute_bev_als: Optional[bool] = None,
+        bev_als_frames: Optional[dict[str, torch.Tensor]] = None,
+    ):
+        self._feature = None
+        seg_out = self.base(x)
+        do_bev = bool(compute_bev_als) if compute_bev_als is not None else (self.bev_als_cfg.enabled and is_train)
+        if not do_bev:
+            return seg_out, None
+        if bev_als_frames is None:
+            raise ValueError("BEV-ALS computation requires batch frame tensors.")
+        feature = self._feature
+        if feature is None:
+            raise RuntimeError("BEV-ALS block8 hook did not capture a feature tensor for the current forward.")
+        logits, diagnostics = self.bev_als_head(
+            feature,
+            meters_per_voxel=self.meters_per_voxel,
+            frames=bev_als_frames,
+        )
+        return seg_out, {"bev_als_logits": logits, "bev_als_diagnostics": diagnostics}
+
+
 def build_model(in_channels: int, out_channels: int, D: int = 3, *, cfg: Optional[dict[str, Any]] = None):
     base = MinkUNet14C(in_channels=in_channels, out_channels=out_channels, D=D)
 
     if cfg is None:
         return base
 
-    bev_cfg = BEVHeadConfig.from_cfg(cfg)
-    if not bev_cfg.enabled:
-        return base
-
     patch = (cfg.get("data", {}) or {}).get("patch", {}) or {}
     voxel_size_norm = float(patch.get("voxel_size", 0.05))
     coord_norm_factor = float(patch.get("coord_norm_factor", 10.0))
     meters_per_voxel = voxel_size_norm * coord_norm_factor
+
+    bev_als_cfg = ALSBEVConfig.from_cfg(cfg)
+    bev_cfg = BEVHeadConfig.from_cfg(cfg)
+    if bev_als_cfg.enabled and bev_cfg.enabled:
+        raise ValueError("BEV-ALS and the legacy BEV head cannot be enabled together.")
+    if bev_als_cfg.enabled:
+        return MinkUNetWithALSBEV(
+            base,
+            out_classes=out_channels,
+            bev_cfg=bev_als_cfg,
+            meters_per_voxel=meters_per_voxel,
+        )
+    if not bev_cfg.enabled:
+        return base
 
     return MinkUNetWithBEV(base, out_classes=out_channels, bev_cfg=bev_cfg, meters_per_voxel=meters_per_voxel)

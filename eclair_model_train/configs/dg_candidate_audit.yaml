@@ -1,0 +1,67 @@
+seed: 1337
+out_dir: runs/dg_candidate_audit
+samples_per_dataset: 50
+
+# Both directions are audited because the physical input voxel is 0.5 m for
+# ECLAIR and 0.2 m for DALES under the current configs.
+training_configs:
+  - configs/m1_dales_mix3d.yaml
+  - configs/m1_eclair_mix3d.yaml
+
+shared_voxel_sizes_m: [0.2, 0.5, 1.0]
+
+utility_class_ids:
+  dales: [5, 6]       # poles, power_lines
+  eclair: [5, 6, 7]   # transmission wire, distribution wire, poles
+
+bab:
+  seam_widths_m: [0.5, 1.0, 2.0]
+  component_cell_m: 1.0
+
+ocons:
+  strengths: [0.10, 0.20, 0.30]
+  protected_min_voxels: 3
+  component_voxel_m: 1.0
+
+bev:
+  resolutions_m: [0.20, 0.50, 1.00]
+  z_slices: 4
+
+  # Preserve the historical training-config projection as a control, but also
+  # audit a trainable candidate frame. The candidate recenters XY after
+  # augmentation/Mix3D, does not discard points by absolute elevation, and
+  # uses height quantiles rather than 75 m fixed Z slices.
+  candidate_projection:
+    enabled: true
+    xy_frame: bbox_centered
+    z_filter: none
+    height_slicing: quantile
+    z_slices: 4
+    resolutions_m: [0.20, 0.50, 1.00]
+    bounds_by_dataset:
+      dales:
+        x_min_m: -90.0
+        x_max_m: 90.0
+        y_min_m: -90.0
+        y_max_m: 90.0
+        z_min_m: -1.0   # ignored because z_filter=none
+        z_max_m: 1.0
+      eclair:
+        x_min_m: -75.0
+        x_max_m: 75.0
+        y_min_m: -75.0
+        y_max_m: 75.0
+        z_min_m: -1.0   # ignored because z_filter=none
+        z_max_m: 1.0
+
+# These gates make the screening rule explicit. They select candidates for a
+# training run; they are not claims of statistical significance.
+decision_gates:
+  bab_min_applied_rate: 0.75
+  bab_cut_component_fraction: 0.10
+  bab_seam_width_m: 1.0
+  ocons_changed_voxel_fraction_min: 0.08
+  ocons_changed_voxel_fraction_max: 0.35
+  ocons_utility_retention_min: 0.70
+  bev_in_bounds_fraction_min: 0.95
+  bev_utility_retention_min: 0.90

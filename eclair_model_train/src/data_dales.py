@@ -14,6 +14,8 @@ import numpy as np
 import torch
 
 from .augment import AugmentConfig, augment_xyz
+from .bev_als_config import ALSBEVConfig
+from .bev_als_targets import build_als_bev_target
 from .bev_head import BEVHeadConfig
 from .bev_labels import build_bev_labels_and_selected_idx
 from .features import FeatureConfig, build_features
@@ -237,7 +239,6 @@ def _points_to_sparse(
             "rgb": None,
         }
     return out
-
 
 def _pick_center_index(
     *,
@@ -638,6 +639,8 @@ class DalesTiles(torch.utils.data.Dataset):
         crop_cfg: DalesCropConfig = DalesCropConfig(),
         voxel_cfg: Optional[VoxelizationConfig] = None,
         bev_cfg: Optional[BEVHeadConfig] = None,
+        bev_als_cfg: Optional[ALSBEVConfig] = None,
+        num_classes: int = 8,
         mix3d_cfg: Optional[ALSMix3DConfig] = None,
     ):
         self.root = Path(dales_root)
@@ -710,6 +713,8 @@ class DalesTiles(torch.utils.data.Dataset):
         self._epoch_shared = mp.Value("q", 0, lock=False)
         self.voxel_cfg = voxel_cfg or VoxelizationConfig()
         self.bev_cfg = bev_cfg
+        self.bev_als_cfg = bev_als_cfg or ALSBEVConfig(enabled=False)
+        self.num_classes = int(num_classes)
         self.mix3d_cfg = mix3d_cfg or ALSMix3DConfig(enabled=False)
 
         # Helpful safety: voxel-cache cannot apply per-epoch augmentation correctly.
@@ -728,6 +733,39 @@ class DalesTiles(torch.utils.data.Dataset):
                 raise ValueError("Initial DALES M1 requires sampling.crops_per_item=1.")
             if self.bev_cfg is not None and self.bev_cfg.enabled:
                 raise ValueError("Initial M1 forbids BEV auxiliary supervision.")
+            if self.bev_als_cfg.enabled:
+                raise ValueError("The discovery BEV-ALS run must be isolated from Mix3D.")
+
+    def _attach_bev_als(self, out: Dict[str, torch.Tensor]) -> None:
+        if not (self.is_train and self.bev_als_cfg.enabled):
+            return
+        meters_per_voxel = float(self.patch_cfg.voxel_size) * float(self.patch_cfg.coord_norm_factor)
+        target = build_als_bev_target(
+            out["coords"].cpu().numpy().astype(np.int32, copy=False),
+            out["labels"].cpu().numpy().astype(np.int64, copy=False),
+            num_classes=self.num_classes,
+            meters_per_voxel=meters_per_voxel,
+            cfg=self.bev_als_cfg,
+            ignore_index=int(self.ignore_index),
+        )
+        out["bev_als_target"] = torch.from_numpy(target.target_u8)
+        out["bev_als_occupied"] = torch.from_numpy(target.occupied_u8)
+        out["bev_als_center_xy_m"] = torch.from_numpy(target.frame.center_xy_m).float()
+        out["bev_als_height_edges_m"] = torch.from_numpy(target.frame.height_edges_m).float()
+        d = target.diagnostics
+        out["meta_bev_als_input_valid_voxels"] = torch.tensor(d["input_valid_voxels"], dtype=torch.int64)
+        out["meta_bev_als_in_bounds_valid_voxels"] = torch.tensor(d["in_bounds_valid_voxels"], dtype=torch.int64)
+        out["meta_bev_als_in_bounds_fraction"] = torch.tensor(d["in_bounds_fraction"], dtype=torch.float32)
+        out["meta_bev_als_occupied_per_slice"] = torch.from_numpy(np.asarray(d["occupied_cells_per_slice"], dtype=np.int64))
+        out["meta_bev_als_empty_slices"] = torch.tensor(d["empty_slices"], dtype=torch.int64)
+        out["meta_bev_als_multi_label_cells"] = torch.tensor(d["multi_label_cells"], dtype=torch.int64)
+        out["meta_bev_als_multi_label_fraction"] = torch.tensor(d["multi_label_fraction"], dtype=torch.float32)
+        out["meta_bev_als_class_before"] = torch.from_numpy(np.asarray(d["class_before"], dtype=np.int64))
+        out["meta_bev_als_class_in_bounds"] = torch.from_numpy(np.asarray(d["class_in_bounds"], dtype=np.int64))
+        out["meta_bev_als_class_retention"] = torch.from_numpy(np.asarray(d["class_retention"], dtype=np.float32))
+        out["meta_bev_als_positive_cells"] = torch.from_numpy(
+            np.asarray(d["positive_cells_per_slice_class"], dtype=np.int64)
+        )
 
     def _stable_seed(self, *, path: Path, tile_i: int, rep_i: int) -> int:
         h = zlib.crc32(path.name.encode("utf-8")) & 0xFFFFFFFF
@@ -1676,6 +1714,8 @@ class DalesTiles(torch.utils.data.Dataset):
                 out["meta_used_fallback"] = torch.tensor(chosen_meta["used_fallback"], dtype=torch.int64)
                 out["meta_accepted_over_soft"] = torch.tensor(int(chosen_meta.get("accepted_over_soft", 0)), dtype=torch.int64)
 
+                self._attach_bev_als(out)
+
                 if self.bev_cfg is not None and self.bev_cfg.enabled:
                     m_per_vox = float(self.patch_cfg.voxel_size) * float(self.patch_cfg.coord_norm_factor)
                     coords_np = out["coords"].cpu().numpy().astype(np.int32, copy=False)
@@ -1829,7 +1869,9 @@ class DalesTiles(torch.utils.data.Dataset):
             except Exception:
                 pass
 
-        # --- BEV supervision (Task 8) ---
+        self._attach_bev_als(out)
+
+        # --- Legacy BEV supervision (kept only for old-config compatibility) ---
         if self.bev_cfg is not None and self.bev_cfg.enabled and self.is_train:
             m_per_vox = float(self.patch_cfg.voxel_size) * float(self.patch_cfg.coord_norm_factor)
 
@@ -1893,5 +1935,14 @@ def minkowski_collate_dales(batch) -> Dict[str, torch.Tensor]:
                 out["bev_selected_idx"] = {k: torch.stack([b["bev_selected_idx"][k] for b in batch], dim=0) for k in sel0.keys()}
             else:
                 out["bev_selected_idx"] = torch.stack([b["bev_selected_idx"] for b in batch], dim=0)
+
+    if "bev_als_target" in batch[0]:
+        for key in (
+            "bev_als_target",
+            "bev_als_occupied",
+            "bev_als_center_xy_m",
+            "bev_als_height_edges_m",
+        ):
+            out[key] = torch.stack([b[key] for b in batch], dim=0)
 
     return out

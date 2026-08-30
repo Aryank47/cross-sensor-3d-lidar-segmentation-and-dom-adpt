@@ -1,0 +1,25 @@
+# Frozen non-Mix3D DALES discovery recipe. This inherits the final 120 m crop,
+# feature, optimizer, loss, and evaluation settings from M1-25, while disabling
+# every DG method. New method configs extend this file.
+extends: m1_dales_mix3d.yaml
+
+method:
+  name: baseline
+
+run:
+  name: m0_dales_frozen_29364
+  out_dir: /scratch/m23csa510/e0_results/m0_dales_frozen_29364
+
+data:
+  mix3d:
+    enabled: false
+
+ocons:
+  enabled: false
+
+model:
+  aux_heads:
+    bev:
+      enabled: false
+    bev_als:
+      enabled: false

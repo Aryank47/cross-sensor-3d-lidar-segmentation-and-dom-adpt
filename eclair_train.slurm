@@ -105,21 +105,43 @@ echo "CWD: $(pwd)"
 ########################
 # 7) CREATE JOB RUN DIR + JOB-SPECIFIC YAML
 ########################
-RUN_DIR="${SCRATCH_OUTROOT}/e0_eclair_repro_${SLURM_JOB_ID}"
+# RUN_DIR="${SCRATCH_OUTROOT}/e0_eclair_repro_${SLURM_JOB_ID}"
+# mkdir -p "${RUN_DIR}"
+
+# CONFIG_SRC="configs/e0_eclair_dropI.yaml"
+# CONFIG_RUN="${RUN_DIR}/e0_eclair_${SLURM_JOB_ID}.yaml"
+
+RUN_PREFIX="${RUN_PREFIX:-e0_eclair_repro}"
+RUN_DIR="${SCRATCH_OUTROOT}/${RUN_PREFIX}_${SLURM_JOB_ID}"
+
+# Required before writing CONFIG_RUN
 mkdir -p "${RUN_DIR}"
 
-CONFIG_SRC="configs/e0_eclair_dropI.yaml"
-CONFIG_RUN="${RUN_DIR}/e0_eclair_${SLURM_JOB_ID}.yaml"
+CONFIG_SRC="${CONFIG_SRC:-configs/e0_eclair_dropI.yaml}"
+CONFIG_STEM="$(basename "${CONFIG_SRC%.*}")"
+CONFIG_RUN="${RUN_DIR}/${CONFIG_STEM}_${SLURM_JOB_ID}.yaml"
 
 python - <<PY
 import yaml
 from pathlib import Path
 
-cfg = yaml.safe_load(Path("${CONFIG_SRC}").read_text())
+config_src = Path("${CONFIG_SRC}")
+config_run = Path("${CONFIG_RUN}")
+
+if not config_src.is_file():
+    raise FileNotFoundError(f"Source config does not exist: {config_src}")
+
+# Defensive protection in case the shell block is changed later.
+config_run.parent.mkdir(parents=True, exist_ok=True)
+
+cfg = yaml.safe_load(config_src.read_text())
 cfg.setdefault("run", {})
 cfg["run"]["out_dir"] = "${RUN_DIR}"
-Path("${CONFIG_RUN}").write_text(yaml.safe_dump(cfg, sort_keys=False))
-print("[config] wrote:", "${CONFIG_RUN}")
+
+config_run.write_text(yaml.safe_dump(cfg, sort_keys=False))
+print("[config] source:", config_src)
+print("[config] wrote:", config_run)
+print("[config] out_dir:", cfg["run"]["out_dir"])
 PY
 
 echo "[run] RUN_DIR=${RUN_DIR}"

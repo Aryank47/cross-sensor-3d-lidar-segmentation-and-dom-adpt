@@ -18,6 +18,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from src.augment import AugmentConfig
+from src.bev_als_config import ALSBEVConfig, bev_als_weight_for_epoch
+from src.bev_als_head import als_bev_multilabel_loss
 from src.bev_head import BEVHeadConfig
 from src.bev_labels import build_bev_labels_and_selected_idx
 from src.config_loader import load_yaml
@@ -35,8 +37,17 @@ from src.features import FeatureConfig, build_features, infer_in_channels
 from src.label_maps import ECLAIR_CLASS_NAMES_11
 from src.losses import FocalLoss, FocalLossConfig, FocalLovaszLoss, LovaszSoftmaxLoss, LovaszWarmupConfig
 from src.metrics import ConfusionMatrix
+from src.method_config import MethodContract, validate_method_contract
 from src.mix3d import ALSMix3DConfig
 from src.model import build_model
+from src.ocons import (
+    OConsConfig,
+    make_masked_view,
+    match_sparse_coordinates,
+    ocons_consistency_loss,
+    ocons_weight_for_epoch,
+    stable_ocons_seed,
+)
 from src.utils import CSVLogger, atomic_save_torch, format_seconds, save_json, set_seed, unwrap_model
 from src.voxelization import VoxelizationConfig, voxelize_from_q
 from torch.utils.data import DataLoader
@@ -121,6 +132,8 @@ def _model_forward_safe(
     is_train: bool,
     bev_selected_idx=None,
     compute_bev: Optional[bool] = None,
+    bev_als_frames=None,
+    compute_bev_als: Optional[bool] = None,
 ):
     """
     Call model.forward() with only supported kwargs.
@@ -140,6 +153,10 @@ def _model_forward_safe(
         kwargs["bev_selected_idx"] = bev_selected_idx
     if compute_bev is not None and (has_varkw or ("compute_bev" in params)):
         kwargs["compute_bev"] = bool(compute_bev)
+    if bev_als_frames is not None and (has_varkw or ("bev_als_frames" in params)):
+        kwargs["bev_als_frames"] = bev_als_frames
+    if compute_bev_als is not None and (has_varkw or ("compute_bev_als" in params)):
+        kwargs["compute_bev_als"] = bool(compute_bev_als)
 
     return model(st, **kwargs)
 
@@ -163,8 +180,9 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
     voxel_cfg = VoxelizationConfig.from_cfg(data)
 
     bev_cfg = BEVHeadConfig.from_cfg(cfg)
+    bev_als_cfg = ALSBEVConfig.from_cfg(cfg)
     mix3d_cfg = ALSMix3DConfig.from_cfg(data.get("mix3d", {}))
-    if mix3d_cfg.enabled and bev_cfg.enabled:
+    if mix3d_cfg.enabled and (bev_cfg.enabled or bev_als_cfg.enabled):
         raise ValueError("Initial M1 forbids model.aux_heads.bev.enabled=true.")
 
     # -------------------------
@@ -213,6 +231,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             allowed_review_categories=train_cats,
             voxel_cfg=voxel_cfg,
             bev_cfg=bev_cfg,
+            bev_als_cfg=bev_als_cfg,
             num_classes=int(ls["num_classes"]),
             run_cache_root=str(eclair_run_cache_dir) if eclair_run_cache_dir is not None else None,
             run_cache_precompute_returns_onehot=(
@@ -239,6 +258,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             allowed_review_categories=val_cats,
             voxel_cfg=voxel_cfg,
             bev_cfg=bev_cfg,
+            bev_als_cfg=ALSBEVConfig(enabled=False),
             num_classes=int(ls["num_classes"]),
             run_cache_root=str(eclair_run_cache_dir) if eclair_run_cache_dir is not None else None,
             run_cache_precompute_returns_onehot=(
@@ -265,6 +285,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             allowed_review_categories=test_cats,
             voxel_cfg=voxel_cfg,
             bev_cfg=bev_cfg,
+            bev_als_cfg=ALSBEVConfig(enabled=False),
             num_classes=int(ls["num_classes"]),
             run_cache_root=str(eclair_run_cache_dir) if eclair_run_cache_dir is not None else None,
             run_cache_precompute_returns_onehot=(
@@ -375,6 +396,8 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             crop_cfg=crop_cfg,
             voxel_cfg=voxel_cfg,
             bev_cfg=bev_cfg,
+            bev_als_cfg=bev_als_cfg,
+            num_classes=int(ls["num_classes"]),
             mix3d_cfg=mix3d_cfg,
         )
         val_ds = DalesTiles(
@@ -400,6 +423,8 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             crop_cfg=crop_cfg,
             voxel_cfg=voxel_cfg,
             bev_cfg=bev_cfg,
+            bev_als_cfg=ALSBEVConfig(enabled=False),
+            num_classes=int(ls["num_classes"]),
             mix3d_cfg=ALSMix3DConfig(enabled=False),
         )
         test_ds = DalesTiles(
@@ -425,6 +450,8 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             crop_cfg=crop_cfg,
             voxel_cfg=voxel_cfg,
             bev_cfg=bev_cfg,
+            bev_als_cfg=ALSBEVConfig(enabled=False),
+            num_classes=int(ls["num_classes"]),
             mix3d_cfg=ALSMix3DConfig(enabled=False),
         )
 
@@ -828,13 +855,137 @@ def _forward_batch(
     elif torch.is_tensor(bev_sel):
         bev_sel = bev_sel.to(device, non_blocking=True)
 
-    out = _model_forward_safe(model, st, is_train=is_train, bev_selected_idx=bev_sel, compute_bev=None)
+    bev_als_frames = None
+    if "bev_als_center_xy_m" in batch:
+        bev_als_frames = {
+            "center_xy_m": batch["bev_als_center_xy_m"].to(device, non_blocking=True),
+            "height_edges_m": batch["bev_als_height_edges_m"].to(device, non_blocking=True),
+        }
+
+    out = _model_forward_safe(
+        model,
+        st,
+        is_train=is_train,
+        bev_selected_idx=bev_sel,
+        compute_bev=None,
+        bev_als_frames=bev_als_frames,
+        compute_bev_als=None,
+    )
 
     bev_pred = None
     if isinstance(out, (tuple, list)) and len(out) == 2:
         out, bev_pred = out  # out is SparseTensor
     logits = out.F  # [N, C]
     return logits, labels, bev_pred
+
+
+def _labels_in_output_order(
+    input_coords: torch.Tensor,
+    input_labels: torch.Tensor,
+    output_coords: torch.Tensor,
+) -> Tuple[torch.Tensor, float]:
+    indices, coverage = match_sparse_coordinates(input_coords, output_coords, require_all=True)
+    return input_labels.index_select(0, indices), coverage
+
+
+def _gradient_l2_norms(model: torch.nn.Module) -> Tuple[float, float]:
+    """Return unscaled backbone/BEV-ALS gradient norms for application diagnostics."""
+
+    backbone_sq = 0.0
+    aux_sq = 0.0
+    for name, parameter in model.named_parameters():
+        if parameter.grad is None:
+            continue
+        value = float(parameter.grad.detach().float().norm(2).item())
+        if "bev_als_head" in name:
+            aux_sq += value * value
+        else:
+            backbone_sq += value * value
+    return math.sqrt(backbone_sq), math.sqrt(aux_sq)
+
+
+def _ocons_train_microstep(
+    *,
+    model: torch.nn.Module,
+    batch: Dict[str, torch.Tensor],
+    device: torch.device,
+    criterion: torch.nn.Module,
+    scaler: torch.cuda.amp.GradScaler,
+    grad_accum: int,
+    cfg: OConsConfig,
+    num_classes: int,
+    ignore_index: int,
+    base_seed: int,
+    epoch: int,
+    global_step: int,
+    rank: int,
+    amp: bool,
+) -> Dict[str, Any]:
+    seed = stable_ocons_seed(base_seed, epoch, global_step, rank, cfg.seed_offset)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    view = make_masked_view(
+        batch["coords"],
+        batch["feats"],
+        batch["labels"],
+        cfg,
+        num_classes=num_classes,
+        generator=generator,
+    )
+
+    clean_coords = batch["coords"].to(device, non_blocking=True)
+    clean_feats = batch["feats"].to(device, non_blocking=True)
+    clean_labels_input = batch["labels"].to(device, non_blocking=True)
+    clean_st = ME.SparseTensor(clean_feats, coordinates=clean_coords, device=device)
+
+    with torch.autocast(device_type="cuda", enabled=amp):
+        clean_raw = _model_forward_safe(model, clean_st, is_train=True, compute_bev_als=False)
+        clean_out = clean_raw[0] if isinstance(clean_raw, (tuple, list)) else clean_raw
+        clean_labels, clean_coverage = _labels_in_output_order(clean_coords, clean_labels_input, clean_out.C)
+        clean_loss = criterion(clean_out.F, clean_labels)
+        clean_term = 0.5 * clean_loss
+    scaler.scale(clean_term / float(grad_accum)).backward()
+    clean_logits_detached = clean_out.F.detach()
+    clean_output_coords = clean_out.C.detach()
+
+    pert_coords = view.coordinates.to(device, non_blocking=True)
+    pert_feats = view.features.to(device, non_blocking=True)
+    pert_labels_input = view.labels.to(device, non_blocking=True)
+    pert_st = ME.SparseTensor(pert_feats, coordinates=pert_coords, device=device)
+
+    with torch.autocast(device_type="cuda", enabled=amp):
+        pert_raw = _model_forward_safe(model, pert_st, is_train=True, compute_bev_als=False)
+        pert_out = pert_raw[0] if isinstance(pert_raw, (tuple, list)) else pert_raw
+        pert_labels, pert_coverage = _labels_in_output_order(pert_coords, pert_labels_input, pert_out.C)
+        clean_for_pert_idx, cross_coverage = match_sparse_coordinates(clean_output_coords, pert_out.C, require_all=True)
+        clean_aligned = clean_logits_detached.index_select(0, clean_for_pert_idx)
+        pert_loss = criterion(pert_out.F, pert_labels)
+        cons_loss, cons_diag = ocons_consistency_loss(
+            clean_aligned,
+            pert_out.F,
+            pert_labels,
+            cfg,
+            num_classes=num_classes,
+        )
+        cons_weight = ocons_weight_for_epoch(cfg, epoch)
+        pert_term = 0.5 * pert_loss + cons_weight * cons_loss
+    scaler.scale(pert_term / float(grad_accum)).backward()
+
+    total = clean_term.detach() + 0.5 * pert_loss.detach() + cons_weight * cons_loss.detach()
+    valid = clean_labels != int(ignore_index)
+    return {
+        "total": total,
+        "clean_loss": clean_loss.detach(),
+        "perturbed_loss": pert_loss.detach(),
+        "consistency_loss": cons_loss.detach(),
+        "consistency_weight": float(cons_weight),
+        "clean_logits": clean_out.F.detach(),
+        "clean_labels": clean_labels.detach(),
+        "valid_count": int(valid.sum().item()),
+        "view_diagnostics": view.diagnostics,
+        "consistency_diagnostics": cons_diag,
+        "coordinate_match_coverage": min(clean_coverage, pert_coverage, cross_coverage),
+    }
 
 
 def _rotate_xy_np(xyz: np.ndarray, deg: float) -> np.ndarray:
@@ -908,6 +1059,7 @@ def evaluate(
         "per_class_precision": res.per_class_precision,
         "per_class_recall": res.per_class_recall,
         "miou_valid": res.miou_valid,
+        "confusion_matrix": cm.mat.tolist(),
     }
 
 
@@ -1142,6 +1294,7 @@ def evaluate_voxel_windowed(
         "per_class_precision": res.per_class_precision,
         "per_class_recall": res.per_class_recall,
         "miou_valid": res.miou_valid,
+        "confusion_matrix": cm.mat.tolist(),
     }
 
 
@@ -1415,11 +1568,15 @@ def evaluate_pointwise(
         "per_class_precision": res.per_class_precision,
         "per_class_recall": res.per_class_recall,
         "miou_valid": res.miou_valid,
+        "confusion_matrix": cm.mat.tolist(),
     }
 
 
 def train(cfg_path: str):
     cfg = load_yaml(cfg_path)
+    method_contract: MethodContract = validate_method_contract(cfg)
+    ocons_cfg = OConsConfig.from_cfg(cfg)
+    bev_als_cfg = ALSBEVConfig.from_cfg(cfg)
 
     run = cfg["run"]
     out_dir = Path(run["out_dir"])
@@ -1447,6 +1604,7 @@ def train(cfg_path: str):
     # Only rank0 writes files
     if is_main_process(dist_env):
         save_json(out_dir / "config_resolved.json", cfg)
+        save_json(out_dir / "method_contract.json", method_contract.to_dict())
         checkpoint_dir = out_dir / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         removed_tmp = _cleanup_checkpoint_temp_files(checkpoint_dir)
@@ -1537,20 +1695,61 @@ def train(cfg_path: str):
 
     fields = [
         "epoch",
+        "method",
+        "debug_limited_run",
         "lr",
         "train_loss",
+        "train_seg_clean_loss",
+        "train_seg_perturbed_loss",
+        "train_ocons_consistency_loss",
+        "train_bev_als_loss",
+        "aux_weight",
         "val_loss",
         "val_miou",
         "val_macro_f1",
         "time_epoch_s",
+        "eval_time_s",
+        "epoch_wall_time_s",
+        "world_size",
+        "train_batches_per_rank",
         "best_val_miou",
         "checkpoint_dir_gb",
         "run_dir_gb",
         "run_cache_gb",
+        "gpu_peak_allocated_mib",
+        "gpu_peak_reserved_mib",
+        "backbone_grad_norm",
+        "method_aux_grad_norm",
     ]
 
     # BEV scalar metric (row currently writes it; add column so it actually appears)
     fields.append("bev_miou")
+
+    if ocons_cfg.enabled:
+        fields += [
+            "ocons_actual_mask_fraction",
+            "ocons_active_jaccard",
+            "ocons_coordinate_match_coverage",
+            "ocons_protection_constrained_rate",
+            "ocons_protected_disappearances",
+            "ocons_micro_kl",
+            "ocons_macro_kl",
+            "ocons_agreement",
+            "ocons_clean_confidence",
+            "ocons_perturbed_confidence",
+        ]
+    if bev_als_cfg.enabled:
+        fields += [
+            "bev_als_bce",
+            "bev_als_dice_loss",
+            "bev_als_precision",
+            "bev_als_recall",
+            "bev_als_f1",
+            "bev_als_in_bounds_fraction",
+            "bev_als_multi_label_fraction",
+            "bev_als_empty_slice_rate",
+            "bev_als_feature_in_bounds_fraction",
+        ]
 
     # DALES crop debug metrics (blank for non-DALES / non-crops)
     is_dales = dataset == "dales"
@@ -1632,6 +1831,29 @@ def train(cfg_path: str):
         mix_class_logger = None
     mix_context_history: List[Dict[str, Any]] = []
 
+    if ocons_cfg.enabled and is_main_process(dist_env):
+        ocons_class_logger = CSVLogger(
+            out_dir / "ocons_class_diagnostics.csv",
+            [
+                "epoch", "class_id", "class_name", "clean_voxels",
+                "perturbed_voxels", "retention", "kl", "kl_support",
+            ],
+        )
+    else:
+        ocons_class_logger = None
+
+    if bev_als_cfg.enabled and is_main_process(dist_env):
+        bev_als_class_logger = CSVLogger(
+            out_dir / "bev_als_slice_class_diagnostics.csv",
+            [
+                "epoch", "height_slice", "class_id", "class_name",
+                "input_voxels", "in_bounds_voxels", "bounds_retention",
+                "positive_support", "tp", "fp", "fn", "precision", "recall", "f1",
+            ],
+        )
+    else:
+        bev_als_class_logger = None
+
     best_val_miou = -1.0
     global_step = 0
     start_epoch = 1
@@ -1647,6 +1869,13 @@ def train(cfg_path: str):
         missing = sorted(required.difference(checkpoint.keys()))
         if missing:
             raise KeyError(f"Resume checkpoint is missing required keys {missing}: {resume_path}")
+        checkpoint_cfg = checkpoint.get("cfg", {}) or {}
+        checkpoint_contract = validate_method_contract(checkpoint_cfg)
+        if checkpoint_contract.name != method_contract.name:
+            raise ValueError(
+                "Refusing to resume across methods: "
+                f"checkpoint={checkpoint_contract.name!r}, current={method_contract.name!r}."
+            )
 
         unwrap_model(model).load_state_dict(checkpoint["model_state"], strict=True)
         optimizer.load_state_dict(checkpoint["optimizer_state"])
@@ -1710,6 +1939,8 @@ def train(cfg_path: str):
 
     for epoch in range(start_epoch, epochs + 1):
 
+        epoch_wall_start = time.perf_counter()
+
         model.train()
 
         if dist_env.enabled:
@@ -1732,15 +1963,38 @@ def train(cfg_path: str):
         if is_main_process(dist_env) and hasattr(criterion, "current_weight"):
             print(f"[loss] epoch={epoch:03d} lovasz_w={criterion.current_weight():.4f}", flush=True)
 
-        if torch.cuda.is_available() and is_main_process(dist_env):
-            peak_alloc = torch.cuda.max_memory_allocated() / (1024**3)
-            peak_reserved = torch.cuda.max_memory_reserved() / (1024**3)
-            print(f"[gpu] peak_alloc={peak_alloc:.2f} GB peak_reserved={peak_reserved:.2f} GB", flush=True)
-            torch.cuda.reset_peak_memory_stats()
+        if torch.cuda.is_available():
+            if is_main_process(dist_env):
+                peak_alloc = torch.cuda.max_memory_allocated() / (1024**3)
+                peak_reserved = torch.cuda.max_memory_reserved() / (1024**3)
+                print(f"[gpu] previous_peak_alloc={peak_alloc:.2f} GB previous_peak_reserved={peak_reserved:.2f} GB", flush=True)
+            torch.cuda.reset_peak_memory_stats(device)
 
         cm_train = ConfusionMatrix(num_classes=num_classes, ignore_index=ignore_index) if track_train_cm else None
         train_loss_sum = 0.0
         train_n_sum = 0
+        processed_steps = 0
+        component_steps = 0.0
+        seg_clean_sum = 0.0
+        seg_pert_sum = 0.0
+        ocons_loss_sum = 0.0
+        bev_als_loss_sum = 0.0
+        aux_weight_sum = 0.0
+        grad_measurements = 0.0
+        backbone_grad_norm_sum = 0.0
+        aux_grad_norm_sum = 0.0
+        ocons_scalar_sum = torch.zeros(11, dtype=torch.float64)
+        ocons_class_before = torch.zeros(num_classes, dtype=torch.float64)
+        ocons_class_after = torch.zeros(num_classes, dtype=torch.float64)
+        ocons_class_kl_sum = torch.zeros(num_classes, dtype=torch.float64)
+        ocons_class_kl_support = torch.zeros(num_classes, dtype=torch.float64)
+        bev_als_scalar_sum = torch.zeros(9, dtype=torch.float64)
+        bev_als_tp = torch.zeros((bev_als_cfg.height_slices, num_classes), dtype=torch.float64)
+        bev_als_fp = torch.zeros_like(bev_als_tp)
+        bev_als_fn = torch.zeros_like(bev_als_tp)
+        bev_als_positive = torch.zeros_like(bev_als_tp)
+        bev_als_class_before = torch.zeros(num_classes, dtype=torch.float64)
+        bev_als_class_in_bounds = torch.zeros(num_classes, dtype=torch.float64)
         # --- NEW: crop debug accumulators (DALES crop-mode only) ---
         dbg_n = 0
         dbg_vox_sum = 0.0
@@ -1784,6 +2038,7 @@ def train(cfg_path: str):
 
         bev_cfg = _bev_cfg(cfg)
         bev_enabled = _bev_enabled(cfg)
+        max_train_batches = int(run.get("max_train_batches_per_epoch", 0) or 0)
         bev_loss_type = "ce"
         bev_ignore_index = -1
         bev_dice_smooth = 1.0
@@ -1798,46 +2053,85 @@ def train(cfg_path: str):
             bev_ce = torch.nn.CrossEntropyLoss(ignore_index=bev_ignore_index)
 
         for step, batch in enumerate(train_loader, start=1):
-            with torch.autocast(device_type="cuda", enabled=amp):
-                if is_main_process(dist_env) and global_step % 20 == 0:
-                    print("batch meta_n_vox shape:", batch.get("meta_n_vox", None).shape if "meta_n_vox" in batch else None)
+            if max_train_batches > 0 and step > max_train_batches:
+                break
+            processed_steps += 1
+            component_steps += 1.0
+            bev_loss_step = None
+            bev_als_diag = None
+            ocons_result = None
 
-                logits, labels, bev_pred = _forward_batch(model, batch, device, is_train=True)
-                seg_loss = criterion(logits, labels)
-                # Always defined, even when BEV disabled
-                total = seg_loss
-                # Step-local BEV loss (prevents carry-over)
-                bev_loss_step = None
+            if ocons_cfg.enabled:
+                ocons_result = _ocons_train_microstep(
+                    model=model,
+                    batch=batch,
+                    device=device,
+                    criterion=criterion,
+                    scaler=scaler,
+                    grad_accum=grad_accum,
+                    cfg=ocons_cfg,
+                    num_classes=num_classes,
+                    ignore_index=ignore_index,
+                    base_seed=int(run["seed"]),
+                    epoch=epoch,
+                    global_step=global_step,
+                    rank=dist_env.rank,
+                    amp=amp,
+                )
+                total = ocons_result["total"]
+                seg_loss = ocons_result["clean_loss"]
+                logits = ocons_result["clean_logits"]
+                labels = ocons_result["clean_labels"]
+            else:
+                with torch.autocast(device_type="cuda", enabled=amp):
+                    logits, labels, bev_pred = _forward_batch(model, batch, device, is_train=True)
+                    seg_loss = criterion(logits, labels)
+                    total = seg_loss
 
-                if bev_enabled and (bev_pred is not None) and ("bev_labels" in batch):
-                    bev_targets = batch["bev_labels"]
-                    # move to GPU
-                    if isinstance(bev_targets, dict):
-                        bev_targets = {k: v.to(device, non_blocking=True) for k, v in bev_targets.items()}
-                    else:
-                        raise TypeError("batch['bev_labels'] must be a dict[level]->Tensor[B,H,W].")
-
-                    bev_loss_step = _compute_bev_loss(
-                        bev_pred,
-                        bev_targets,
-                        loss_type=bev_loss_type,
-                        ignore_index=bev_ignore_index,
-                        dice_smooth=bev_dice_smooth,
-                        dice_classes=bev_dice_classes,
-                        ce_criterion=bev_ce,
-                    )
-                    if bev_enabled and (bev_loss_step is not None):
-                        # keep your existing warmup/weight logic (already correct)
-                        bev_w = _bev_weight_for_epoch(bev_cfg, epoch)
-
-                        if bool(bev_cfg.get("warmup_only_bev", False)) and (epoch <= int(bev_cfg.get("warmup_epochs", 0))):
-                            total = bev_w * bev_loss_step
+                    if bev_enabled and (bev_pred is not None) and ("bev_labels" in batch):
+                        bev_targets = batch["bev_labels"]
+                        if isinstance(bev_targets, dict):
+                            bev_targets = {k: v.to(device, non_blocking=True) for k, v in bev_targets.items()}
                         else:
-                            total = seg_loss + bev_w * bev_loss_step
+                            raise TypeError("batch['bev_labels'] must be a dict[level]->Tensor[B,H,W].")
+                        bev_loss_step = _compute_bev_loss(
+                            bev_pred,
+                            bev_targets,
+                            loss_type=bev_loss_type,
+                            ignore_index=bev_ignore_index,
+                            dice_smooth=bev_dice_smooth,
+                            dice_classes=bev_dice_classes,
+                            ce_criterion=bev_ce,
+                        )
+                        if bev_loss_step is not None:
+                            bev_w = _bev_weight_for_epoch(bev_cfg, epoch)
+                            if bool(bev_cfg.get("warmup_only_bev", False)) and (
+                                epoch <= int(bev_cfg.get("warmup_epochs", 0))
+                            ):
+                                total = bev_w * bev_loss_step
+                            else:
+                                total = seg_loss + bev_w * bev_loss_step
 
-                loss_scaled = total / float(grad_accum)
+                    if bev_als_cfg.enabled:
+                        if bev_pred is None or "bev_als_logits" not in bev_pred:
+                            raise RuntimeError("BEV-ALS is enabled but the model did not return bev_als_logits.")
+                        required = {"bev_als_target", "bev_als_occupied"}
+                        missing = sorted(required.difference(batch))
+                        if missing:
+                            raise RuntimeError(f"BEV-ALS batch is missing {missing}.")
+                        target = batch["bev_als_target"].to(device, non_blocking=True)
+                        occupied = batch["bev_als_occupied"].to(device, non_blocking=True)
+                        bev_loss_step, bev_als_diag = als_bev_multilabel_loss(
+                            bev_pred["bev_als_logits"], target, occupied, bev_als_cfg
+                        )
+                        bev_w = bev_als_weight_for_epoch(bev_als_cfg, epoch)
+                        total = seg_loss + bev_w * bev_loss_step
+                        bev_als_diag = {
+                            **bev_als_diag,
+                            **(bev_pred.get("bev_als_diagnostics", {}) or {}),
+                        }
 
-            scaler.scale(loss_scaled).backward()
+                scaler.scale(total / float(grad_accum)).backward()
 
             if cm_train is not None:
                 preds = logits.argmax(dim=1)
@@ -1847,6 +2141,71 @@ def train(cfg_path: str):
             n = int(valid.sum().item())
             train_loss_sum += float(total.item()) * max(1, n)
             train_n_sum += max(1, n)
+
+            seg_clean_sum += float(seg_loss.item())
+            if ocons_result is not None:
+                seg_pert_sum += float(ocons_result["perturbed_loss"].item())
+                ocons_loss_sum += float(ocons_result["consistency_loss"].item())
+                aux_weight_sum += float(ocons_result["consistency_weight"])
+                vd = ocons_result["view_diagnostics"]
+                cd = ocons_result["consistency_diagnostics"]
+                ocons_scalar_sum += torch.tensor(
+                    [
+                        vd.actual_mask_fraction,
+                        vd.jaccard,
+                        ocons_result["coordinate_match_coverage"],
+                        float(vd.constrained_samples),
+                        float(vd.samples),
+                        float(vd.protected_disappearances.sum().item()),
+                        float(cd["micro_kl"].item()),
+                        float(cd["macro_kl"].item()),
+                        float(cd["agreement"].item()),
+                        float(cd["clean_confidence"].item()),
+                        float(cd["perturbed_confidence"].item()),
+                    ],
+                    dtype=torch.float64,
+                )
+                ocons_class_before += vd.class_before.to(torch.float64)
+                ocons_class_after += vd.class_after.to(torch.float64)
+                support = cd["per_class_support"].detach().cpu().to(torch.float64)
+                ocons_class_kl_sum += cd["per_class_kl"].detach().cpu().to(torch.float64) * support
+                ocons_class_kl_support += support
+            elif bev_als_cfg.enabled:
+                assert bev_loss_step is not None and bev_als_diag is not None
+                bev_als_loss_sum += float(bev_loss_step.item())
+                aux_weight_sum += float(bev_w)
+                in_bounds = float(batch["meta_bev_als_in_bounds_fraction"].float().mean().item())
+                multi = float(batch["meta_bev_als_multi_label_fraction"].float().mean().item())
+                feature_in_bounds = float(bev_als_diag["feature_in_bounds_fraction"].item())
+                if in_bounds < bev_als_cfg.min_in_bounds_fraction or feature_in_bounds < bev_als_cfg.min_in_bounds_fraction:
+                    raise RuntimeError(
+                        "BEV-ALS crop/frame coverage fell below the configured correctness floor: "
+                        f"target={in_bounds:.6f}, block8={feature_in_bounds:.6f}, "
+                        f"minimum={bev_als_cfg.min_in_bounds_fraction:.6f}."
+                    )
+                empty_rate = float(batch["meta_bev_als_empty_slices"].float().mean().item()) / float(
+                    bev_als_cfg.height_slices
+                )
+                bev_als_scalar_sum += torch.tensor(
+                    [
+                        float(bev_als_diag["bce"].item()),
+                        float(bev_als_diag["dice_loss"].item()),
+                        float(bev_als_diag["tp"].item()),
+                        float(bev_als_diag["fp"].item()),
+                        float(bev_als_diag["fn"].item()),
+                        in_bounds,
+                        multi,
+                        empty_rate,
+                        feature_in_bounds,
+                    ],
+                    dtype=torch.float64,
+                )
+                bev_als_tp += bev_als_diag["tp_by_slice_class"].detach().cpu().to(torch.float64)
+                bev_als_fp += bev_als_diag["fp_by_slice_class"].detach().cpu().to(torch.float64)
+                bev_als_fn += bev_als_diag["fn_by_slice_class"].detach().cpu().to(torch.float64)
+                bev_als_positive += bev_als_diag["positive_support"].detach().cpu().to(torch.float64)
+                bev_als_class_before += batch["meta_bev_als_class_before"].sum(dim=0).to(torch.float64)
+                bev_als_class_in_bounds += batch["meta_bev_als_class_in_bounds"].sum(dim=0).to(torch.float64)
 
             # --- NEW: consume DALES crop meta if present ---
             if "meta_n_vox" in batch:
@@ -1906,6 +2265,11 @@ def train(cfg_path: str):
                         mix_donor_counter[int(donor_idx)] += 1
 
             if step % grad_accum == 0:
+                scaler.unscale_(optimizer)
+                backbone_norm, aux_norm = _gradient_l2_norms(model)
+                grad_measurements += 1.0
+                backbone_grad_norm_sum += backbone_norm
+                aux_grad_norm_sum += aux_norm
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
@@ -1913,7 +2277,24 @@ def train(cfg_path: str):
             global_step += 1
             if global_step % int(run.get("log_every_steps", 50)) == 0 and is_main_process(dist_env):
                 lr = optimizer.param_groups[0]["lr"]
-                if bev_enabled:
+                if ocons_result is not None:
+                    msg = (
+                        f"[epoch {epoch:03d} step {step:05d}] total={total.item():.4f} "
+                        f"clean={seg_loss.item():.4f} pert={ocons_result['perturbed_loss'].item():.4f} "
+                        f"cons={ocons_result['consistency_loss'].item():.4f} "
+                        f"w={ocons_result['consistency_weight']:.4f} "
+                        f"mask={ocons_result['view_diagnostics'].actual_mask_fraction:.4f} "
+                        f"match={ocons_result['coordinate_match_coverage']:.6f} lr={lr:.2e}"
+                    )
+                elif bev_als_cfg.enabled:
+                    bev_loss_val = float(bev_loss_step.item()) if bev_loss_step is not None else 0.0
+                    msg = (
+                        f"[epoch {epoch:03d} step {step:05d}] total={total.item():.4f} "
+                        f"seg={seg_loss.item():.4f} bev_als={bev_loss_val:.4f} "
+                        f"w={bev_w:.4f} bounds={bev_als_diag['feature_in_bounds_fraction'].item():.4f} "
+                        f"lr={lr:.2e}"
+                    )
+                elif bev_enabled:
                     bev_loss_val = float(bev_loss_step.item()) if (bev_loss_step is not None) else 0.0
                     msg = f"[epoch {epoch:03d} step {step:05d}] total={total.item():.4f} seg={seg_loss.item():.4f} bev={bev_loss_val:.4f} lr={lr:.2e}"
                 else:
@@ -1935,7 +2316,12 @@ def train(cfg_path: str):
                 print(msg, flush=True)
 
         # flush leftover grads if dataloader size not divisible by grad_accum
-        if (len(train_loader) % grad_accum) != 0:
+        if processed_steps > 0 and (processed_steps % grad_accum) != 0:
+            scaler.unscale_(optimizer)
+            backbone_norm, aux_norm = _gradient_l2_norms(model)
+            grad_measurements += 1.0
+            backbone_grad_norm_sum += backbone_norm
+            aux_grad_norm_sum += aux_norm
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
@@ -1951,11 +2337,77 @@ def train(cfg_path: str):
         else:
             epoch_s = time.perf_counter() - t0_wall
 
+        train_time_max = torch.tensor(float(epoch_s), dtype=torch.float64, device=device)
+        if dist_env.enabled:
+            torch.distributed.all_reduce(train_time_max, op=torch.distributed.ReduceOp.MAX)
+        epoch_s = float(train_time_max.item())
+
+        if processed_steps == 0:
+            raise RuntimeError("Training DataLoader produced no batches.")
+
+        base_totals = torch.tensor(
+            [
+                train_loss_sum,
+                float(train_n_sum),
+                component_steps,
+                seg_clean_sum,
+                seg_pert_sum,
+                ocons_loss_sum,
+                bev_als_loss_sum,
+                aux_weight_sum,
+                grad_measurements,
+                backbone_grad_norm_sum,
+                aux_grad_norm_sum,
+            ],
+            dtype=torch.float64,
+            device=device,
+        )
+        base_totals = all_reduce_sum(dist_env, base_totals).detach().cpu()
+        component_denom = max(1.0, float(base_totals[2].item()))
+        grad_denom = max(1.0, float(base_totals[8].item()))
+        backbone_grad_mean = float(base_totals[9].item()) / grad_denom
+        aux_grad_mean = float(base_totals[10].item()) / grad_denom
+        strict_diagnostic = bool(
+            max_train_batches > 0 or run.get("skip_validation", False) or run.get("skip_final_test", False)
+        )
+        if strict_diagnostic and (not math.isfinite(backbone_grad_mean) or backbone_grad_mean <= 0.0):
+            raise RuntimeError(f"Backbone gradient diagnostic is invalid: {backbone_grad_mean}")
+        if strict_diagnostic and bev_als_cfg.enabled and (
+            not math.isfinite(aux_grad_mean) or aux_grad_mean <= 0.0
+        ):
+            raise RuntimeError(f"BEV-ALS head gradient diagnostic is invalid: {aux_grad_mean}")
+
+        ocons_global = all_reduce_sum(dist_env, ocons_scalar_sum.to(device)).detach().cpu()
+        ocons_before_global = all_reduce_sum(dist_env, ocons_class_before.to(device)).detach().cpu()
+        ocons_after_global = all_reduce_sum(dist_env, ocons_class_after.to(device)).detach().cpu()
+        ocons_kl_sum_global = all_reduce_sum(dist_env, ocons_class_kl_sum.to(device)).detach().cpu()
+        ocons_kl_support_global = all_reduce_sum(dist_env, ocons_class_kl_support.to(device)).detach().cpu()
+
+        bev_als_global = all_reduce_sum(dist_env, bev_als_scalar_sum.to(device)).detach().cpu()
+        bev_als_tp_global = all_reduce_sum(dist_env, bev_als_tp.to(device)).detach().cpu()
+        bev_als_fp_global = all_reduce_sum(dist_env, bev_als_fp.to(device)).detach().cpu()
+        bev_als_fn_global = all_reduce_sum(dist_env, bev_als_fn.to(device)).detach().cpu()
+        bev_als_positive_global = all_reduce_sum(dist_env, bev_als_positive.to(device)).detach().cpu()
+        bev_als_class_before_global = all_reduce_sum(dist_env, bev_als_class_before.to(device)).detach().cpu()
+        bev_als_class_in_bounds_global = all_reduce_sum(
+            dist_env, bev_als_class_in_bounds.to(device)
+        ).detach().cpu()
+
+        peak = torch.zeros(2, dtype=torch.float64, device=device)
+        if torch.cuda.is_available():
+            peak[0] = float(torch.cuda.max_memory_allocated(device)) / float(1024**2)
+            peak[1] = float(torch.cuda.max_memory_reserved(device)) / float(1024**2)
+        if dist_env.enabled:
+            torch.distributed.all_reduce(peak, op=torch.distributed.ReduceOp.MAX)
+
         bev_metrics = None
-        train_loss = train_loss_sum / max(1, train_n_sum)
+        train_loss = float(base_totals[0].item()) / max(1.0, float(base_totals[1].item()))
 
         # ---- Eval ----
-        do_eval = (epoch % int(run.get("eval_every_epochs", 1)) == 0) or (epoch == epochs)
+        do_eval = (not bool(run.get("skip_validation", False))) and (
+            (epoch % int(run.get("eval_every_epochs", 1)) == 0) or (epoch == epochs)
+        )
+        eval_start = time.perf_counter()
         if do_eval:
             eval_mode = str(cfg.get("eval", {}).get("mode", "voxel")).lower()
             if eval_mode == "point":
@@ -2016,12 +2468,33 @@ def train(cfg_path: str):
                 "per_class_f1": [float("nan")] * num_classes,
                 "per_class_precision": [float("nan")] * num_classes,
                 "per_class_recall": [float("nan")] * num_classes,
+                "confusion_matrix": None,
             }
+        eval_time_s = time.perf_counter() - eval_start if do_eval else 0.0
+        eval_time_max = torch.tensor(float(eval_time_s), dtype=torch.float64, device=device)
+        if dist_env.enabled:
+            torch.distributed.all_reduce(eval_time_max, op=torch.distributed.ReduceOp.MAX)
+        eval_time_s = float(eval_time_max.item())
 
         # ---- Checkpointing ----
         is_best = do_eval and (val_metrics["miou"] > best_val_miou)
         if is_best:
             best_val_miou = float(val_metrics["miou"])
+
+        if is_main_process(dist_env) and do_eval:
+            confusion_payload = {
+                "epoch": epoch,
+                "method": method_contract.name,
+                "class_names": class_names,
+                "rows": "ground_truth",
+                "columns": "prediction",
+                "matrix": val_metrics["confusion_matrix"],
+            }
+            # These files are overwritten, not accumulated, so observability does
+            # not grow the run directory over a long or resumed training.
+            save_json(out_dir / "val_confusion_latest.json", confusion_payload)
+            if is_best:
+                save_json(out_dir / "val_confusion_best.json", confusion_payload)
 
         save_every = int(run.get("save_every_epochs", 5))
 
@@ -2029,6 +2502,7 @@ def train(cfg_path: str):
             common_checkpoint = {
                 "epoch": epoch,
                 "global_step": global_step,
+                "method_contract": method_contract.to_dict(),
                 "model_state": unwrap_model(model).state_dict(),
                 "cfg": cfg,
                 "best_val_miou": best_val_miou,
@@ -2091,20 +2565,142 @@ def train(cfg_path: str):
 
         lr = optimizer.param_groups[0]["lr"]
 
+        epoch_wall_time_s = time.perf_counter() - epoch_wall_start
+        epoch_wall_time_max = torch.tensor(
+            float(epoch_wall_time_s), dtype=torch.float64, device=device
+        )
+        if dist_env.enabled:
+            torch.distributed.all_reduce(epoch_wall_time_max, op=torch.distributed.ReduceOp.MAX)
+        epoch_wall_time_s = float(epoch_wall_time_max.item())
+
         row = {
             "epoch": epoch,
+            "method": method_contract.name,
+            "debug_limited_run": int(strict_diagnostic),
             "lr": lr,
             "train_loss": train_loss,
+            "train_seg_clean_loss": float(base_totals[3].item()) / component_denom,
+            "train_seg_perturbed_loss": (
+                float(base_totals[4].item()) / component_denom if ocons_cfg.enabled else float("nan")
+            ),
+            "train_ocons_consistency_loss": (
+                float(base_totals[5].item()) / component_denom if ocons_cfg.enabled else float("nan")
+            ),
+            "train_bev_als_loss": (
+                float(base_totals[6].item()) / component_denom if bev_als_cfg.enabled else float("nan")
+            ),
+            "aux_weight": (
+                float(base_totals[7].item()) / component_denom
+                if (ocons_cfg.enabled or bev_als_cfg.enabled)
+                else 0.0
+            ),
             "val_loss": val_metrics["loss"],
             "val_miou": val_metrics["miou"],
             "val_macro_f1": val_metrics["macro_f1"],
             "time_epoch_s": epoch_s,
+            "eval_time_s": eval_time_s,
+            "epoch_wall_time_s": epoch_wall_time_s,
+            "world_size": int(dist_env.world_size),
+            "train_batches_per_rank": int(processed_steps),
             "best_val_miou": best_val_miou,
             "checkpoint_dir_gb": checkpoint_dir_gb,
             "run_dir_gb": run_dir_gb,
             "run_cache_gb": run_cache_gb,
+            "gpu_peak_allocated_mib": float(peak[0].item()),
+            "gpu_peak_reserved_mib": float(peak[1].item()),
+            "backbone_grad_norm": backbone_grad_mean,
+            "method_aux_grad_norm": (
+                aux_grad_mean
+                if bev_als_cfg.enabled
+                else float("nan")
+            ),
             "bev_miou": bev_metrics["bev_miou"] if bev_metrics is not None else float("nan"),
         }
+
+        if ocons_cfg.enabled:
+            row.update(
+                {
+                    "ocons_actual_mask_fraction": float(ocons_global[0].item()) / component_denom,
+                    "ocons_active_jaccard": float(ocons_global[1].item()) / component_denom,
+                    "ocons_coordinate_match_coverage": float(ocons_global[2].item()) / component_denom,
+                    "ocons_protection_constrained_rate": float(ocons_global[3].item())
+                    / max(1.0, float(ocons_global[4].item())),
+                    "ocons_protected_disappearances": int(ocons_global[5].item()),
+                    "ocons_micro_kl": float(ocons_global[6].item()) / component_denom,
+                    "ocons_macro_kl": float(ocons_global[7].item()) / component_denom,
+                    "ocons_agreement": float(ocons_global[8].item()) / component_denom,
+                    "ocons_clean_confidence": float(ocons_global[9].item()) / component_denom,
+                    "ocons_perturbed_confidence": float(ocons_global[10].item()) / component_denom,
+                }
+            )
+            if is_main_process(dist_env):
+                assert ocons_class_logger is not None
+                for class_id, class_name in enumerate(class_names):
+                    before = float(ocons_before_global[class_id].item())
+                    after = float(ocons_after_global[class_id].item())
+                    kl_support = float(ocons_kl_support_global[class_id].item())
+                    ocons_class_logger.log(
+                        {
+                            "epoch": epoch,
+                            "class_id": class_id,
+                            "class_name": class_name,
+                            "clean_voxels": int(before),
+                            "perturbed_voxels": int(after),
+                            "retention": after / max(1.0, before),
+                            "kl": float(ocons_kl_sum_global[class_id].item()) / max(1.0, kl_support),
+                            "kl_support": int(kl_support),
+                        }
+                    )
+
+        if bev_als_cfg.enabled:
+            tp_all = float(bev_als_global[2].item())
+            fp_all = float(bev_als_global[3].item())
+            fn_all = float(bev_als_global[4].item())
+            precision = tp_all / max(1.0, tp_all + fp_all)
+            recall = tp_all / max(1.0, tp_all + fn_all)
+            f1 = 2.0 * precision * recall / max(1e-8, precision + recall)
+            row.update(
+                {
+                    "bev_als_bce": float(bev_als_global[0].item()) / component_denom,
+                    "bev_als_dice_loss": float(bev_als_global[1].item()) / component_denom,
+                    "bev_als_precision": precision,
+                    "bev_als_recall": recall,
+                    "bev_als_f1": f1,
+                    "bev_als_in_bounds_fraction": float(bev_als_global[5].item()) / component_denom,
+                    "bev_als_multi_label_fraction": float(bev_als_global[6].item()) / component_denom,
+                    "bev_als_empty_slice_rate": float(bev_als_global[7].item()) / component_denom,
+                    "bev_als_feature_in_bounds_fraction": float(bev_als_global[8].item()) / component_denom,
+                }
+            )
+            if is_main_process(dist_env):
+                assert bev_als_class_logger is not None
+                for slice_id in range(bev_als_cfg.height_slices):
+                    for class_id, class_name in enumerate(class_names):
+                        tp = float(bev_als_tp_global[slice_id, class_id].item())
+                        fp = float(bev_als_fp_global[slice_id, class_id].item())
+                        fn = float(bev_als_fn_global[slice_id, class_id].item())
+                        p = tp / max(1.0, tp + fp)
+                        r = tp / max(1.0, tp + fn)
+                        class_before = float(bev_als_class_before_global[class_id].item())
+                        class_in_bounds = float(bev_als_class_in_bounds_global[class_id].item())
+                        bev_als_class_logger.log(
+                            {
+                                "epoch": epoch,
+                                "height_slice": slice_id,
+                                "class_id": class_id,
+                                "class_name": class_name,
+                                "input_voxels": int(class_before),
+                                "in_bounds_voxels": int(class_in_bounds),
+                                "bounds_retention": class_in_bounds / max(1.0, class_before),
+                                "positive_support": int(bev_als_positive_global[slice_id, class_id].item()),
+                                "tp": int(tp),
+                                "fp": int(fp),
+                                "fn": int(fn),
+                                "precision": p,
+                                "recall": r,
+                                "f1": 2.0 * p * r / max(1e-8, p + r),
+                            }
+                        )
 
         if mix_enabled:
             mix_totals = torch.tensor(
@@ -2266,11 +2862,36 @@ def train(cfg_path: str):
         if is_main_process(dist_env):
             print(
                 f"[epoch {epoch:03d}] train_loss={train_loss:.4f} "
-                f"val_miou={val_metrics['miou']:.4f}"
-                f"val_miou_valid={float(val_metrics.get('miou_valid', float('nan'))):.4f}"
+                f"val_miou={val_metrics['miou']:.4f} "
+                f"val_miou_valid={float(val_metrics.get('miou_valid', float('nan'))):.4f} "
                 f"val_macro_f1={val_metrics['macro_f1']:.4f} "
-                f"best={best_val_miou:.4f} time={format_seconds(epoch_s)}"
+                f"best={best_val_miou:.4f} train_time={format_seconds(epoch_s)} "
+                f"eval_time={format_seconds(eval_time_s)} wall_time={format_seconds(epoch_wall_time_s)}"
             )
+
+    if bool(run.get("skip_final_test", False)):
+        if is_main_process(dist_env):
+            save_json(
+                out_dir / "diagnostic_complete.json",
+                {
+                    "status": "ok",
+                    "method": method_contract.name,
+                    "epochs": epochs,
+                    "max_train_batches_per_epoch": int(run.get("max_train_batches_per_epoch", 0) or 0),
+                    "skip_validation": bool(run.get("skip_validation", False)),
+                    "skip_final_test": True,
+                    "warning": "This is an integration diagnostic, not a scientific result.",
+                },
+            )
+            print("[diagnostic] completed successfully; final test intentionally skipped.", flush=True)
+        if dataset == "eclair" and eclair_run_cache_base is not None:
+            if dist_env.enabled:
+                torch.distributed.barrier()
+            if is_main_process(dist_env):
+                shutil.rmtree(eclair_run_cache_base, ignore_errors=True)
+            if dist_env.enabled:
+                torch.distributed.barrier()
+        return
 
     # Final test evaluation on best model (respect eval.mode)
     best_ckpt = torch.load(out_dir / "checkpoints" / "best.pt", map_location="cpu")
