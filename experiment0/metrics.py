@@ -6,11 +6,17 @@ from typing import Dict, List, Optional
 import torch
 
 
-def map_labels_tensor(y: torch.Tensor, mapping: Dict[int, int]) -> torch.Tensor:
+def map_labels_tensor(y: torch.Tensor, mapping: dict[int, int]) -> torch.Tensor:
     """Vectorized label remapping for 1D torch tensors."""
-    out = torch.zeros_like(y)
+    out = torch.full_like(y, fill_value=-1)
     for src, dst in mapping.items():
         out[y == src] = dst
+
+    if (out == -1).any():
+        missing = torch.unique(y[out == -1])
+        raise ValueError(f"Unmapped labels found in y: {missing.tolist()}")
+
+    # no -1 left, safe to clamp in case you ever want to use 0 as ignore
     return out
 
 
@@ -111,47 +117,102 @@ def per_class_precision(
     return precision
 
 
-def compute_scores(
-    confusion: ConfusionMatrix,
-    ignore_ids: Optional[List[int]] = None,
-    label_set: Optional[List[int]] = None,
-) -> Dict:
-    """
-    Compute mIoU, macro-F1, and per-class metrics from confusion matrix.
+# def compute_scores(
+#     confusion: ConfusionMatrix,
+#     ignore_ids: Optional[List[int]] = None,
+#     label_set: Optional[List[int]] = None,
+# ) -> Dict:
+#     """
+#     Compute mIoU, macro-F1, and per-class metrics from confusion matrix.
 
-    Returns:
-        dict with keys: mIoU, macroF1, IoU_per_class, F1_per_class,
-                       Recall_per_class, Precision_per_class, confusion
-    """
-    conf = confusion.value().float()
-    iou_pc = per_class_iou(conf, ignore_ids)
-    f1_pc = per_class_f1(conf, ignore_ids)
-    recall_pc = per_class_recall(conf, ignore_ids)  # NEW
-    precision_pc = per_class_precision(conf, ignore_ids)  # NEW
+#     Returns:
+#         dict with keys: mIoU, macroF1, IoU_per_class, F1_per_class,
+#                        Recall_per_class, Precision_per_class, confusion
+#     """
+#     conf = confusion.value().float()
+#     iou_pc = per_class_iou(conf, ignore_ids)
+#     f1_pc = per_class_f1(conf, ignore_ids)
+#     recall_pc = per_class_recall(conf, ignore_ids)  # NEW
+#     precision_pc = per_class_precision(conf, ignore_ids)  # NEW
 
-    # define which labels to average over
+#     # define which labels to average over
+#     if label_set is None:
+#         valid = torch.ones_like(iou_pc, dtype=torch.bool)
+#     else:
+#         valid = torch.zeros_like(iou_pc, dtype=torch.bool)
+#         for idx in label_set:
+#             if ignore_ids and idx in ignore_ids:
+#                 continue
+#             valid[idx] = True
+
+#     # mask out NaNs
+#     valid &= ~torch.isnan(iou_pc)
+#     valid &= ~torch.isnan(f1_pc)
+
+#     miou = torch.mean(iou_pc[valid]).item() if valid.any() else 0.0
+#     macrof1 = torch.mean(f1_pc[valid]).item() if valid.any() else 0.0
+
+#     return {
+#         "mIoU": miou,
+#         "macroF1": macrof1,
+#         "IoU_per_class": iou_pc.tolist(),
+#         "F1_per_class": f1_pc.tolist(),
+#         "Recall_per_class": recall_pc.tolist(),  # NEW
+#         "Precision_per_class": precision_pc.tolist(),  # NEW
+#         "confusion": conf.cpu().tolist(),
+#     }
+
+
+def compute_scores(confusion, ignore_ids=None, label_set=None):
+    """
+    Compute mIoU and macroF1 from a confusion matrix.
+
+    - mIoU: mean over chosen classes; drop only classes whose IoU is NaN
+      (no GT and no preds).
+    - macroF1: mean over chosen classes; treat NaN F1 as 0
+      (model completely fails that class).
+    """
+    conf = confusion.value().float()  # [C, C]
+
+    iou_pc = per_class_iou(conf, ignore_ids)  # [C]
+    f1_pc = per_class_f1(conf, ignore_ids)  # [C]
+    rec_pc = per_class_recall(conf, ignore_ids)  # [C]
+    prec_pc = per_class_precision(conf, ignore_ids)  # [C]
+
+    # 1) Build base mask of classes we conceptually care about.
     if label_set is None:
-        valid = torch.ones_like(iou_pc, dtype=torch.bool)
+        base_mask = torch.ones_like(iou_pc, dtype=torch.bool)
     else:
-        valid = torch.zeros_like(iou_pc, dtype=torch.bool)
+        base_mask = torch.zeros_like(iou_pc, dtype=torch.bool)
+        num_classes = iou_pc.numel()
         for idx in label_set:
             if ignore_ids and idx in ignore_ids:
                 continue
-            valid[idx] = True
+            if 0 <= idx < num_classes:
+                base_mask[idx] = True
 
-    # mask out NaNs
-    valid &= ~torch.isnan(iou_pc)
-    valid &= ~torch.isnan(f1_pc)
+    # 2) mIoU: drop only classes where IoU itself is NaN
+    valid_iou = base_mask & ~torch.isnan(iou_pc)
+    mIoU = iou_pc[valid_iou].mean().item() if valid_iou.any() else 0.0
 
-    miou = torch.mean(iou_pc[valid]).item() if valid.any() else 0.0
-    macrof1 = torch.mean(f1_pc[valid]).item() if valid.any() else 0.0
+    # 3) macroF1: treat NaN F1 as 0 for classes we care about
+    f1_fixed = f1_pc.clone()
+    f1_fixed[torch.isnan(f1_fixed)] = 0.0
+    # explicitly drop ignore_ids from macroF1
+    valid_f1 = base_mask.clone()
+    if ignore_ids:
+        for idx in ignore_ids:
+            if 0 <= idx < f1_fixed.numel():
+                valid_f1[idx] = False
+
+    macroF1 = f1_fixed[valid_f1].mean().item() if valid_f1.any() else 0.0
 
     return {
-        "mIoU": miou,
-        "macroF1": macrof1,
+        "mIoU": mIoU,
+        "macroF1": macroF1,
         "IoU_per_class": iou_pc.tolist(),
         "F1_per_class": f1_pc.tolist(),
-        "Recall_per_class": recall_pc.tolist(),  # NEW
-        "Precision_per_class": precision_pc.tolist(),  # NEW
+        "Recall_per_class": rec_pc.tolist(),
+        "Precision_per_class": prec_pc.tolist(),
         "confusion": conf.cpu().tolist(),
     }

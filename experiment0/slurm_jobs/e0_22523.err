@@ -1,0 +1,4 @@
+GpuFreq=control_disabled
+Epoch 1/2:   0%|          | 0/1059 [00:00<?, ?it/s]srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+slurmstepd-cn07: error: *** JOB 22523 ON cn07 CANCELLED AT 2025-12-04T21:35:24 ***
+slurmstepd-cn07: error: *** STEP 22523.0 ON cn07 CANCELLED AT 2025-12-04T21:35:24 ***

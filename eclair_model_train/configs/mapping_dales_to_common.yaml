@@ -1,0 +1,34 @@
+# ================================================
+# FILE: configs/mapping_dales_to_common.yaml
+# ================================================
+# DALES native IDs -> Common IDs
+# DALES labels:
+#   0: unknown
+#   1: Ground
+#   2: Vegetation
+#   3: Cars
+#   4: Trucks
+#   5: Power lines
+#   6: Fences
+#   7: Poles
+#   8: Buildings
+#
+# Common taxonomy:
+#   0: ignore
+#   1: ground
+#   2: vegetation
+#   3: buildings
+#   4: wires
+#   5: poles
+#   6: fence
+#   7: vehicle
+
+0: 0 # unknown -> ignore
+1: 1 # Ground -> ground
+2: 2 # Vegetation -> vegetation
+3: 7 # Cars -> vehicle
+4: 7 # Trucks -> vehicle
+5: 4 # Power lines -> wires
+6: 6 # Fences -> fence
+7: 5 # Poles -> poles
+8: 3 # Buildings -> buildings

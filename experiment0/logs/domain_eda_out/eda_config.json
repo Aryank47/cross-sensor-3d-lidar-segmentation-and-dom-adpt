@@ -1,0 +1,16 @@
+{
+  "patch_size_m": 100.0,
+  "patch_stride_m": 100.0,
+  "voxel_size": 0.05,
+  "coord_norm_factor": 10.0,
+  "chunk_size_points": 2000000,
+  "sample_points_per_file": 500000,
+  "seed": 0,
+  "intensity_bins": 256,
+  "intensity_range": [
+    0,
+    65535
+  ],
+  "max_return_value": 8,
+  "class_bins": 256
+}
