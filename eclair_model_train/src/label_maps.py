@@ -1,22 +1,24 @@
+# /src/label_maps.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 
+# This is actually the 11 semantic classes excluding Undefined.
 ECLAIR_CLASS_NAMES_11 = [
     "Unassigned",
     "Ground",
     "Vegetation",
     "Buildings",
     "Noise",
-    "Trans. wires",
-    "Dist. wires",
-    "Dist. poles",
-    "Trans. towers",
+    "Transmission wires",
+    "Distribution wires",
+    "Poles",
+    "Transmission towers",
     "Fence",
-    "Vehicles",
+    "Vehicle",
 ]
 
 

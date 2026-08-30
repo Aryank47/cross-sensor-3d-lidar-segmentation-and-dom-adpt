@@ -1,0 +1,118 @@
+#/eclair_model_train/configs/e0_dales_dropI.yaml
+epochs: 180
+
+run:
+  name: e0_dales_dropI
+  out_dir: ./runs/e0_dales_dropI
+  seed: 1337
+  device: cuda
+  amp: true
+  log_every_steps: 50
+  eval_every_epochs: 1
+  save_every_epochs: 5
+
+data:
+  dataset: dales
+  dales_label_map_native_to_train:
+    0: -100 # unknown -> ignore
+    1: 0 # ground
+    2: 1 # vegetation
+    3: 2 # cars
+    4: 3 # trucks
+    5: 6 # power_lines
+    6: 7 # fences
+    7: 5 # poles
+    8: 4 # buildings
+
+  # Your DALES layout: train/ and test/
+  dales_train_root: ${DALES_TRAIN_ROOT}
+  dales_test_root: ${DALES_TEST_ROOT}
+
+  # Optional: if you later create a val folder, uncomment:
+  # dales_val_root: ${DALES_VAL_ROOT}
+
+  val_fraction_from_train: 0.10
+
+  num_workers: 4
+  batch_size: 1
+  grad_accum_steps: 4
+
+  # If you add DALES caching params to DalesTiles, keep these:
+  use_cache: true
+  cache_root: ${DALES_CACHE_ROOT_DROP_I}
+  cache_subdir: dales_dropI
+  cache_key_extra: e0_dales_dropI_v2_labels8
+
+  patch:
+    make_local_coords: true
+    coord_norm_factor: 10.0
+    voxel_size: 0.02
+
+  preproc:
+    intensity_mode: none
+    use_height_xy_cap: false
+    max_voxels: 250000
+    # NEW: enable class-aware cap
+    class_aware_max_voxels: true
+    rare_class_ids: [2, 3, 5, 6, 7]
+
+  aug:
+    enabled: true
+    random_flip_xy: true
+    random_rotate_deg: [0.0, 0.0]
+    scale_range: [0.95, 1.05]
+    jitter_std: 0.01
+
+  features:
+    use_intensity: false
+    intensity_divisor: 65535.0
+    returns_onehot_k: 5
+    use_rgb: false
+    # rgb_divisor: 65535.0
+    include_coords: false
+
+  label_space:
+    num_classes: 8
+    ignore_index: -100
+    class_names:
+      [
+        "ground",
+        "vegetation",
+        "cars",
+        "trucks",
+        "buildings",
+        "poles",
+        "power_lines",
+        "fences",
+      ]
+
+model:
+  in_channels: 10
+  out_channels: 8
+  D: 3
+
+optim:
+  name: adam
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+
+sched:
+  name: step
+  step_size_epochs: 10
+  gamma: 0.5
+
+loss:
+  name: focal
+  gamma: 2.0
+  # Per-class alpha (sum-normalized to ~8) to emphasize rare classes
+  # order matches label_space.class_names:
+  #   ground, vegetation, cars, trucks, buildings, poles, power_lines, fences
+  alpha:
+    - 0.53 # ground
+    - 0.53 # vegetation
+    - 1.07 # cars
+    - 1.60 # trucks
+    - 0.53 # buildings
+    - 1.60 # poles
+    - 1.07 # power_lines
+    - 1.07 # fences

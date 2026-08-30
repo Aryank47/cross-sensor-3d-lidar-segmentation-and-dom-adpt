@@ -147,7 +147,7 @@
 # if __name__ == "__main__":
 #     main()
 
-
+# scripts/precompute_eclair_cache.py
 from __future__ import annotations
 
 import argparse
@@ -198,23 +198,17 @@ def _load_eclair_split_list(
     valid_splits = {"train", "val", "test"}
 
     if split not in valid_splits:
-        raise ValueError(
-            f"Unknown split='{split}'. Expected one of {sorted(valid_splits)}"
-        )
+        raise ValueError(f"Unknown split='{split}'. Expected one of {sorted(valid_splits)}")
 
     # ---- Case A: dict-of-splits ----
     if isinstance(meta, dict):
         # allow either lowercase or exact keys
         keys_lower = {str(k).lower(): k for k in meta.keys()}
         if split not in keys_lower:
-            raise KeyError(
-                f"{meta_path} does not contain split '{split}'. Keys: {list(meta.keys())}"
-            )
+            raise KeyError(f"{meta_path} does not contain split '{split}'. Keys: {list(meta.keys())}")
         names = meta[keys_lower[split]]
         if not isinstance(names, list):
-            raise TypeError(
-                f"{meta_path}[{keys_lower[split]}] must be a list, got: {type(names)}"
-            )
+            raise TypeError(f"{meta_path}[{keys_lower[split]}] must be a list, got: {type(names)}")
         return sorted([str(x) for x in names])
 
     # ---- Case B: list-of-records ----
@@ -241,11 +235,7 @@ def _load_eclair_split_list(
         if not out:
             # Helpful debugging context
             present_splits = sorted(
-                {
-                    str(r.get("split", "")).lower().strip()
-                    for r in meta
-                    if isinstance(r, dict) and "split" in r
-                }
+                {str(r.get("split", "")).lower().strip() for r in meta if isinstance(r, dict) and "split" in r}
             )
             raise RuntimeError(
                 f"No tiles found for split='{split}' after filtering.\n"
@@ -268,9 +258,7 @@ def resolve_pc_path(eclair_root: Path, fname: str) -> Path:
     alt = p.with_suffix(".las")
     if alt.exists():
         return alt
-    raise FileNotFoundError(
-        f"Could not find pointcloud file for '{fname}' under {pc_dir}"
-    )
+    raise FileNotFoundError(f"Could not find pointcloud file for '{fname}' under {pc_dir}")
 
 
 def read_las_arrays_robust(path: Path) -> Dict[str, np.ndarray]:
@@ -286,9 +274,7 @@ def read_las_arrays_robust(path: Path) -> Dict[str, np.ndarray]:
     # Standardize XYZ to float32
     xyz = np.array(las.xyz, dtype=np.float64)
 
-    def _get_dim(
-        attr_name: str, fallback_names: List[str] = None
-    ) -> Optional[np.ndarray]:
+    def _get_dim(attr_name: str, fallback_names: List[str] = None) -> Optional[np.ndarray]:
         # Priority 1: Direct property access (handles bit-unpacking/scaling)
         if hasattr(las, attr_name):
             val = getattr(las, attr_name)
@@ -383,9 +369,7 @@ def main():
     ap.add_argument("--splits", nargs="+", default=["train", "val", "test"])
 
     # If you pass nothing, we default to the "paper-like" behavior below
-    ap.add_argument(
-        "--train_review_categories", nargs="*", default=["approved", "rejected"]
-    )
+    ap.add_argument("--train_review_categories", nargs="*", default=["approved", "rejected"])
     ap.add_argument("--eval_review_categories", nargs="*", default=["approved"])
 
     args = ap.parse_args()

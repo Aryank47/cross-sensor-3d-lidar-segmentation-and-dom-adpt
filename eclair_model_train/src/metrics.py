@@ -1,7 +1,8 @@
+# /src/metrics.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import List
 
 import torch
 
@@ -9,6 +10,7 @@ import torch
 @dataclass
 class MetricResult:
     miou: float
+    miou_valid: float
     macro_f1: float
     per_class_iou: List[float]
     per_class_f1: List[float]
@@ -28,10 +30,16 @@ class ConfusionMatrix:
         pred = pred.view(-1).to(torch.int64).cpu()
         target = target.view(-1).to(torch.int64).cpu()
         mask = target != self.ignore_index
-        if mask.sum() == 0:
-            return
         pred = pred[mask]
         target = target[mask]
+
+        k = self.num_classes
+        valid = (target >= 0) & (target < k) & (pred >= 0) & (pred < k)
+        if valid.sum() == 0:
+            return
+
+        pred = pred[valid]
+        target = target[valid]
         k = self.num_classes
         idx = target * k + pred
         bins = torch.bincount(idx, minlength=k * k)
@@ -55,10 +63,13 @@ class ConfusionMatrix:
 
         miou = float(iou.mean().item())
         macro_f1 = float(f1.mean().item())
+        gt_present = (tp + fn) > 0
+        miou_valid = float(iou[gt_present].mean().item()) if gt_present.any() else 0.0
 
         return MetricResult(
             miou=miou,
             macro_f1=macro_f1,
             per_class_iou=[float(x) for x in iou.tolist()],
             per_class_f1=[float(x) for x in f1.tolist()],
+            miou_valid=miou_valid,
         )

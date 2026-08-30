@@ -1,3 +1,4 @@
+# src/data_eclair.py
 from __future__ import annotations
 
 import json
@@ -62,23 +63,17 @@ def _load_eclair_split_list(
     valid_splits = {"train", "val", "test"}
 
     if split not in valid_splits:
-        raise ValueError(
-            f"Unknown split='{split}'. Expected one of {sorted(valid_splits)}"
-        )
+        raise ValueError(f"Unknown split='{split}'. Expected one of {sorted(valid_splits)}")
 
     # ---- Case A: dict-of-splits ----
     if isinstance(meta, dict):
         # allow either lowercase or exact keys
         keys_lower = {str(k).lower(): k for k in meta.keys()}
         if split not in keys_lower:
-            raise KeyError(
-                f"{meta_path} does not contain split '{split}'. Keys: {list(meta.keys())}"
-            )
+            raise KeyError(f"{meta_path} does not contain split '{split}'. Keys: {list(meta.keys())}")
         names = meta[keys_lower[split]]
         if not isinstance(names, list):
-            raise TypeError(
-                f"{meta_path}[{keys_lower[split]}] must be a list, got: {type(names)}"
-            )
+            raise TypeError(f"{meta_path}[{keys_lower[split]}] must be a list, got: {type(names)}")
         return sorted([str(x) for x in names])
 
     # ---- Case B: list-of-records ----
@@ -105,11 +100,7 @@ def _load_eclair_split_list(
         if not out:
             # Helpful debugging context
             present_splits = sorted(
-                {
-                    str(r.get("split", "")).lower().strip()
-                    for r in meta
-                    if isinstance(r, dict) and "split" in r
-                }
+                {str(r.get("split", "")).lower().strip() for r in meta if isinstance(r, dict) and "split" in r}
             )
             raise RuntimeError(
                 f"No tiles found for split='{split}' after filtering.\n"
@@ -132,9 +123,7 @@ def _resolve_pc_path(eclair_root: Path, fname: str) -> Path:
     alt = p.with_suffix(".las")
     if alt.exists():
         return alt
-    raise FileNotFoundError(
-        f"Could not find pointcloud file for '{fname}' under {pc_dir}"
-    )
+    raise FileNotFoundError(f"Could not find pointcloud file for '{fname}' under {pc_dir}")
 
 
 # def _read_las_arrays(path: Path) -> Dict[str, np.ndarray]:
@@ -302,13 +291,9 @@ class EclairTiles(Dataset):
                 if out["intensity"] is not None:
                     out["intensity"] = out["intensity"].astype(np.float32, copy=False)
                 if out["return_number"] is not None:
-                    out["return_number"] = out["return_number"].astype(
-                        np.int64, copy=False
-                    )
+                    out["return_number"] = out["return_number"].astype(np.int64, copy=False)
                 if out["number_of_returns"] is not None:
-                    out["number_of_returns"] = out["number_of_returns"].astype(
-                        np.int64, copy=False
-                    )
+                    out["number_of_returns"] = out["number_of_returns"].astype(np.int64, copy=False)
                 if out["rgb"] is not None:
                     out["rgb"] = out["rgb"].astype(np.float32, copy=False)
 
@@ -365,9 +350,7 @@ class EclairTiles(Dataset):
             xyz = augment_xyz(xyz, self.aug_cfg, rng)
 
         # Normalize coordinates before quantization
-        xyz_norm = (xyz / float(self.patch_cfg.coord_norm_factor)).astype(
-            np.float32, copy=False
-        )
+        xyz_norm = (xyz / float(self.patch_cfg.coord_norm_factor)).astype(np.float32, copy=False)
         xyz_norm = np.ascontiguousarray(xyz_norm, dtype=np.float32)
 
         # Labels: native -> contiguous train ids (ignore undefined)
@@ -393,9 +376,7 @@ class EclairTiles(Dataset):
         # labels_t = torch.from_numpy(y_u).long()
 
         feats = build_features(
-            xyz_local=(
-                xyz_norm if self.feat_cfg.include_coords else xyz_norm
-            ),  # coords included handled in build_features
+            xyz_local=(xyz_norm if self.feat_cfg.include_coords else xyz_norm),  # coords included handled in build_features
             intensity=raw["intensity"],
             return_number=raw["return_number"],
             number_of_returns=raw["number_of_returns"],
@@ -404,9 +385,7 @@ class EclairTiles(Dataset):
         )
 
         # Quantize coords
-        q = np.floor(xyz_norm / float(self.patch_cfg.voxel_size)).astype(
-            np.int32, copy=False
-        )
+        q = np.floor(xyz_norm / float(self.patch_cfg.voxel_size)).astype(np.int32, copy=False)
         q = np.ascontiguousarray(q, dtype=np.int32)  # <<< CRITICAL
 
         # Sparse quantize (deduplicate voxels) — use torch + contiguous explicitly
@@ -443,8 +422,6 @@ def minkowski_collate_fn(
     feats_list = [b["feats"] for b in batch]
     labels_list = [b["labels"] for b in batch]
 
-    coords, feats, labels = ME.utils.sparse_collate(
-        coords_list, feats_list, labels_list
-    )
+    coords, feats, labels = ME.utils.sparse_collate(coords_list, feats_list, labels_list)
     fnames = [b["fname"] for b in batch]
     return {"coords": coords, "feats": feats, "labels": labels, "fnames": fnames}

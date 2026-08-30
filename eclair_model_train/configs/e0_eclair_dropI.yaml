@@ -1,0 +1,94 @@
+# E0 — ECLAIR reproduction baseline (paper-like)
+# Model: Res16UNet14C (MinkowskiEngine)
+# Loss: focal
+# Features: return_number(one-hot) + number_of_returns(one-hot)
+#
+# Paper excerpt confirms:
+# - Res16UNet14C backbone
+# - augmentations: random scaling, jitter, flip
+# - normalize coordinates before quantization
+# - voxel size 0.05 and coordinate normalization factor 10
+# - intensity scaled to [0,1], return_number & number_of_returns one-hot
+# - Adam lr=1e-3, step scheduler every 10 steps, batch_size=2 per GPU (effective 8)  【see paper】
+#
+# NOTE: the paper does not specify numeric augmentation ranges or scheduler gamma in the text extract.
+# We expose them as config so you can tune to exactly match the reported mIoU.
+# ECLAIR: training on classes 1..11; native 0 (Undefined) mapped to ignore_index.
+
+epochs: 80
+
+run:
+  name: e0_eclair_dropI
+  out_dir: ./runs/e0_eclair_dropI
+  seed: 1337
+  device: cuda
+  amp: true
+  log_every_steps: 50
+  eval_every_epochs: 1
+  save_every_epochs: 5
+
+data:
+  dataset: eclair
+  eclair_root: ${ECLAIR_ROOT} # must contain labels.json and pointclouds/
+  cache_root: ${ECLAIR_CACHE_ROOT} # optional; will be created if scripts/precompute_eclair_cache.py is used
+  use_cache: true
+  num_workers: 4
+  batch_size: 2
+  grad_accum_steps: 2 # 2 * 4 = effective 8 (paper uses 4 GPUs * 2)
+
+  # ECLAIR native labels assumed in .laz:
+  # 0 undefined (ignore)
+  # 1..11 are the 11 semantic classes used in the paper table (incl. Unassigned + Noise).
+  label_space:
+    num_classes: 11
+    ignore_index: -100
+    eclair_undefined_id: 0
+
+  # Coordinate processing
+  patch:
+    # ECLAIR tiles are 100m x 100m by construction; we still make local coords per tile.
+    make_local_coords: true # subtract per-tile min xyz -> local coords (numerically stable)
+    coord_norm_factor: 10.0
+    voxel_size: 0.05 # quantization voxel size (in normalized coordinate space)
+
+  # Augmentation (paper says scale+jitter+flip; ranges not specified in text)
+  aug:
+    enabled: true
+    random_flip_xy: true
+    random_rotate_deg: [0.0, 0.0]
+    scale_range: [0.95, 1.05]
+    jitter_std: 0.01
+
+  features:
+    use_intensity: false
+    intensity_divisor: 65535.0
+    returns_onehot_k: 5 # one-hot size for return_number & number_of_returns
+    use_rgb: false
+    # rgb_divisor: 65535.0
+    include_coords: false # keep false for paper-like feature stack
+
+model:
+  in_channels: 10 # 5 (return_number) + 5 (num_returns)
+  out_channels: 11
+  D: 3
+
+optim:
+  name: adam
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+
+sched:
+  name: step
+  step_size_epochs: 10
+  gamma: 0.5
+
+loss:
+  name: focal
+  gamma: 2.0
+  alpha: null
+
+eclair:
+  meta_filename: labels.json
+  train_review_categories: ["approved", "rejected"]
+  val_review_categories: ["approved"]
+  test_review_categories: ["approved"]
