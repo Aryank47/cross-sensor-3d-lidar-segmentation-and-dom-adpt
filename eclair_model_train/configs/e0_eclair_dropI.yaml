@@ -1,3 +1,4 @@
+# /eclair_model_train/configs/e0_eclair_dropI.yaml
 # E0 — ECLAIR reproduction baseline (paper-like)
 # Model: Res16UNet14C (MinkowskiEngine)
 # Loss: focal
@@ -15,7 +16,24 @@
 # We expose them as config so you can tune to exactly match the reported mIoU.
 # ECLAIR: training on classes 1..11; native 0 (Undefined) mapped to ignore_index.
 
-epochs: 80
+epochs: 100
+
+eval:
+  mode: point # voxel | point
+  window:
+    size_xy_m: 50.0
+    stride_xy_m: 50.0 # start non-overlap; later try 25.0 for overlap
+    aggregation: mean_logits
+    accum_dtype: float32 # float16 saves RAM, float32 safest
+    compute_point_loss: true
+
+  bev:
+    enabled: false
+    every_epochs: 5 # run BEV eval/vis every N epochs
+    max_batches: 2 # keep cheap
+    save_npz: true
+    save_png: true
+    levels: null # null => use cfg.model.aux_heads.bev.levels
 
 run:
   name: e0_eclair_dropI
@@ -24,10 +42,18 @@ run:
   device: cuda
   amp: true
   log_every_steps: 50
-  eval_every_epochs: 1
-  save_every_epochs: 5
+  eval_every_epochs: 2
+  save_every_epochs: 25
+  keep_last_k_epoch_snapshots: 3
 
 data:
+  run_cache_precompute_returns_onehot: true
+
+  voxelization:
+    feat_pool: mean_all # sample_first | mean_all | max_all | random
+    label_pool: majority # first | majority
+    random_seed_offset: 0
+
   dataset: eclair
   eclair_root: ${ECLAIR_ROOT} # must contain labels.json and pointclouds/
   cache_root: ${ECLAIR_CACHE_ROOT} # optional; will be created if scripts/precompute_eclair_cache.py is used
@@ -55,7 +81,7 @@ data:
   aug:
     enabled: true
     random_flip_xy: true
-    random_rotate_deg: [0.0, 0.0]
+    random_rotate_deg: [0.0, 360.0]
     scale_range: [0.95, 1.05]
     jitter_std: 0.01
 
@@ -66,11 +92,76 @@ data:
     use_rgb: false
     # rgb_divisor: 65535.0
     include_coords: false # keep false for paper-like feature stack
+    use_return_number: true
+    use_number_of_returns: true
+
+  sampling:
+    mode: weighted_tiles
+    epoch_size_multiplier: 1.0
+
+    # ECLAIR train ids:
+    # 5 transmission wires
+    # 6 distribution wires
+    # 7 poles
+    # 8 transmission towers
+    # 9 fence
+    # 10 vehicle
+    rare_class_ids: [5, 6, 7, 8, 9, 10]
+
+    rare_class_weights:
+      5: 3.0
+      6: 3.0
+      7: 4.0
+      8: 4.0
+      9: 2.0
+      10: 2.0
+
+    rare_balance_beta: 0.5
+    strength: 1.0
+    min_weight: 0.25
+    max_weight: 5.0
+    use_stats_cache: true
 
 model:
   in_channels: 10 # 5 (return_number) + 5 (num_returns)
   out_channels: 11
   D: 3
+  aux_heads:
+    bev:
+      enabled: false
+      max_batches: 5
+      vis_every_epochs: 5
+
+      # NEW (Task 10B)
+      loss: dice # dice | ce
+      dice_smooth: 1.0 # dice numeric stability
+      dice_classes: present # present | all  (present = only classes appearing in GT)
+
+      # Which internal feature levels to use (MinkUNet14C supports block5..block8)
+      levels: ["block8"]
+
+      # LiDOG-style aux loss usage
+      weight: 0.5
+      ignore_index: -1
+      warmup_epochs: 10
+      warmup_only_bev: true
+
+      label_pool: "last" # last matches LiDOG getBEVImageNew assignment behavior
+      bev_img_sizes: [200] # must match len(levels); LiDOG uses per-level sizes
+
+      projector:
+        x_min_m: 0.0
+        x_max_m: 100.0
+        y_min_m: 0.0
+        y_max_m: 100.0
+        z_min_m: -100.0
+        z_max_m: 200.0
+        y_flip: true # matches LiDOG pixel_y definition
+        pool: max
+        res_m: 0.5
+        mode: select # pool | select
+
+      hidden_dim: 64
 
 optim:
   name: adam
@@ -85,7 +176,38 @@ sched:
 loss:
   name: focal
   gamma: 2.0
-  alpha: null
+
+  # ECLAIR 11-class train-id order:
+  # 0 Unassigned
+  # 1 Ground
+  # 2 Vegetation
+  # 3 Buildings
+  # 4 Noise
+  # 5 Transmission wires
+  # 6 Distribution wires
+  # 7 Poles
+  # 8 Transmission towers
+  # 9 Fence
+  # 10 Vehicle
+  alpha:
+    - 0.50 # 0 Unassigned
+    - 0.50 # 1 Ground
+    - 0.50 # 2 Vegetation
+    - 0.75 # 3 Buildings
+    - 0.50 # 4 Noise
+    - 1.50 # 5 Transmission wires
+    - 1.50 # 6 Distribution wires
+    - 1.50 # 7 Poles
+    - 1.50 # 8 Transmission towers
+    - 1.13 # 9 Fence
+    - 1.13 # 10 Vehicle
+
+  lovasz:
+    enabled: true
+    weight: 0.5
+    warmup_epochs: 10
+    ramp_epochs: 10
+    classes: present
 
 eclair:
   meta_filename: labels.json

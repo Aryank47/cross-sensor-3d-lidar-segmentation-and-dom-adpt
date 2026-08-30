@@ -14,6 +14,8 @@ class MetricResult:
     macro_f1: float
     per_class_iou: List[float]
     per_class_f1: List[float]
+    per_class_precision: List[float]
+    per_class_recall: List[float]
 
 
 class ConfusionMatrix:
@@ -60,6 +62,8 @@ class ConfusionMatrix:
 
         denom_f1 = 2 * tp + fp + fn
         f1 = torch.where(denom_f1 > 0, (2 * tp) / denom_f1, torch.zeros_like(denom_f1))
+        precision = torch.where(tp + fp > 0, tp / (tp + fp), torch.zeros_like(tp))
+        recall = torch.where(tp + fn > 0, tp / (tp + fn), torch.zeros_like(tp))
 
         miou = float(iou.mean().item())
         macro_f1 = float(f1.mean().item())
@@ -71,5 +75,7 @@ class ConfusionMatrix:
             macro_f1=macro_f1,
             per_class_iou=[float(x) for x in iou.tolist()],
             per_class_f1=[float(x) for x in f1.tolist()],
+            per_class_precision=[float(x) for x in precision.tolist()],
+            per_class_recall=[float(x) for x in recall.tolist()],
             miou_valid=miou_valid,
         )

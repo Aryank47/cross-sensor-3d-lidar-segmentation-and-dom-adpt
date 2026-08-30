@@ -1,0 +1,30 @@
+extends: m0_dales_frozen_29364.yaml
+
+method:
+  name: ocons
+
+run:
+  name: dg_dales_ocons10_seed1337
+  out_dir: /scratch/m23csa510/e0_results/dg_dales_ocons10_seed1337
+  # last.pt is atomically overwritten every epoch; epoch snapshots remain disabled.
+  # This gives one-epoch recovery granularity without growing storage per epoch.
+  save_every_epochs: 1
+  keep_epoch_snapshots: false
+  keep_last_k_epoch_snapshots: 0
+  best_checkpoint_model_only: true
+  epoch_snapshots_model_only: true
+  max_run_dir_gb: 1.0
+
+ocons:
+  enabled: true
+  perturbation: active_voxel_mask
+  mask_fraction: 0.10
+  protected_class_ids: [5, 6]  # DALES train IDs: poles, power_lines
+  protected_min_voxels: 3
+  protected_min_fraction: 0.70
+  seed_offset: 91000
+  consistency:
+    max_weight: 0.50
+    warmup_epochs: 10
+    temperature: 1.0
+    macro_min_voxels: 8

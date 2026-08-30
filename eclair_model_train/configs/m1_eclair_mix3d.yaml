@@ -1,0 +1,153 @@
+epochs: 100
+eval:
+  mode: point
+  window:
+    size_xy_m: 50.0
+    stride_xy_m: 50.0
+    aggregation: mean_logits
+    accum_dtype: float32
+    compute_point_loss: true
+  bev:
+    enabled: false
+    every_epochs: 5
+    max_batches: 2
+    save_npz: true
+    save_png: true
+    levels: null
+run:
+  name: m1_eclair_mix3d
+  out_dir: /scratch/m23csa510/e0_results/e0_eclair_repro_29306
+  seed: 1337
+  device: cuda
+  amp: true
+  log_every_steps: 50
+  eval_every_epochs: 2
+  save_every_epochs: 25
+  keep_last_k_epoch_snapshots: 0
+  keep_epoch_snapshots: false
+  best_checkpoint_model_only: true
+  epoch_snapshots_model_only: true
+  max_run_dir_gb: 20.0
+
+data:
+  run_cache_enabled: false
+  run_cache_precompute_returns_onehot: false
+
+  voxelization:
+    feat_pool: mean_all
+    label_pool: majority
+    random_seed_offset: 0
+
+  dataset: eclair
+  eclair_root: ${ECLAIR_ROOT}
+  cache_root: ${ECLAIR_CACHE_ROOT}
+  use_cache: true
+  num_workers: 4
+  batch_size: 2
+  grad_accum_steps: 2
+
+  label_space:
+    num_classes: 11
+    ignore_index: -100
+    eclair_undefined_id: 0
+
+  patch:
+    make_local_coords: true
+    coord_norm_factor: 10.0
+    voxel_size: 0.05
+
+  aug:
+    enabled: true
+    random_flip_xy: true
+    random_rotate_deg:
+      - 0.0
+      - 360.0
+    scale_range:
+      - 0.95
+      - 1.05
+    jitter_std: 0.01
+
+  features:
+    use_intensity: false
+    intensity_divisor: 65535.0
+    returns_onehot_k: 5
+    use_rgb: false
+    include_coords: false
+    use_return_number: true
+    use_number_of_returns: true
+
+  mix3d:
+    enabled: true
+    policy: crop_replace
+    probability: 1.0
+    replacement_area_fraction: 0.25
+    guard_band_voxels: 1
+    donor_file_strategy: uniform_different_source_file
+    max_donor_attempts: 8
+    max_region_attempts: 8
+    min_region_points: 2000
+    min_replacement_side_m: 5.0
+    height_alignment: q05_local
+    verify_cross_provenance_collisions: true
+    diagnostics: true
+
+model:
+  in_channels: 10
+  out_channels: 11
+  D: 3
+  aux_heads:
+    bev:
+      enabled: false
+      max_batches: 5
+      vis_every_epochs: 5
+      loss: dice
+      dice_smooth: 1.0
+      dice_classes: present
+      levels:
+        - block8
+      weight: 0.5
+      ignore_index: -1
+      warmup_epochs: 10
+      warmup_only_bev: true
+      label_pool: last
+      bev_img_sizes:
+        - 200
+      projector:
+        x_min_m: 0.0
+        x_max_m: 100.0
+        y_min_m: 0.0
+        y_max_m: 100.0
+        z_min_m: -100.0
+        z_max_m: 200.0
+        y_flip: true
+        pool: max
+        res_m: 0.5
+        mode: select
+      hidden_dim: 64
+optim:
+  name: adam
+  lr: 0.001
+  weight_decay: 0.0001
+sched:
+  name: step
+  step_size_epochs: 10
+  gamma: 0.5
+loss:
+  name: focal
+  gamma: 2.0
+  alpha: null
+  lovasz:
+    enabled: true
+    weight: 0.5
+    warmup_epochs: 10
+    ramp_epochs: 10
+    classes: present
+eclair:
+  meta_filename: labels.json
+  train_review_categories:
+    - approved
+    - rejected
+  val_review_categories:
+    - approved
+  test_review_categories:
+    - approved

@@ -1,0 +1,25 @@
+extends: dg_dales_bev_als_h4_ml.yaml
+
+# Full-data, two-epoch integration pilot. It exercises two-GPU DDP, four
+# DataLoader workers per rank, validation, best/last checkpoints, and resume-safe
+# logging without running the final test set.
+epochs: 2
+
+run:
+  name: pilot_dales_bev_als_h4_ml
+  out_dir: /scratch/m23csa510/e0_results/pilot_dales_bev_als_h4_ml
+  log_every_steps: 25
+  eval_every_epochs: 2
+  save_every_epochs: 1
+  keep_epoch_snapshots: false
+  keep_last_k_epoch_snapshots: 0
+  best_checkpoint_model_only: true
+  epoch_snapshots_model_only: true
+  max_run_dir_gb: 1.0
+  max_train_batches_per_epoch: 0
+  skip_validation: false
+  skip_final_test: true
+
+data:
+  num_workers: 4
+  prefetch_factor: 4

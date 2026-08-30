@@ -66,6 +66,8 @@ def build_features(
     number_of_returns: Optional[np.ndarray],
     rgb: Optional[np.ndarray],
     cfg: FeatureConfig,
+    return_number_1h: Optional[np.ndarray] = None,
+    number_of_returns_1h: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Returns float32 features [N, C] as numpy array (so callers can index with numpy idx).
@@ -81,15 +83,18 @@ def build_features(
 
     # returns
     if cfg.use_return_number:
-        if return_number is None:
-            raise ValueError("cfg.use_return_number=True but return_number=None")
-        parts.append(_onehot_returns(return_number, int(cfg.returns_onehot_k)))
+        if return_number_1h is not None:
+            rn = return_number_1h.astype(np.float32, copy=False)
+        else:
+            rn = _onehot_returns(return_number, int(cfg.returns_onehot_k))
+        parts.append(rn)
+
     if cfg.use_number_of_returns:
-        if number_of_returns is None:
-            raise ValueError(
-                "cfg.use_number_of_returns=True but number_of_returns=None"
-            )
-        parts.append(_onehot_returns(number_of_returns, int(cfg.returns_onehot_k)))
+        if number_of_returns_1h is not None:
+            nor = number_of_returns_1h.astype(np.float32, copy=False)
+        else:
+            nor = _onehot_returns(number_of_returns, int(cfg.returns_onehot_k))
+        parts.append(nor)
 
     # rgb
     if cfg.use_rgb:
@@ -112,7 +117,10 @@ def infer_in_channels(cfg: FeatureConfig) -> int:
     c = 0
     if cfg.use_intensity:
         c += 1
-    c += 2 * int(cfg.returns_onehot_k)
+    if cfg.use_return_number:
+        c += int(cfg.returns_onehot_k)
+    if cfg.use_number_of_returns:
+        c += int(cfg.returns_onehot_k)
     if cfg.use_rgb:
         c += 3
     if cfg.include_coords:

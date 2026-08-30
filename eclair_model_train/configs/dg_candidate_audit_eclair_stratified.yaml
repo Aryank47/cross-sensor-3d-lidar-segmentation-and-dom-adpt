@@ -1,0 +1,61 @@
+seed: 1337
+out_dir: runs/dg_candidate_audit_eclair_stratified
+
+# ECLAIR-only follow-up for reverse-direction BEV design. The audit uses full
+# ECLAIR tiles; it does not change the training sampler or expose DALES data.
+training_configs:
+  - configs/m1_eclair_mix3d.yaml
+
+shared_voxel_sizes_m: [0.2, 0.5, 1.0]
+
+utility_class_ids:
+  eclair: [5, 6, 7]   # transmission wire, distribution wire, poles
+
+sampling:
+  by_dataset:
+    eclair:
+      mode: stratified_class_presence
+      uniform_samples: 25
+      class_ids: [5, 6, 7]
+      samples_per_class: 30
+      support_bins: 3
+      minimum_total_unique: 75
+      deduplicate_tiles: true
+
+bab:
+  seam_widths_m: [0.5, 1.0, 2.0]
+  component_cell_m: 1.0
+
+ocons:
+  strengths: [0.10, 0.20, 0.30]
+  protected_min_voxels: 3
+  component_voxel_m: 1.0
+
+bev:
+  resolutions_m: [0.20, 0.50, 1.00]
+  z_slices: 4
+  candidate_projection:
+    enabled: true
+    xy_frame: bbox_centered
+    z_filter: none
+    height_slicing: quantile
+    z_slices: 4
+    resolutions_m: [0.20, 0.50, 1.00]
+    bounds_by_dataset:
+      eclair:
+        x_min_m: -75.0
+        x_max_m: 75.0
+        y_min_m: -75.0
+        y_max_m: 75.0
+        z_min_m: -1.0   # ignored because z_filter=none
+        z_max_m: 1.0
+
+decision_gates:
+  bab_min_applied_rate: 0.75
+  bab_cut_component_fraction: 0.10
+  bab_seam_width_m: 1.0
+  ocons_changed_voxel_fraction_min: 0.08
+  ocons_changed_voxel_fraction_max: 0.35
+  ocons_utility_retention_min: 0.70
+  bev_in_bounds_fraction_min: 0.95
+  bev_utility_retention_min: 0.90

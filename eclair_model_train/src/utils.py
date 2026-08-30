@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import random
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,9 +72,22 @@ def save_json(path: str | Path, obj: Any) -> None:
 def atomic_save_torch(state: Dict[str, Any], path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    torch.save(state, tmp)
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    os.close(fd)
+    try:
+        torch.save(state, tmp_name)
+        os.replace(tmp_name, str(path))
+    finally:
+        # if anything failed before replace
+        try:
+            if os.path.exists(tmp_name):
+                os.remove(tmp_name)
+        except Exception:
+            pass
 
 
 def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:

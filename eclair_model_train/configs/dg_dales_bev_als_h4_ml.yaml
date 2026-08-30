@@ -1,0 +1,42 @@
+extends: m0_dales_frozen_29364.yaml
+
+method:
+  name: bev_als
+
+run:
+  name: dg_dales_bev_als_h4_ml_seed1337
+  out_dir: /scratch/m23csa510/e0_results/dg_dales_bev_als_h4_ml_seed1337
+  # last.pt is atomically overwritten every epoch; epoch snapshots remain disabled.
+  # This gives one-epoch recovery granularity without growing storage per epoch.
+  save_every_epochs: 1
+  keep_epoch_snapshots: false
+  keep_last_k_epoch_snapshots: 0
+  best_checkpoint_model_only: true
+  epoch_snapshots_model_only: true
+  max_run_dir_gb: 1.0
+
+model:
+  aux_heads:
+    bev:
+      enabled: false
+    bev_als:
+      enabled: true
+      feature_level: block8
+      xy_frame: bbox_centered
+      half_extent_m: 90.0
+      resolution_m: 0.50
+      y_flip: true
+      height_mode: quantile
+      height_slices: 4
+      feature_pool: max
+      input_channels: 128
+      pre_pool_dim: 16
+      decoder_hidden_dim: 64
+      target_mode: height_sliced_multilabel
+      metric_threshold: 0.50
+      min_in_bounds_fraction: 0.995
+      loss:
+        bce_weight: 0.50
+        dice_weight: 0.50
+        max_weight: 0.50
+        warmup_epochs: 10

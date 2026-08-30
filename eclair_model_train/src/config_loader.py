@@ -27,7 +27,34 @@ def _substitute_env(obj: Any) -> Any:
     return obj
 
 
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def _load_with_extends(path: Path, stack: tuple[Path, ...]) -> Dict[str, Any]:
+    resolved = path.expanduser().resolve()
+    if resolved in stack:
+        chain = " -> ".join(str(x) for x in (*stack, resolved))
+        raise ValueError(f"Config extends cycle: {chain}")
+    raw = yaml.safe_load(resolved.read_text()) or {}
+    if not isinstance(raw, dict):
+        raise TypeError(f"Top-level YAML must be a mapping: {resolved}")
+    parent = raw.pop("extends", None)
+    if parent is None:
+        return raw
+    parent_path = Path(str(parent))
+    if not parent_path.is_absolute():
+        parent_path = resolved.parent / parent_path
+    base = _load_with_extends(parent_path, (*stack, resolved))
+    return _deep_merge(base, raw)
+
+
 def load_yaml(path: str | Path) -> Dict[str, Any]:
-    path = Path(path)
-    cfg = yaml.safe_load(path.read_text())
+    cfg = _load_with_extends(Path(path), ())
     return _substitute_env(cfg)
