@@ -19,13 +19,18 @@ set -u
 PROJECT_ROOT="/csehome/m23csa510/lidar_experiments"
 CONDA_ROOT="${PROJECT_ROOT}/env/miniconda3"
 CODE_ROOT="${PROJECT_ROOT}/cross-sensor-3d-lidar-segmentation-and-dom-adpt/eclair_model_train"
-DATA_ROOT="/scratch/m23csa510/dales/dales"
 OUT_ROOT="/scratch/m23csa510/e0_results"
 LOG_ROOT="/scratch/m23csa510/e0_logs"
 
-CONFIG_SRC="${CONFIG_SRC:?submit with --export=ALL,CONFIG_SRC=...,METHOD_TAG=...}"
-METHOD_TAG="${METHOD_TAG:?submit with --export=ALL,CONFIG_SRC=...,METHOD_TAG=...}"
-mkdir -p "${OUT_ROOT}" "${LOG_ROOT}" /scratch/m23csa510/dales/dales_cache
+CONFIG_SRC="${CONFIG_SRC:?submit with --export=ALL,DATASET_TAG=...,CONFIG_SRC=...,METHOD_TAG=...}"
+METHOD_TAG="${METHOD_TAG:?submit with --export=ALL,DATASET_TAG=...,CONFIG_SRC=...,METHOD_TAG=...}"
+DATASET_TAG="${DATASET_TAG:?submit with --export=ALL,DATASET_TAG=...,CONFIG_SRC=...,METHOD_TAG=...}"
+case "${DATASET_TAG}" in
+  dales) FROZEN_BASE="configs/m0_dales_frozen_29364.yaml" ;;
+  eclair) FROZEN_BASE="configs/m0_eclair_frozen_29306.yaml" ;;
+  *) echo "DATASET_TAG must be dales or eclair; got ${DATASET_TAG}" >&2; exit 2 ;;
+esac
+mkdir -p "${OUT_ROOT}" "${LOG_ROOT}" /scratch/m23csa510/dales/dales_cache /scratch/m23csa510/eclair_cache
 
 module purge
 module load cuda/11.8 gcc/11 gnu12/12.3.0 openblas/0.3.21
@@ -48,9 +53,11 @@ conda activate e0_env
 export PATH="${CONDA_PREFIX}/bin:${PATH}"
 hash -r
 
-export DALES_TRAIN_ROOT="${DATA_ROOT}/train"
-export DALES_TEST_ROOT="${DATA_ROOT}/test"
+export DALES_TRAIN_ROOT="/scratch/m23csa510/dales/dales/train"
+export DALES_TEST_ROOT="/scratch/m23csa510/dales/dales/test"
 export DALES_CACHE_ROOT_DROP_I="/scratch/m23csa510/dales/dales_cache"
+export ECLAIR_ROOT="/csehome/m23csa510/lidar_experiments/datasets/eclair"
+export ECLAIR_CACHE_ROOT="/scratch/m23csa510/eclair_cache"
 
 cd "${CODE_ROOT}"
 RESUME_RUN_DIR="${RESUME_RUN_DIR:-}"
@@ -62,7 +69,7 @@ if [[ -n "${RESUME_RUN_DIR}" ]]; then
     exit 2
   fi
 else
-  RUN_DIR="${OUT_ROOT}/dg_${METHOD_TAG}_${SLURM_JOB_ID}"
+  RUN_DIR="${OUT_ROOT}/dg_${DATASET_TAG}_${METHOD_TAG}_${SLURM_JOB_ID}"
   RESUME_FROM=""
 fi
 mkdir -p "${RUN_DIR}"
@@ -70,6 +77,8 @@ CONFIG_RUN="${RUN_DIR}/config_resolved.yaml"
 
 python scripts/preflight_dg_method.py \
   --config "${CONFIG_SRC}" \
+  --frozen-base "${FROZEN_BASE}" \
+  --dataset "${DATASET_TAG}" \
   --expect-method "${METHOD_TAG}" \
   --full \
   --build-model | tee "${RUN_DIR}/preflight.json"
@@ -90,6 +99,11 @@ PY
 
 git rev-parse HEAD > "${RUN_DIR}/git_commit.txt" 2>/dev/null || true
 git status --porcelain > "${RUN_DIR}/git_status.txt" 2>/dev/null || true
+git diff --binary > "${RUN_DIR}/source_worktree.patch" 2>/dev/null || true
+find train.py src scripts configs -type f \
+  \( -name '*.py' -o -name '*.yaml' -o -name '*.sh' \) -print0 \
+  | sort -z | xargs -0 sha256sum > "${RUN_DIR}/source_manifest.sha256"
+tar -czf "${RUN_DIR}/source_snapshot.tar.gz" train.py src scripts configs
 nvidia-smi
 
 MASTER_PORT=$((10000 + (SLURM_JOB_ID % 50000)))
@@ -101,4 +115,4 @@ srun --unbuffered python -m torch.distributed.run \
   --rdzv_endpoint="127.0.0.1:${MASTER_PORT}" \
   train.py --config "${CONFIG_RUN}"
 
-echo "[done] full ${METHOD_TAG}: ${RUN_DIR}"
+echo "[done] full ${DATASET_TAG} ${METHOD_TAG}: ${RUN_DIR}"

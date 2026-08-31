@@ -1,9 +1,8 @@
 extends: dg_dales_ocons10.yaml
 
-# Full-data, two-epoch integration pilot. It exercises two-GPU DDP, four
-# DataLoader workers per rank, validation, best/last checkpoints, and resume-safe
-# logging without running the final test set.
-epochs: 2
+# Full-data pilot reaches the DALES StepLR boundary at epoch 20 and then runs
+# one post-decay epoch. The Slurm wrapper interrupts after epoch 2 and resumes.
+epochs: 21
 
 run:
   name: pilot_dales_ocons10
@@ -19,6 +18,7 @@ run:
   max_train_batches_per_epoch: 0
   skip_validation: false
   skip_final_test: true
+  resume_split_epoch: 2
 
 data:
   num_workers: 4

@@ -26,6 +26,7 @@ class ALSBEVConfig:
     loss_warmup_epochs: int = 10
     metric_threshold: float = 0.50
     min_in_bounds_fraction: float = 0.995
+    min_height_edge_gap_m: float = 0.01
 
     @staticmethod
     def from_cfg(cfg: Dict[str, Any]) -> "ALSBEVConfig":
@@ -51,6 +52,7 @@ class ALSBEVConfig:
             loss_warmup_epochs=int(loss.get("warmup_epochs", 10)),
             metric_threshold=float(raw.get("metric_threshold", 0.50)),
             min_in_bounds_fraction=float(raw.get("min_in_bounds_fraction", 0.995)),
+            min_height_edge_gap_m=float(raw.get("min_height_edge_gap_m", 0.01)),
         )
         if out.enabled:
             if out.feature_level != "block8" or out.xy_frame != "bbox_centered":
@@ -68,8 +70,16 @@ class ALSBEVConfig:
                 raise ValueError("BEV-ALS channel dimensions must be positive.")
             if not math.isclose(out.bce_weight + out.dice_weight, 1.0, abs_tol=1e-6):
                 raise ValueError("BEV-ALS BCE and Dice weights must sum to 1.")
+            if out.bce_weight < 0.0 or out.dice_weight < 0.0:
+                raise ValueError("BEV-ALS BCE and Dice weights must be non-negative.")
+            if out.loss_weight < 0.0 or out.loss_warmup_epochs < 0:
+                raise ValueError("BEV-ALS loss weight and warmup epochs must be non-negative.")
+            if not (0.0 < out.metric_threshold < 1.0):
+                raise ValueError("BEV-ALS metric_threshold must be in (0,1).")
             if not (0.0 < out.min_in_bounds_fraction <= 1.0):
                 raise ValueError("BEV-ALS min_in_bounds_fraction must be in (0,1].")
+            if out.min_height_edge_gap_m < 0.0:
+                raise ValueError("BEV-ALS min_height_edge_gap_m must be non-negative.")
         return out
 
     @property

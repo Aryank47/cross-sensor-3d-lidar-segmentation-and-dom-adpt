@@ -47,6 +47,8 @@ def build_als_bev_frame(
     else:
         z_for_edges = z
     edges = np.quantile(z_for_edges, [0.25, 0.50, 0.75]).astype(np.float32)
+    if not np.isfinite(edges).all():
+        raise ValueError("BEV-ALS quantile height edges are not finite.")
     size = int(cfg.grid_size)
     return ALSBEVFrame(
         center_xy_m=np.ascontiguousarray(center, dtype=np.float32),
@@ -102,13 +104,20 @@ def build_als_bev_target(
 
     class_before = np.bincount(labels[valid_label], minlength=num_classes)[:num_classes].astype(np.int64)
     class_in_bounds = np.bincount(labels[valid], minlength=num_classes)[:num_classes].astype(np.int64)
-    class_retention = np.ones(num_classes, dtype=np.float32)
+    class_retention = np.full(num_classes, np.nan, dtype=np.float32)
     present = class_before > 0
     class_retention[present] = class_in_bounds[present] / class_before[present]
     positives = target.sum(axis=(2, 3), dtype=np.int64)
     multi = target.sum(axis=1) > 1
     multi_count = int(multi.sum())
     occupied_count = int(occupied.sum())
+    classes_per_xy_column = target.astype(bool).any(axis=0).sum(axis=0)
+    occupied_xy_columns = occupied.astype(bool).any(axis=0)
+    multi_class_xy_columns = int((classes_per_xy_column > 1).sum())
+    occupied_xy_count = int(occupied_xy_columns.sum())
+    edge_gaps = np.diff(frame.height_edges_m.astype(np.float64))
+    min_edge_gap = float(edge_gaps.min()) if edge_gaps.size else float("inf")
+    degenerate_height_edges = int(min_edge_gap < float(cfg.min_height_edge_gap_m))
     diagnostics: Dict[str, np.ndarray | float | int] = {
         "input_valid_voxels": int(valid_label.sum()),
         "in_bounds_valid_voxels": int(valid.sum()),
@@ -117,11 +126,15 @@ def build_als_bev_target(
         "empty_slices": int((occupied.sum(axis=(1, 2)) == 0).sum()),
         "multi_label_cells": multi_count,
         "multi_label_fraction": float(multi_count) / max(1, occupied_count),
+        "multi_class_xy_columns": multi_class_xy_columns,
+        "multi_class_xy_column_fraction": float(multi_class_xy_columns) / max(1, occupied_xy_count),
         "class_before": class_before,
         "class_in_bounds": class_in_bounds,
         "class_retention": class_retention,
         "positive_cells_per_slice_class": positives,
         "observed_z_min_m": float(xyz[:, 2].min()),
         "observed_z_max_m": float(xyz[:, 2].max()),
+        "height_edge_min_gap_m": min_edge_gap,
+        "degenerate_height_edges": degenerate_height_edges,
     }
     return ALSBEVTarget(target_u8=target, occupied_u8=occupied, frame=frame, diagnostics=diagnostics)

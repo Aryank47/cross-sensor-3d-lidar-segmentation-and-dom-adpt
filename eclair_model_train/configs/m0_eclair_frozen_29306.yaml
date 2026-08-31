@@ -1,0 +1,27 @@
+# Frozen non-Mix3D ECLAIR discovery recipe derived from canonical run 29306.
+# Training-time validation intentionally remains 50 m / 50 m. Cross-domain
+# evaluation remains a separate 120 m protocol.
+extends: m1_eclair_mix3d.yaml
+
+method:
+  name: baseline
+
+run:
+  name: m0_eclair_frozen_29306
+  out_dir: /scratch/m23csa510/e0_results/m0_eclair_frozen_29306
+
+data:
+  require_cache: true
+  require_cache_metadata: true
+  mix3d:
+    enabled: false
+
+ocons:
+  enabled: false
+
+model:
+  aux_heads:
+    bev:
+      enabled: false
+    bev_als:
+      enabled: false

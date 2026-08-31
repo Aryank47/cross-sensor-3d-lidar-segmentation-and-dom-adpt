@@ -1,12 +1,12 @@
-extends: dg_dales_bev_als_h4_ml.yaml
+extends: dg_eclair_bev_als_h4_ml.yaml
 
-# Full-data pilot reaches the DALES StepLR boundary at epoch 20 and then runs
-# one post-decay epoch. The Slurm wrapper interrupts after epoch 2 and resumes.
+# Reaches the ECLAIR StepLR boundary at epoch 10 and runs one post-decay epoch.
+# The Slurm wrapper interrupts after epoch 2 and resumes from last.pt.
 epochs: 21
 
 run:
-  name: pilot_dales_bev_als_h4_ml
-  out_dir: /scratch/m23csa510/e0_results/pilot_dales_bev_als_h4_ml
+  name: pilot_eclair_bev_als_h4_ml
+  out_dir: /scratch/m23csa510/e0_results/pilot_eclair_bev_als_h4_ml
   log_every_steps: 25
   eval_every_epochs: 2
   save_every_epochs: 1

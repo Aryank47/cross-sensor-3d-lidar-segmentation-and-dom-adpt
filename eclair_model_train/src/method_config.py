@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Dict
 
+from .dg_dataset import get_dg_dataset_contract
+
 
 METHOD_SCHEMA_VERSION = 1
 
@@ -27,6 +29,12 @@ def _flag(cfg: Dict[str, Any], *path: str) -> bool:
             return False
         cur = cur.get(key, {})
     return bool(cur)
+
+
+def _require_keys(mapping: Dict[str, Any], keys: set[str], context: str) -> None:
+    missing = sorted(keys.difference(mapping))
+    if missing:
+        raise ValueError(f"{context} is missing required explicit fields: {missing}")
 
 
 def validate_method_contract(cfg: Dict[str, Any]) -> MethodContract:
@@ -75,6 +83,22 @@ def validate_method_contract(cfg: Dict[str, Any]) -> MethodContract:
 
     if bev_als:
         bev = (((cfg.get("model", {}) or {}).get("aux_heads", {}) or {}).get("bev_als", {}) or {})
+        _require_keys(
+            bev,
+            {
+                "enabled", "feature_level", "xy_frame", "half_extent_m", "resolution_m",
+                "y_flip", "height_mode", "height_slices", "feature_pool", "input_channels",
+                "pre_pool_dim", "decoder_hidden_dim", "target_mode", "metric_threshold",
+                "min_in_bounds_fraction", "min_height_edge_gap_m", "loss",
+            },
+            "model.aux_heads.bev_als",
+        )
+        loss = bev.get("loss", {}) or {}
+        _require_keys(
+            loss,
+            {"bce_weight", "dice_weight", "max_weight", "warmup_epochs"},
+            "model.aux_heads.bev_als.loss",
+        )
         required = {
             "feature_level": "block8",
             "xy_frame": "bbox_centered",
@@ -84,11 +108,48 @@ def validate_method_contract(cfg: Dict[str, Any]) -> MethodContract:
             "target_mode": "height_sliced_multilabel",
         }
         for key, value in required.items():
-            got = bev.get(key, value)
+            got = bev[key]
             if got != value:
                 raise ValueError(f"BEV-ALS v1 requires {key}={value!r}; got {got!r}")
         if "warmup_only_bev" in bev or "bev_selected_idx" in bev:
             raise ValueError("Legacy warmup_only_bev/bev_selected_idx fields are invalid for BEV-ALS.")
+
+    if ocons:
+        raw = cfg.get("ocons", {}) or {}
+        _require_keys(
+            raw,
+            {
+                "enabled", "perturbation", "application_probability", "mask_fraction",
+                "protected_class_ids", "protected_min_voxels", "protected_min_fraction",
+                "seed_offset", "consistency",
+            },
+            "ocons",
+        )
+        _require_keys(
+            raw.get("consistency", {}) or {},
+            {"max_weight", "warmup_epochs", "temperature", "macro_min_voxels"},
+            "ocons.consistency",
+        )
+
+    if ocons or bev_als:
+        data = cfg.get("data", {}) or {}
+        dataset_contract = get_dg_dataset_contract(str(data.get("dataset", "")))
+        label_space = data.get("label_space", {}) or {}
+        num_classes = int(label_space.get("num_classes", -1))
+        out_channels = int((cfg.get("model", {}) or {}).get("out_channels", -1))
+        if num_classes != dataset_contract.num_classes or out_channels != num_classes:
+            raise ValueError(
+                "DG method class dimensions do not match the dataset contract: "
+                f"dataset={dataset_contract.name} expected={dataset_contract.num_classes} "
+                f"label_space={num_classes} model.out_channels={out_channels}."
+            )
+        if ocons:
+            protected = tuple(int(x) for x in (cfg.get("ocons", {}) or {}).get("protected_class_ids", []))
+            if protected != dataset_contract.utility_class_ids:
+                raise ValueError(
+                    f"O-CONS protected_class_ids={protected} do not match "
+                    f"{dataset_contract.name} utility IDs={dataset_contract.utility_class_ids}."
+                )
 
     return MethodContract(
         name=declared,

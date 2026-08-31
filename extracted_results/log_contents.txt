@@ -1,0 +1,1560 @@
+
+
+############################################################################################################################################
+RESULT FOLDER: c1e_eclair_to_dales_test_37242
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/c1e_eclair_to_dales_test_37242
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            c1e_eclair_to_dales_test_37242
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/c1e_eclair_to_dales_test_37242/eval_cross_common.log
+TIMESTAMP:      2026-06-14 23:13:27 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-06-14 23:13:27
+SIZE:           8903 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-06-14 23:10:00,676][INFO] [start] eval_cross_common
+[2026-06-14 23:10:00,677][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/c1_e_eclair_alpha_rare_37237/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/c1_e_eclair_alpha_rare_37237/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json",
+  "source_domain": "eclair",
+  "target_domain": "dales",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_id.yaml",
+  "source_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_manifest": "/scratch/m23csa510/dales/manifests/test.txt",
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_test_37242",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-06-14 23:10:01,490][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/c1_e_eclair_alpha_rare_37237/checkpoints/best.pt in_channels=10 out_channels=11 D=3 device=cuda
+[2026-06-14 23:10:01,504][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-06-14 23:10:01,504][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-06-14 23:10:01,504][INFO] [mapcheck] source_train_to_common=[0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7]
+[2026-06-14 23:10:01,519][INFO] [target] DALES split=test n_tiles=11 root=/scratch/m23csa510/dales/dales/test manifest=/scratch/m23csa510/dales/manifests/test.txt cache_kind=raw
+[2026-06-14 23:10:01,534][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_test_37242/eval_manifest.json
+[2026-06-14 23:10:01,534][INFO] [train_space] disabled because source_domain != target_domain.
+[2026-06-14 23:10:07,481][INFO] [tile] 1/11 /scratch/m23csa510/dales/dales/test/5080_54400.las
+[2026-06-14 23:10:22,240][INFO] [tile_done] 1/11 points=12219779 eval_points_common=12181083 running_common_miou=0.545320 running_common_macro_f1=0.649601
+[2026-06-14 23:10:22,240][INFO] [hist_common] gt_common=[0, 5268499, 3773996, 2961003, 953, 5301, 41644, 129687]
+[2026-06-14 23:10:22,241][INFO] [hist_common] pred_common=[337609, 5362272, 3408100, 2983767, 4583, 1979, 51284, 31489]
+[2026-06-14 23:10:22,241][INFO] [cuda] alloc=0.057GB reserved=1.420GB
+[2026-06-14 23:10:28,211][INFO] [tile] 2/11 /scratch/m23csa510/dales/dales/test/5080_54470.las
+[2026-06-14 23:10:38,278][INFO] [tile_done] 2/11 points=11862897 eval_points_common=11802314 running_common_miou=0.647756 running_common_macro_f1=0.750491
+[2026-06-14 23:10:38,279][INFO] [hist_common] gt_common=[0, 11469749, 6772613, 5249883, 34584, 16994, 151468, 288106]
+[2026-06-14 23:10:38,279][INFO] [hist_common] pred_common=[617985, 11742833, 6171278, 5190074, 43930, 7169, 142928, 67200]
+[2026-06-14 23:10:38,279][INFO] [cuda] alloc=0.057GB reserved=1.321GB
+[2026-06-14 23:10:44,073][INFO] [tile] 3/11 /scratch/m23csa510/dales/dales/test/5100_54440.las
+[2026-06-14 23:10:53,623][INFO] [tile_done] 3/11 points=11680495 eval_points_common=11423047 running_common_miou=0.631339 running_common_macro_f1=0.730852
+[2026-06-14 23:10:53,624][INFO] [hist_common] gt_common=[0, 17115708, 9585004, 8054405, 50803, 33940, 186835, 379749]
+[2026-06-14 23:10:53,624][INFO] [hist_common] pred_common=[783648, 17737147, 8756324, 7786836, 62830, 10662, 189553, 79444]
+[2026-06-14 23:10:53,624][INFO] [cuda] alloc=0.057GB reserved=1.023GB
+[2026-06-14 23:10:59,155][INFO] [tile] 4/11 /scratch/m23csa510/dales/dales/test/5100_54490.las
+[2026-06-14 23:11:10,149][INFO] [tile_done] 4/11 points=12045879 eval_points_common=12014668 running_common_miou=0.630768 running_common_macro_f1=0.730499
+[2026-06-14 23:11:10,150][INFO] [hist_common] gt_common=[0, 23859795, 12708511, 9951190, 64508, 45159, 275939, 516010]
+[2026-06-14 23:11:10,150][INFO] [hist_common] pred_common=[1041055, 24635345, 11645328, 9641630, 78976, 15507, 262482, 100789]
+[2026-06-14 23:11:10,150][INFO] [cuda] alloc=0.057GB reserved=1.776GB
+[2026-06-14 23:11:18,091][INFO] [tile] 5/11 /scratch/m23csa510/dales/dales/test/5120_54445.las
+[2026-06-14 23:11:32,837][INFO] [tile_done] 5/11 points=13886734 eval_points_common=13865807 running_common_miou=0.637250 running_common_macro_f1=0.734007
+[2026-06-14 23:11:32,837][INFO] [hist_common] gt_common=[0, 30144645, 18389920, 11674082, 100185, 50742, 325969, 601376]
+[2026-06-14 23:11:32,837][INFO] [hist_common] pred_common=[1294447, 31291385, 16765193, 11360993, 117825, 18408, 326465, 112203]
+[2026-06-14 23:11:32,838][INFO] [cuda] alloc=0.057GB reserved=1.231GB
+[2026-06-14 23:11:40,617][INFO] [tile] 6/11 /scratch/m23csa510/dales/dales/test/5135_54430.las
+[2026-06-14 23:11:52,688][INFO] [tile_done] 6/11 points=12448577 eval_points_common=12390172 running_common_miou=0.636819 running_common_macro_f1=0.734421
+[2026-06-14 23:11:52,689][INFO] [hist_common] gt_common=[0, 36402914, 22073006, 13903695, 100933, 54027, 397236, 745280]
+[2026-06-14 23:11:52,689][INFO] [hist_common] pred_common=[1526857, 37647354, 20260797, 13555964, 122640, 20182, 405272, 138025]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: c1e_eclair_to_eclair_test_37241
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/c1e_eclair_to_eclair_test_37241
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            c1e_eclair_to_eclair_test_37241
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/c1e_eclair_to_eclair_test_37241/eval_cross_common.log
+TIMESTAMP:      2026-06-14 23:43:23 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-06-14 23:43:23
+SIZE:           113803 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-06-14 23:09:16,014][INFO] [start] eval_cross_common
+[2026-06-14 23:09:16,014][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/c1_e_eclair_alpha_rare_37237/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/c1_e_eclair_alpha_rare_37237/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/c1_e_eclair_alpha_rare_37237/config_resolved.json",
+  "source_domain": "eclair",
+  "target_domain": "eclair",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_id.yaml",
+  "source_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_manifest": null,
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_test_37241",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-06-14 23:09:16,697][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/c1_e_eclair_alpha_rare_37237/checkpoints/best.pt in_channels=10 out_channels=11 D=3 device=cuda
+[2026-06-14 23:09:16,711][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-06-14 23:09:16,712][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-06-14 23:09:16,712][INFO] [mapcheck] source_train_to_common=[0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7]
+[2026-06-14 23:09:16,716][INFO] [target] ECLAIR split=test n_tiles=125 allowed_review_categories=['approved']
+[2026-06-14 23:09:16,750][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_test_37241/eval_manifest.json
+[2026-06-14 23:09:16,750][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-06-14 23:09:16,750][INFO] [train_space] enabled because source_domain == target_domain. num_classes=11, ignore_index=-100, class_names=['class_0', 'class_1', 'class_2', 'class_3', 'class_4', 'class_5', 'class_6', 'class_7', 'class_8', 'class_9', 'class_10']
+[2026-06-14 23:09:16,988][INFO] [tile] 1/125 pointcloud_10.laz
+[2026-06-14 23:10:01,311][INFO] [tile_done] 1/125 points=710166 eval_points_common=710144 running_common_miou=0.327700 running_common_macro_f1=0.359506
+[2026-06-14 23:10:01,312][INFO] [hist_common] gt_common=[0, 165169, 544970, 0, 0, 5, 0, 0]
+[2026-06-14 23:10:01,312][INFO] [hist_common] pred_common=[262, 173836, 535847, 0, 2, 2, 195, 0]
+[2026-06-14 23:10:01,312][INFO] [train_space] running_train_miou=0.251247 running_train_macro_f1=0.289291
+[2026-06-14 23:10:01,312][INFO] [hist_train] gt_train=[12, 165169, 544970, 0, 10, 0, 0, 5, 0, 0, 0]
+[2026-06-14 23:10:01,312][INFO] [hist_train] pred_train=[272, 173836, 535853, 0, 5, 0, 2, 3, 0, 195, 0]
+[2026-06-14 23:10:01,313][INFO] [cuda] alloc=0.057GB reserved=0.730GB
+[2026-06-14 23:10:01,455][INFO] [tile] 2/125 pointcloud_100.laz
+[2026-06-14 23:10:37,101][INFO] [tile_done] 2/125 points=419583 eval_points_common=419579 running_common_miou=0.327870 running_common_macro_f1=0.359573
+[2026-06-14 23:10:37,102][INFO] [hist_common] gt_common=[0, 209512, 920206, 0, 0, 5, 0, 0]
+[2026-06-14 23:10:37,102][INFO] [hist_common] pred_common=[284, 219993, 909241, 0, 2, 2, 201, 0]
+[2026-06-14 23:10:37,102][INFO] [train_space] running_train_miou=0.260210 running_train_macro_f1=0.296469
+[2026-06-14 23:10:37,102][INFO] [hist_train] gt_train=[12, 209512, 920206, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-06-14 23:10:37,102][INFO] [hist_train] pred_train=[293, 219993, 909247, 0, 10, 0, 2, 3, 0, 201, 0]
+[2026-06-14 23:10:37,103][INFO] [cuda] alloc=0.057GB reserved=0.854GB
+[2026-06-14 23:10:37,164][INFO] [tile] 3/125 pointcloud_1009.laz
+[2026-06-14 23:10:37,546][INFO] [tile_done] 3/125 points=6021 eval_points_common=6021 running_common_miou=0.327617 running_common_macro_f1=0.359440
+[2026-06-14 23:10:37,547][INFO] [hist_common] gt_common=[0, 213935, 921804, 0, 0, 5, 0, 0]
+[2026-06-14 23:10:37,547][INFO] [hist_common] pred_common=[432, 224842, 909937, 0, 43, 2, 488, 0]
+[2026-06-14 23:10:37,547][INFO] [train_space] running_train_miou=0.259020 running_train_macro_f1=0.294436
+[2026-06-14 23:10:37,547][INFO] [hist_train] gt_train=[12, 213935, 921804, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-06-14 23:10:37,547][INFO] [hist_train] pred_train=[441, 224842, 909943, 0, 10, 41, 2, 3, 0, 488, 0]
+[2026-06-14 23:10:37,547][INFO] [cuda] alloc=0.057GB reserved=0.090GB
+[2026-06-14 23:10:37,600][INFO] [tile] 4/125 pointcloud_1021.laz
+[2026-06-14 23:10:40,228][INFO] [tile_done] 4/125 points=59011 eval_points_common=59011 running_common_miou=0.330104 running_common_macro_f1=0.360785
+[2026-06-14 23:10:40,229][INFO] [hist_common] gt_common=[0, 272945, 921805, 0, 0, 5, 0, 0]
+[2026-06-14 23:10:40,229][INFO] [hist_common] pred_common=[432, 283852, 909937, 0, 43, 2, 489, 0]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: dales_to_dales_pub_m1_s1_d2d_w120_test_39100
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_dales_pub_m1_s1_d2d_w120_test_39100
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            dales_to_dales_pub_m1_s1_d2d_w120_test_39100
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_dales_pub_m1_s1_d2d_w120_test_39100/eval_cross_common.log
+TIMESTAMP:      2026-08-16 20:47:51 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-08-16 20:47:51
+SIZE:           13693 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-08-16 20:41:14,638][INFO] [start] eval_cross_common
+[2026-08-16 20:41:14,638][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/m1_dales_mix3d_38163/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/m1_dales_mix3d_38163/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json",
+  "source_domain": "dales",
+  "target_domain": "dales",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_dales.yaml",
+  "source_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_manifest": "/scratch/m23csa510/dales/manifests/test.txt",
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_dales_pub_m1_s1_d2d_w120_test_39100",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-08-16 20:41:15,412][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/m1_dales_mix3d_38163/checkpoints/best.pt in_channels=10 out_channels=8 D=3 device=cuda
+[2026-08-16 20:41:15,419][INFO] [mapcheck] built DALES native->train LUT from source config.
+[2026-08-16 20:41:15,420][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-08-16 20:41:15,420][INFO] [mapcheck] source_train_to_common=[1, 2, 7, 7, 3, 5, 4, 6]
+[2026-08-16 20:41:15,426][INFO] [target] DALES split=test n_tiles=11 root=/scratch/m23csa510/dales/dales/test manifest=/scratch/m23csa510/dales/manifests/test.txt cache_kind=raw
+[2026-08-16 20:41:15,466][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_dales_pub_m1_s1_d2d_w120_test_39100/eval_manifest.json
+[2026-08-16 20:41:15,467][INFO] [mapcheck] built DALES native->train LUT from source config.
+[2026-08-16 20:41:15,467][INFO] [train_space] enabled because source_domain == target_domain. num_classes=8, ignore_index=-100, class_names=['ground', 'vegetation', 'cars', 'trucks', 'buildings', 'poles', 'power_lines', 'fences']
+[2026-08-16 20:41:18,377][INFO] [tile] 1/11 /scratch/m23csa510/dales/dales/test/5080_54400.las
+[2026-08-16 20:41:51,337][INFO] [tile_done] 1/11 points=12219779 eval_points_common=12181083 running_common_miou=0.838916 running_common_macro_f1=0.906927
+[2026-08-16 20:41:51,337][INFO] [hist_common] gt_common=[0, 5268499, 3773996, 2961003, 953, 5301, 41644, 129687]
+[2026-08-16 20:41:51,337][INFO] [hist_common] pred_common=[0, 5369332, 3728964, 2897663, 873, 4960, 46911, 132380]
+[2026-08-16 20:41:51,338][INFO] [train_space] running_train_miou=0.740838 running_train_macro_f1=0.816115
+[2026-08-16 20:41:51,338][INFO] [hist_train] gt_train=[5268499, 3773996, 111020, 18667, 2961003, 5301, 953, 41644]
+[2026-08-16 20:41:51,338][INFO] [hist_train] pred_train=[5369332, 3728964, 120268, 12112, 2897663, 4960, 873, 46911]
+[2026-08-16 20:41:51,338][INFO] [cuda] alloc=0.058GB reserved=1.678GB
+[2026-08-16 20:41:53,312][INFO] [tile] 2/11 /scratch/m23csa510/dales/dales/test/5080_54470.las
+[2026-08-16 20:42:23,278][INFO] [tile_done] 2/11 points=11862897 eval_points_common=11802314 running_common_miou=0.882904 running_common_macro_f1=0.935100
+[2026-08-16 20:42:23,280][INFO] [hist_common] gt_common=[0, 11469749, 6772613, 5249883, 34584, 16994, 151468, 288106]
+[2026-08-16 20:42:23,280][INFO] [hist_common] pred_common=[0, 11703003, 6649220, 5147580, 33778, 17157, 141361, 291298]
+[2026-08-16 20:42:23,280][INFO] [train_space] running_train_miou=0.790606 running_train_macro_f1=0.856332
+[2026-08-16 20:42:23,281][INFO] [hist_train] gt_train=[11469749, 6772613, 257659, 30447, 5249883, 16994, 34584, 151468]
+[2026-08-16 20:42:23,281][INFO] [hist_train] pred_train=[11703003, 6649220, 267423, 23875, 5147580, 17157, 33778, 141361]
+[2026-08-16 20:42:23,281][INFO] [cuda] alloc=0.058GB reserved=1.640GB
+[2026-08-16 20:42:25,198][INFO] [tile] 3/11 /scratch/m23csa510/dales/dales/test/5100_54440.las
+[2026-08-16 20:42:54,572][INFO] [tile_done] 3/11 points=11680495 eval_points_common=11423047 running_common_miou=0.858086 running_common_macro_f1=0.920322
+[2026-08-16 20:42:54,572][INFO] [hist_common] gt_common=[0, 17115708, 9585004, 8054405, 50803, 33940, 186835, 379749]
+[2026-08-16 20:42:54,572][INFO] [hist_common] pred_common=[0, 17740191, 9404294, 7629644, 49370, 30317, 176989, 375639]
+[2026-08-16 20:42:54,573][INFO] [train_space] running_train_miou=0.796219 running_train_macro_f1=0.875361
+[2026-08-16 20:42:54,573][INFO] [hist_train] gt_train=[17115708, 9585004, 284906, 94843, 8054405, 33940, 50803, 186835]
+[2026-08-16 20:42:54,573][INFO] [hist_train] pred_train=[17740191, 9404294, 306909, 68730, 7629644, 30317, 49370, 176989]
+[2026-08-16 20:42:54,573][INFO] [cuda] alloc=0.058GB reserved=1.286GB
+[2026-08-16 20:42:56,559][INFO] [tile] 4/11 /scratch/m23csa510/dales/dales/test/5100_54490.las
+[2026-08-16 20:43:27,350][INFO] [tile_done] 4/11 points=12045879 eval_points_common=12014668 running_common_miou=0.854621 running_common_macro_f1=0.918144
+[2026-08-16 20:43:27,350][INFO] [hist_common] gt_common=[0, 23859795, 12708511, 9951190, 64508, 45159, 275939, 516010]
+[2026-08-16 20:43:27,351][INFO] [hist_common] pred_common=[0, 24612668, 12468909, 9482714, 61221, 42663, 247171, 505766]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: dales_to_dales_pub_repro_m0_d2d_w120_test_39096
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_dales_pub_repro_m0_d2d_w120_test_39096
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            dales_to_dales_pub_repro_m0_d2d_w120_test_39096
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_dales_pub_repro_m0_d2d_w120_test_39096/eval_cross_common.log
+TIMESTAMP:      2026-08-16 20:33:23 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-08-16 20:33:23
+SIZE:           13723 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-08-16 20:26:33,114][INFO] [start] eval_cross_common
+[2026-08-16 20:26:33,114][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/e0_dales_train_29364/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json",
+  "source_domain": "dales",
+  "target_domain": "dales",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_dales.yaml",
+  "source_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_manifest": "/scratch/m23csa510/dales/manifests/test.txt",
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_dales_pub_repro_m0_d2d_w120_test_39096",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-08-16 20:26:34,723][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/e0_dales_train_29364/checkpoints/best.pt in_channels=10 out_channels=8 D=3 device=cuda
+[2026-08-16 20:26:34,735][INFO] [mapcheck] built DALES native->train LUT from source config.
+[2026-08-16 20:26:34,735][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-08-16 20:26:34,735][INFO] [mapcheck] source_train_to_common=[1, 2, 7, 7, 3, 5, 4, 6]
+[2026-08-16 20:26:34,740][INFO] [target] DALES split=test n_tiles=11 root=/scratch/m23csa510/dales/dales/test manifest=/scratch/m23csa510/dales/manifests/test.txt cache_kind=raw
+[2026-08-16 20:26:34,761][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_dales_pub_repro_m0_d2d_w120_test_39096/eval_manifest.json
+[2026-08-16 20:26:34,762][INFO] [mapcheck] built DALES native->train LUT from source config.
+[2026-08-16 20:26:34,762][INFO] [train_space] enabled because source_domain == target_domain. num_classes=8, ignore_index=-100, class_names=['ground', 'vegetation', 'cars', 'trucks', 'buildings', 'poles', 'power_lines', 'fences']
+[2026-08-16 20:26:37,586][INFO] [tile] 1/11 /scratch/m23csa510/dales/dales/test/5080_54400.las
+[2026-08-16 20:27:11,161][INFO] [tile_done] 1/11 points=12219779 eval_points_common=12181083 running_common_miou=0.792805 running_common_macro_f1=0.876700
+[2026-08-16 20:27:11,162][INFO] [hist_common] gt_common=[0, 5268499, 3773996, 2961003, 953, 5301, 41644, 129687]
+[2026-08-16 20:27:11,162][INFO] [hist_common] pred_common=[0, 5328335, 3762427, 2908238, 957, 5303, 41324, 134499]
+[2026-08-16 20:27:11,163][INFO] [train_space] running_train_miou=0.700855 running_train_macro_f1=0.785729
+[2026-08-16 20:27:11,163][INFO] [hist_train] gt_train=[5268499, 3773996, 111020, 18667, 2961003, 5301, 953, 41644]
+[2026-08-16 20:27:11,163][INFO] [hist_train] pred_train=[5328335, 3762427, 117331, 17168, 2908238, 5303, 957, 41324]
+[2026-08-16 20:27:11,164][INFO] [cuda] alloc=0.058GB reserved=1.678GB
+[2026-08-16 20:27:13,604][INFO] [tile] 2/11 /scratch/m23csa510/dales/dales/test/5080_54470.las
+[2026-08-16 20:27:43,928][INFO] [tile_done] 2/11 points=11862897 eval_points_common=11802314 running_common_miou=0.851266 running_common_macro_f1=0.915935
+[2026-08-16 20:27:43,930][INFO] [hist_common] gt_common=[0, 11469749, 6772613, 5249883, 34584, 16994, 151468, 288106]
+[2026-08-16 20:27:43,930][INFO] [hist_common] pred_common=[0, 11610004, 6736206, 5171624, 33243, 18095, 129090, 285135]
+[2026-08-16 20:27:43,930][INFO] [train_space] running_train_miou=0.759525 running_train_macro_f1=0.831924
+[2026-08-16 20:27:43,930][INFO] [hist_train] gt_train=[11469749, 6772613, 257659, 30447, 5249883, 16994, 34584, 151468]
+[2026-08-16 20:27:43,930][INFO] [hist_train] pred_train=[11610004, 6736206, 258438, 26697, 5171624, 18095, 33243, 129090]
+[2026-08-16 20:27:43,930][INFO] [cuda] alloc=0.058GB reserved=1.640GB
+[2026-08-16 20:27:46,362][INFO] [tile] 3/11 /scratch/m23csa510/dales/dales/test/5100_54440.las
+[2026-08-16 20:28:16,412][INFO] [tile_done] 3/11 points=11680495 eval_points_common=11423047 running_common_miou=0.816962 running_common_macro_f1=0.894329
+[2026-08-16 20:28:16,413][INFO] [hist_common] gt_common=[0, 17115708, 9585004, 8054405, 50803, 33940, 186835, 379749]
+[2026-08-16 20:28:16,413][INFO] [hist_common] pred_common=[0, 17714655, 9567908, 7514675, 48505, 29690, 161675, 369336]
+[2026-08-16 20:28:16,414][INFO] [train_space] running_train_miou=0.752280 running_train_macro_f1=0.841869
+[2026-08-16 20:28:16,414][INFO] [hist_train] gt_train=[17115708, 9585004, 284906, 94843, 8054405, 33940, 50803, 186835]
+[2026-08-16 20:28:16,414][INFO] [hist_train] pred_train=[17714655, 9567908, 297435, 71901, 7514675, 29690, 48505, 161675]
+[2026-08-16 20:28:16,414][INFO] [cuda] alloc=0.058GB reserved=1.286GB
+[2026-08-16 20:28:19,376][INFO] [tile] 4/11 /scratch/m23csa510/dales/dales/test/5100_54490.las
+[2026-08-16 20:28:50,483][INFO] [tile_done] 4/11 points=12045879 eval_points_common=12014668 running_common_miou=0.816012 running_common_macro_f1=0.893553
+[2026-08-16 20:28:50,484][INFO] [hist_common] gt_common=[0, 23859795, 12708511, 9951190, 64508, 45159, 275939, 516010]
+[2026-08-16 20:28:50,484][INFO] [hist_common] pred_common=[0, 24550819, 12676788, 9373318, 60316, 42487, 224815, 492569]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: dales_to_dales_test_37184
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_dales_test_37184
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            dales_to_dales_test_37184
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_dales_test_37184/eval_cross_common.log
+TIMESTAMP:      2026-06-13 12:38:16 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-06-13 12:38:16
+SIZE:           13503 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-06-13 12:31:32,450][INFO] [start] eval_cross_common
+[2026-06-13 12:31:32,450][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/e0_dales_train_29364/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json",
+  "source_domain": "dales",
+  "target_domain": "dales",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_dales.yaml",
+  "source_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_manifest": "/scratch/m23csa510/dales/manifests/test.txt",
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_dales_test_37184",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-06-13 12:31:32,986][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/e0_dales_train_29364/checkpoints/best.pt in_channels=10 out_channels=8 D=3 device=cuda
+[2026-06-13 12:31:32,999][INFO] [mapcheck] built DALES native->train LUT from source config.
+[2026-06-13 12:31:33,000][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-06-13 12:31:33,000][INFO] [mapcheck] source_train_to_common=[1, 2, 7, 7, 3, 5, 4, 6]
+[2026-06-13 12:31:33,003][INFO] [target] DALES split=test n_tiles=11 root=/scratch/m23csa510/dales/dales/test manifest=/scratch/m23csa510/dales/manifests/test.txt cache_kind=raw
+[2026-06-13 12:31:33,006][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_dales_test_37184/eval_manifest.json
+[2026-06-13 12:31:33,007][INFO] [mapcheck] built DALES native->train LUT from source config.
+[2026-06-13 12:31:33,007][INFO] [train_space] enabled because source_domain == target_domain. num_classes=8, ignore_index=-100, class_names=['ground', 'vegetation', 'cars', 'trucks', 'buildings', 'poles', 'power_lines', 'fences']
+[2026-06-13 12:31:36,071][INFO] [tile] 1/11 /scratch/m23csa510/dales/dales/test/5080_54400.las
+[2026-06-13 12:32:09,737][INFO] [tile_done] 1/11 points=12219779 eval_points_common=12181083 running_common_miou=0.792805 running_common_macro_f1=0.876700
+[2026-06-13 12:32:09,738][INFO] [hist_common] gt_common=[0, 5268499, 3773996, 2961003, 953, 5301, 41644, 129687]
+[2026-06-13 12:32:09,738][INFO] [hist_common] pred_common=[0, 5328335, 3762427, 2908238, 957, 5303, 41324, 134499]
+[2026-06-13 12:32:09,738][INFO] [train_space] running_train_miou=0.700855 running_train_macro_f1=0.785729
+[2026-06-13 12:32:09,738][INFO] [hist_train] gt_train=[5268499, 3773996, 111020, 18667, 2961003, 5301, 953, 41644]
+[2026-06-13 12:32:09,738][INFO] [hist_train] pred_train=[5328335, 3762427, 117331, 17168, 2908238, 5303, 957, 41324]
+[2026-06-13 12:32:09,738][INFO] [cuda] alloc=0.058GB reserved=1.678GB
+[2026-06-13 12:32:12,242][INFO] [tile] 2/11 /scratch/m23csa510/dales/dales/test/5080_54470.las
+[2026-06-13 12:32:43,079][INFO] [tile_done] 2/11 points=11862897 eval_points_common=11802314 running_common_miou=0.851266 running_common_macro_f1=0.915935
+[2026-06-13 12:32:43,080][INFO] [hist_common] gt_common=[0, 11469749, 6772613, 5249883, 34584, 16994, 151468, 288106]
+[2026-06-13 12:32:43,080][INFO] [hist_common] pred_common=[0, 11610004, 6736206, 5171624, 33243, 18095, 129090, 285135]
+[2026-06-13 12:32:43,080][INFO] [train_space] running_train_miou=0.759525 running_train_macro_f1=0.831924
+[2026-06-13 12:32:43,080][INFO] [hist_train] gt_train=[11469749, 6772613, 257659, 30447, 5249883, 16994, 34584, 151468]
+[2026-06-13 12:32:43,080][INFO] [hist_train] pred_train=[11610004, 6736206, 258438, 26697, 5171624, 18095, 33243, 129090]
+[2026-06-13 12:32:43,080][INFO] [cuda] alloc=0.058GB reserved=1.640GB
+[2026-06-13 12:32:45,316][INFO] [tile] 3/11 /scratch/m23csa510/dales/dales/test/5100_54440.las
+[2026-06-13 12:33:15,636][INFO] [tile_done] 3/11 points=11680495 eval_points_common=11423047 running_common_miou=0.816962 running_common_macro_f1=0.894329
+[2026-06-13 12:33:15,637][INFO] [hist_common] gt_common=[0, 17115708, 9585004, 8054405, 50803, 33940, 186835, 379749]
+[2026-06-13 12:33:15,637][INFO] [hist_common] pred_common=[0, 17714655, 9567908, 7514675, 48505, 29690, 161675, 369336]
+[2026-06-13 12:33:15,638][INFO] [train_space] running_train_miou=0.752280 running_train_macro_f1=0.841869
+[2026-06-13 12:33:15,638][INFO] [hist_train] gt_train=[17115708, 9585004, 284906, 94843, 8054405, 33940, 50803, 186835]
+[2026-06-13 12:33:15,638][INFO] [hist_train] pred_train=[17714655, 9567908, 297435, 71901, 7514675, 29690, 48505, 161675]
+[2026-06-13 12:33:15,638][INFO] [cuda] alloc=0.058GB reserved=1.286GB
+[2026-06-13 12:33:18,057][INFO] [tile] 4/11 /scratch/m23csa510/dales/dales/test/5100_54490.las
+[2026-06-13 12:33:49,641][INFO] [tile_done] 4/11 points=12045879 eval_points_common=12014668 running_common_miou=0.816012 running_common_macro_f1=0.893553
+[2026-06-13 12:33:49,642][INFO] [hist_common] gt_common=[0, 23859795, 12708511, 9951190, 64508, 45159, 275939, 516010]
+[2026-06-13 12:33:49,642][INFO] [hist_common] pred_common=[0, 24550819, 12676788, 9373318, 60316, 42487, 224815, 492569]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: dales_to_eclair_all_37188
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_all_37188
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            dales_to_eclair_all_37188
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_all_37188/eval_cross_common.log
+TIMESTAMP:      2026-06-13 13:08:15 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-06-13 13:08:15
+SIZE:           673443 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-06-13 12:46:34,640][INFO] [start] eval_cross_common
+[2026-06-13 12:46:34,640][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/e0_dales_train_29364/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "source_domain": "dales",
+  "target_domain": "eclair",
+  "split": "all",
+  "source_train_to_common": "configs/train_id_to_common_dales.yaml",
+  "source_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_manifest": null,
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_all_37188",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-06-13 12:46:35,185][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/e0_dales_train_29364/checkpoints/best.pt in_channels=10 out_channels=8 D=3 device=cuda
+[2026-06-13 12:46:35,197][INFO] [mapcheck] built DALES native->train LUT from source config.
+[2026-06-13 12:46:35,197][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-06-13 12:46:35,197][INFO] [mapcheck] source_train_to_common=[1, 2, 7, 7, 3, 5, 4, 6]
+[2026-06-13 12:46:35,197][INFO] [target] building split='all' diagnostic dataset
+[2026-06-13 12:46:35,206][INFO] [target] ECLAIR split=train n_tiles=1059 allowed_review_categories=['approved', 'rejected']
+[2026-06-13 12:46:35,210][INFO] [target] ECLAIR split=val n_tiles=62 allowed_review_categories=['approved']
+[2026-06-13 12:46:35,213][INFO] [target] ECLAIR split=test n_tiles=125 allowed_review_categories=['approved']
+[2026-06-13 12:46:35,213][INFO] [target] ECLAIR-all n_tiles=1246 parts=[('train', 1059), ('val', 62), ('test', 125)]
+[2026-06-13 12:46:35,259][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_all_37188/eval_manifest.json
+[2026-06-13 12:46:35,260][INFO] [train_space] disabled because source_domain != target_domain.
+[2026-06-13 12:46:35,328][INFO] [tile] 1/1246 pointcloud_1.laz
+[2026-06-13 12:46:35,457][INFO] [tile_done] 1/1246 points=14593 eval_points_common=14591 running_common_miou=0.253899 running_common_macro_f1=0.268833
+[2026-06-13 12:46:35,457][INFO] [hist_common] gt_common=[0, 8758, 5831, 0, 0, 0, 2, 0]
+[2026-06-13 12:46:35,457][INFO] [hist_common] pred_common=[0, 8119, 6409, 63, 0, 0, 0, 0]
+[2026-06-13 12:46:35,457][INFO] [cuda] alloc=0.057GB reserved=0.128GB
+[2026-06-13 12:46:35,871][INFO] [tile] 2/1246 pointcloud_1001.laz
+[2026-06-13 12:46:37,326][INFO] [tile_done] 2/1246 points=616958 eval_points_common=616944 running_common_miou=0.409643 running_common_macro_f1=0.446138
+[2026-06-13 12:46:37,326][INFO] [hist_common] gt_common=[0, 366905, 250850, 0, 11239, 2539, 2, 0]
+[2026-06-13 12:46:37,326][INFO] [hist_common] pred_common=[0, 340934, 277377, 1357, 10195, 1671, 0, 1]
+[2026-06-13 12:46:37,327][INFO] [cuda] alloc=0.057GB reserved=0.600GB
+[2026-06-13 12:46:37,506][INFO] [tile] 3/1246 pointcloud_1002.laz
+[2026-06-13 12:46:37,748][INFO] [tile_done] 3/1246 points=160984 eval_points_common=160945 running_common_miou=0.408279 running_common_macro_f1=0.443717
+[2026-06-13 12:46:37,749][INFO] [hist_common] gt_common=[0, 415295, 363399, 0, 11244, 2540, 2, 0]
+[2026-06-13 12:46:37,749][INFO] [hist_common] pred_common=[0, 382995, 395668, 1639, 10198, 1974, 0, 6]
+[2026-06-13 12:46:37,749][INFO] [cuda] alloc=0.057GB reserved=0.734GB
+[2026-06-13 12:46:38,071][INFO] [tile] 4/1246 pointcloud_1003.laz
+[2026-06-13 12:46:38,821][INFO] [tile_done] 4/1246 points=540382 eval_points_common=530423 running_common_miou=0.593104 running_common_macro_f1=0.679742
+[2026-06-13 12:46:38,822][INFO] [hist_common] gt_common=[0, 691266, 515712, 94240, 11251, 2683, 5727, 2024]
+[2026-06-13 12:46:38,822][INFO] [hist_common] pred_common=[0, 655438, 573390, 75842, 10214, 2035, 3752, 2232]
+[2026-06-13 12:46:38,822][INFO] [cuda] alloc=0.057GB reserved=0.768GB
+[2026-06-13 12:46:39,282][INFO] [tile] 5/1246 pointcloud_1004.laz
+[2026-06-13 12:46:40,587][INFO] [tile_done] 5/1246 points=789510 eval_points_common=786064 running_common_miou=0.595607 running_common_macro_f1=0.689265
+[2026-06-13 12:46:40,587][INFO] [hist_common] gt_common=[0, 1268186, 704279, 97450, 16135, 3070, 16290, 3557]
+[2026-06-13 12:46:40,587][INFO] [hist_common] pred_common=[0, 1175670, 805044, 101870, 15087, 2193, 5083, 4020]
+[2026-06-13 12:46:40,588][INFO] [cuda] alloc=0.057GB reserved=0.568GB
+
+
+
+############################################################################################################################################
+RESULT FOLDER: dales_to_eclair_pub_m1_s1_d2e_w120_test_39101
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_pub_m1_s1_d2e_w120_test_39101
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            dales_to_eclair_pub_m1_s1_d2e_w120_test_39101
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_pub_m1_s1_d2e_w120_test_39101/eval_cross_common.log
+TIMESTAMP:      2026-08-16 20:44:38 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-08-16 20:44:38
+SIZE:           66647 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-08-16 20:42:50,136][INFO] [start] eval_cross_common
+[2026-08-16 20:42:50,136][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/m1_dales_mix3d_38163/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/m1_dales_mix3d_38163/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "source_domain": "dales",
+  "target_domain": "eclair",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_dales.yaml",
+  "source_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_manifest": null,
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_pub_m1_s1_d2e_w120_test_39101",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-08-16 20:42:50,650][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/m1_dales_mix3d_38163/checkpoints/best.pt in_channels=10 out_channels=8 D=3 device=cuda
+[2026-08-16 20:42:50,660][INFO] [mapcheck] built DALES native->train LUT from source config.
+[2026-08-16 20:42:50,660][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-08-16 20:42:50,660][INFO] [mapcheck] source_train_to_common=[1, 2, 7, 7, 3, 5, 4, 6]
+[2026-08-16 20:42:50,668][INFO] [target] ECLAIR split=test n_tiles=125 allowed_review_categories=['approved']
+[2026-08-16 20:42:50,689][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_pub_m1_s1_d2e_w120_test_39101/eval_manifest.json
+[2026-08-16 20:42:50,689][INFO] [train_space] disabled because source_domain != target_domain.
+[2026-08-16 20:42:50,895][INFO] [tile] 1/125 pointcloud_10.laz
+[2026-08-16 20:42:52,829][INFO] [tile_done] 1/125 points=710166 eval_points_common=710144 running_common_miou=0.261486 running_common_macro_f1=0.272901
+[2026-08-16 20:42:52,829][INFO] [hist_common] gt_common=[0, 165169, 544970, 0, 0, 5, 0, 0]
+[2026-08-16 20:42:52,829][INFO] [hist_common] pred_common=[0, 150639, 558810, 592, 0, 97, 0, 6]
+[2026-08-16 20:42:52,830][INFO] [cuda] alloc=0.057GB reserved=0.862GB
+[2026-08-16 20:42:53,028][INFO] [tile] 2/125 pointcloud_100.laz
+[2026-08-16 20:42:54,049][INFO] [tile_done] 2/125 points=419583 eval_points_common=419579 running_common_miou=0.261120 running_common_macro_f1=0.272630
+[2026-08-16 20:42:54,050][INFO] [hist_common] gt_common=[0, 209512, 920206, 0, 0, 5, 0, 0]
+[2026-08-16 20:42:54,050][INFO] [hist_common] pred_common=[0, 189954, 939066, 600, 0, 97, 0, 6]
+[2026-08-16 20:42:54,050][INFO] [cuda] alloc=0.057GB reserved=0.528GB
+[2026-08-16 20:42:54,102][INFO] [tile] 3/125 pointcloud_1009.laz
+[2026-08-16 20:42:54,124][INFO] [tile_done] 3/125 points=6021 eval_points_common=6021 running_common_miou=0.261228 running_common_macro_f1=0.272695
+[2026-08-16 20:42:54,124][INFO] [hist_common] gt_common=[0, 213935, 921804, 0, 0, 5, 0, 0]
+[2026-08-16 20:42:54,124][INFO] [hist_common] pred_common=[0, 194622, 940419, 600, 0, 97, 0, 6]
+[2026-08-16 20:42:54,124][INFO] [cuda] alloc=0.057GB reserved=0.099GB
+[2026-08-16 20:42:54,174][INFO] [tile] 4/125 pointcloud_1021.laz
+[2026-08-16 20:42:54,235][INFO] [tile_done] 4/125 points=59011 eval_points_common=59011 running_common_miou=0.265420 running_common_macro_f1=0.275077
+[2026-08-16 20:42:54,235][INFO] [hist_common] gt_common=[0, 272945, 921805, 0, 0, 5, 0, 0]
+[2026-08-16 20:42:54,235][INFO] [hist_common] pred_common=[0, 253629, 940423, 600, 0, 97, 0, 6]
+[2026-08-16 20:42:54,235][INFO] [cuda] alloc=0.057GB reserved=0.275GB
+[2026-08-16 20:42:54,340][INFO] [tile] 5/125 pointcloud_1022.laz
+[2026-08-16 20:42:54,841][INFO] [tile_done] 5/125 points=344882 eval_points_common=344874 running_common_miou=0.437934 running_common_macro_f1=0.467647
+[2026-08-16 20:42:54,841][INFO] [hist_common] gt_common=[0, 486165, 1052170, 0, 1198, 95, 1, 0]
+[2026-08-16 20:42:54,841][INFO] [hist_common] pred_common=[0, 460598, 1074100, 3600, 1164, 146, 0, 21]
+[2026-08-16 20:42:54,841][INFO] [cuda] alloc=0.057GB reserved=0.659GB
+[2026-08-16 20:42:54,983][INFO] [tile] 6/125 pointcloud_1023.laz
+[2026-08-16 20:42:55,927][INFO] [tile_done] 6/125 points=511773 eval_points_common=511641 running_common_miou=0.451319 running_common_macro_f1=0.483144
+[2026-08-16 20:42:55,928][INFO] [hist_common] gt_common=[0, 792764, 1247670, 0, 10509, 326, 1, 0]
+[2026-08-16 20:42:55,928][INFO] [hist_common] pred_common=[0, 751771, 1277331, 11354, 10414, 324, 0, 76]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: dales_to_eclair_pub_repro_m0_d2e_w120_test_39097
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_pub_repro_m0_d2e_w120_test_39097
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            dales_to_eclair_pub_repro_m0_d2e_w120_test_39097
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_pub_repro_m0_d2e_w120_test_39097/eval_cross_common.log
+TIMESTAMP:      2026-08-16 20:30:56 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-08-16 20:30:56
+SIZE:           66734 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-08-16 20:29:05,957][INFO] [start] eval_cross_common
+[2026-08-16 20:29:05,957][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/e0_dales_train_29364/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "source_domain": "dales",
+  "target_domain": "eclair",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_dales.yaml",
+  "source_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_manifest": null,
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_pub_repro_m0_d2e_w120_test_39097",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-08-16 20:29:06,684][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/e0_dales_train_29364/checkpoints/best.pt in_channels=10 out_channels=8 D=3 device=cuda
+[2026-08-16 20:29:06,698][INFO] [mapcheck] built DALES native->train LUT from source config.
+[2026-08-16 20:29:06,698][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-08-16 20:29:06,698][INFO] [mapcheck] source_train_to_common=[1, 2, 7, 7, 3, 5, 4, 6]
+[2026-08-16 20:29:06,709][INFO] [target] ECLAIR split=test n_tiles=125 allowed_review_categories=['approved']
+[2026-08-16 20:29:06,731][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_pub_repro_m0_d2e_w120_test_39097/eval_manifest.json
+[2026-08-16 20:29:06,731][INFO] [train_space] disabled because source_domain != target_domain.
+[2026-08-16 20:29:06,939][INFO] [tile] 1/125 pointcloud_10.laz
+[2026-08-16 20:29:08,908][INFO] [tile_done] 1/125 points=710166 eval_points_common=710144 running_common_miou=0.255045 running_common_macro_f1=0.269238
+[2026-08-16 20:29:08,908][INFO] [hist_common] gt_common=[0, 165169, 544970, 0, 0, 5, 0, 0]
+[2026-08-16 20:29:08,908][INFO] [hist_common] pred_common=[0, 142628, 566219, 585, 14, 698, 0, 0]
+[2026-08-16 20:29:08,909][INFO] [cuda] alloc=0.057GB reserved=0.862GB
+[2026-08-16 20:29:09,097][INFO] [tile] 2/125 pointcloud_100.laz
+[2026-08-16 20:29:10,315][INFO] [tile_done] 2/125 points=419583 eval_points_common=419579 running_common_miou=0.254306 running_common_macro_f1=0.268697
+[2026-08-16 20:29:10,315][INFO] [hist_common] gt_common=[0, 209512, 920206, 0, 0, 5, 0, 0]
+[2026-08-16 20:29:10,315][INFO] [hist_common] pred_common=[0, 178763, 949592, 653, 14, 698, 0, 3]
+[2026-08-16 20:29:10,315][INFO] [cuda] alloc=0.057GB reserved=0.528GB
+[2026-08-16 20:29:10,390][INFO] [tile] 3/125 pointcloud_1009.laz
+[2026-08-16 20:29:10,420][INFO] [tile_done] 3/125 points=6021 eval_points_common=6021 running_common_miou=0.254512 running_common_macro_f1=0.268827
+[2026-08-16 20:29:10,420][INFO] [hist_common] gt_common=[0, 213935, 921804, 0, 0, 5, 0, 0]
+[2026-08-16 20:29:10,420][INFO] [hist_common] pred_common=[0, 183164, 951141, 674, 14, 698, 0, 53]
+[2026-08-16 20:29:10,420][INFO] [cuda] alloc=0.057GB reserved=0.099GB
+[2026-08-16 20:29:10,497][INFO] [tile] 4/125 pointcloud_1021.laz
+[2026-08-16 20:29:10,576][INFO] [tile_done] 4/125 points=59011 eval_points_common=59011 running_common_miou=0.259893 running_common_macro_f1=0.271998
+[2026-08-16 20:29:10,576][INFO] [hist_common] gt_common=[0, 272945, 921805, 0, 0, 5, 0, 0]
+[2026-08-16 20:29:10,576][INFO] [hist_common] pred_common=[0, 242173, 951143, 674, 14, 698, 0, 53]
+[2026-08-16 20:29:10,576][INFO] [cuda] alloc=0.057GB reserved=0.275GB
+[2026-08-16 20:29:10,686][INFO] [tile] 5/125 pointcloud_1022.laz
+[2026-08-16 20:29:11,215][INFO] [tile_done] 5/125 points=344882 eval_points_common=344874 running_common_miou=0.393865 running_common_macro_f1=0.411601
+[2026-08-16 20:29:11,215][INFO] [hist_common] gt_common=[0, 486165, 1052170, 0, 1198, 95, 1, 0]
+[2026-08-16 20:29:11,215][INFO] [hist_common] pred_common=[0, 444397, 1092193, 1094, 1115, 777, 0, 53]
+[2026-08-16 20:29:11,215][INFO] [cuda] alloc=0.057GB reserved=0.659GB
+[2026-08-16 20:29:11,350][INFO] [tile] 6/125 pointcloud_1023.laz
+[2026-08-16 20:29:12,313][INFO] [tile_done] 6/125 points=511773 eval_points_common=511641 running_common_miou=0.396497 running_common_macro_f1=0.420939
+[2026-08-16 20:29:12,314][INFO] [hist_common] gt_common=[0, 792764, 1247670, 0, 10509, 326, 1, 0]
+[2026-08-16 20:29:12,314][INFO] [hist_common] pred_common=[0, 727842, 1310047, 1969, 9374, 1944, 0, 94]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: dales_to_eclair_test_37186
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_test_37186
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            dales_to_eclair_test_37186
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_test_37186/eval_cross_common.log
+TIMESTAMP:      2026-06-13 12:39:33 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-06-13 12:39:33
+SIZE:           66602 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-06-13 12:37:25,723][INFO] [start] eval_cross_common
+[2026-06-13 12:37:25,724][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/e0_dales_train_29364/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "source_domain": "dales",
+  "target_domain": "eclair",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_dales.yaml",
+  "source_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_manifest": null,
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_test_37186",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-06-13 12:37:26,469][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/e0_dales_train_29364/checkpoints/best.pt in_channels=10 out_channels=8 D=3 device=cuda
+[2026-06-13 12:37:26,483][INFO] [mapcheck] built DALES native->train LUT from source config.
+[2026-06-13 12:37:26,483][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-06-13 12:37:26,483][INFO] [mapcheck] source_train_to_common=[1, 2, 7, 7, 3, 5, 4, 6]
+[2026-06-13 12:37:26,517][INFO] [target] ECLAIR split=test n_tiles=125 allowed_review_categories=['approved']
+[2026-06-13 12:37:26,549][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/dales_to_eclair_test_37186/eval_manifest.json
+[2026-06-13 12:37:26,549][INFO] [train_space] disabled because source_domain != target_domain.
+[2026-06-13 12:37:26,985][INFO] [tile] 1/125 pointcloud_10.laz
+[2026-06-13 12:37:28,935][INFO] [tile_done] 1/125 points=710166 eval_points_common=710144 running_common_miou=0.255045 running_common_macro_f1=0.269238
+[2026-06-13 12:37:28,936][INFO] [hist_common] gt_common=[0, 165169, 544970, 0, 0, 5, 0, 0]
+[2026-06-13 12:37:28,936][INFO] [hist_common] pred_common=[0, 142628, 566219, 585, 14, 698, 0, 0]
+[2026-06-13 12:37:28,936][INFO] [cuda] alloc=0.057GB reserved=0.862GB
+[2026-06-13 12:37:29,256][INFO] [tile] 2/125 pointcloud_100.laz
+[2026-06-13 12:37:30,441][INFO] [tile_done] 2/125 points=419583 eval_points_common=419579 running_common_miou=0.254306 running_common_macro_f1=0.268697
+[2026-06-13 12:37:30,441][INFO] [hist_common] gt_common=[0, 209512, 920206, 0, 0, 5, 0, 0]
+[2026-06-13 12:37:30,442][INFO] [hist_common] pred_common=[0, 178763, 949592, 653, 14, 698, 0, 3]
+[2026-06-13 12:37:30,442][INFO] [cuda] alloc=0.057GB reserved=0.528GB
+[2026-06-13 12:37:30,580][INFO] [tile] 3/125 pointcloud_1009.laz
+[2026-06-13 12:37:30,624][INFO] [tile_done] 3/125 points=6021 eval_points_common=6021 running_common_miou=0.254512 running_common_macro_f1=0.268827
+[2026-06-13 12:37:30,624][INFO] [hist_common] gt_common=[0, 213935, 921804, 0, 0, 5, 0, 0]
+[2026-06-13 12:37:30,624][INFO] [hist_common] pred_common=[0, 183164, 951141, 674, 14, 698, 0, 53]
+[2026-06-13 12:37:30,624][INFO] [cuda] alloc=0.057GB reserved=0.099GB
+[2026-06-13 12:37:30,765][INFO] [tile] 4/125 pointcloud_1021.laz
+[2026-06-13 12:37:30,959][INFO] [tile_done] 4/125 points=59011 eval_points_common=59011 running_common_miou=0.259893 running_common_macro_f1=0.271998
+[2026-06-13 12:37:30,959][INFO] [hist_common] gt_common=[0, 272945, 921805, 0, 0, 5, 0, 0]
+[2026-06-13 12:37:30,959][INFO] [hist_common] pred_common=[0, 242173, 951143, 674, 14, 698, 0, 53]
+[2026-06-13 12:37:30,960][INFO] [cuda] alloc=0.057GB reserved=0.275GB
+[2026-06-13 12:37:31,229][INFO] [tile] 5/125 pointcloud_1022.laz
+[2026-06-13 12:37:31,835][INFO] [tile_done] 5/125 points=344882 eval_points_common=344874 running_common_miou=0.393865 running_common_macro_f1=0.411601
+[2026-06-13 12:37:31,835][INFO] [hist_common] gt_common=[0, 486165, 1052170, 0, 1198, 95, 1, 0]
+[2026-06-13 12:37:31,835][INFO] [hist_common] pred_common=[0, 444397, 1092193, 1094, 1115, 777, 0, 53]
+[2026-06-13 12:37:31,835][INFO] [cuda] alloc=0.057GB reserved=0.659GB
+[2026-06-13 12:37:32,169][INFO] [tile] 6/125 pointcloud_1023.laz
+[2026-06-13 12:37:33,333][INFO] [tile_done] 6/125 points=511773 eval_points_common=511641 running_common_miou=0.396497 running_common_macro_f1=0.420939
+[2026-06-13 12:37:33,333][INFO] [hist_common] gt_common=[0, 792764, 1247670, 0, 10509, 326, 1, 0]
+[2026-06-13 12:37:33,333][INFO] [hist_common] pred_common=[0, 727842, 1310047, 1969, 9374, 1944, 0, 94]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: eclair_to_dales_all_37187
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_all_37187
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            eclair_to_dales_all_37187
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_all_37187/eval_cross_common.log
+TIMESTAMP:      2026-06-13 12:56:00 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-06-13 12:56:00
+SIZE:           26569 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-06-13 12:46:17,453][INFO] [start] eval_cross_common
+[2026-06-13 12:46:17,454][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json",
+  "source_domain": "eclair",
+  "target_domain": "dales",
+  "split": "all",
+  "source_train_to_common": "configs/train_id_to_common_id.yaml",
+  "source_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_manifest": null,
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_all_37187",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-06-13 12:46:18,173][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/e0_eclair_repro_29306/checkpoints/best.pt in_channels=10 out_channels=11 D=3 device=cuda
+[2026-06-13 12:46:18,189][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-06-13 12:46:18,189][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-06-13 12:46:18,189][INFO] [mapcheck] source_train_to_common=[0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7]
+[2026-06-13 12:46:18,189][INFO] [target] building split='all' diagnostic dataset
+[2026-06-13 12:46:18,190][INFO] [target] DALES-all building split=train manifest=/scratch/m23csa510/dales/manifests/train.txt
+[2026-06-13 12:46:18,208][INFO] [target] DALES split=train n_tiles=26 root=/scratch/m23csa510/dales/dales/train manifest=/scratch/m23csa510/dales/manifests/train.txt cache_kind=raw
+[2026-06-13 12:46:18,208][INFO] [target] DALES-all building split=val manifest=/scratch/m23csa510/dales/manifests/val.txt
+[2026-06-13 12:46:18,215][INFO] [target] DALES split=val n_tiles=3 root=/scratch/m23csa510/dales/dales/train manifest=/scratch/m23csa510/dales/manifests/val.txt cache_kind=raw
+[2026-06-13 12:46:18,215][INFO] [target] DALES-all building split=test manifest=/scratch/m23csa510/dales/manifests/test.txt
+[2026-06-13 12:46:18,217][INFO] [target] DALES split=test n_tiles=11 root=/scratch/m23csa510/dales/dales/test manifest=/scratch/m23csa510/dales/manifests/test.txt cache_kind=raw
+[2026-06-13 12:46:18,217][INFO] [target] DALES-all n_tiles=40 parts=[('train', 26), ('val', 3), ('test', 11)]
+[2026-06-13 12:46:18,244][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_all_37187/eval_manifest.json
+[2026-06-13 12:46:18,245][INFO] [train_space] disabled because source_domain != target_domain.
+[2026-06-13 12:46:21,897][INFO] [tile] 1/40 /scratch/m23csa510/dales/dales/train/5080_54435.las
+[2026-06-13 12:46:31,127][INFO] [tile_done] 1/40 points=11345691 eval_points_common=11313929 running_common_miou=0.620142 running_common_macro_f1=0.723810
+[2026-06-13 12:46:31,128][INFO] [hist_common] gt_common=[0, 5506161, 2585415, 2942930, 14044, 9727, 89417, 166235]
+[2026-06-13 12:46:31,128][INFO] [hist_common] pred_common=[116241, 5666991, 2575975, 2841223, 20469, 3921, 60487, 28622]
+[2026-06-13 12:46:31,128][INFO] [cuda] alloc=0.057GB reserved=1.363GB
+[2026-06-13 12:46:36,559][INFO] [tile] 2/40 /scratch/m23csa510/dales/dales/train/5085_54320.las
+[2026-06-13 12:46:51,931][INFO] [tile_done] 2/40 points=14394749 eval_points_common=14350962 running_common_miou=0.599857 running_common_macro_f1=0.703584
+[2026-06-13 12:46:51,932][INFO] [hist_common] gt_common=[0, 10432450, 9599815, 5235448, 18464, 14381, 122816, 241517]
+[2026-06-13 12:46:51,932][INFO] [hist_common] pred_common=[198797, 11002775, 9178578, 5133552, 25964, 5216, 79072, 40937]
+[2026-06-13 12:46:51,932][INFO] [cuda] alloc=0.057GB reserved=1.665GB
+[2026-06-13 12:46:55,391][INFO] [tile] 3/40 /scratch/m23csa510/dales/dales/train/5095_54440.las
+[2026-06-13 12:47:04,539][INFO] [tile_done] 3/40 points=11703345 eval_points_common=11572127 running_common_miou=0.622844 running_common_macro_f1=0.717281
+[2026-06-13 12:47:04,540][INFO] [hist_common] gt_common=[0, 15407446, 12540046, 8670991, 74768, 28349, 135432, 379986]
+[2026-06-13 12:47:04,540][INFO] [hist_common] pred_common=[287769, 16271524, 11972373, 8465052, 84009, 10430, 91859, 54002]
+[2026-06-13 12:47:04,541][INFO] [cuda] alloc=0.057GB reserved=1.921GB
+[2026-06-13 12:47:09,567][INFO] [tile] 4/40 /scratch/m23csa510/dales/dales/train/5095_54455.las
+[2026-06-13 12:47:21,667][INFO] [tile_done] 4/40 points=13561343 eval_points_common=13529397 running_common_miou=0.639487 running_common_macro_f1=0.731451
+[2026-06-13 12:47:21,668][INFO] [hist_common] gt_common=[0, 21560954, 17718445, 10577612, 161761, 43170, 216069, 488404]
+[2026-06-13 12:47:21,668][INFO] [hist_common] pred_common=[365030, 22731934, 16870166, 10382978, 176998, 15623, 143209, 80477]
+[2026-06-13 12:47:21,669][INFO] [cuda] alloc=0.057GB reserved=1.911GB
+[2026-06-13 12:47:25,108][INFO] [tile] 5/40 /scratch/m23csa510/dales/dales/train/5100_54495.las
+[2026-06-13 12:47:33,810][INFO] [tile_done] 5/40 points=12085953 eval_points_common=12057551 running_common_miou=0.635902 running_common_macro_f1=0.728838
+
+
+
+############################################################################################################################################
+RESULT FOLDER: eclair_to_dales_pub_m1_s1_e2d_w120_test_39099
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_pub_m1_s1_e2d_w120_test_39099
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            eclair_to_dales_pub_m1_s1_e2d_w120_test_39099
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_pub_m1_s1_e2d_w120_test_39099/eval_cross_common.log
+TIMESTAMP:      2026-08-16 20:42:25 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-08-16 20:42:25
+SIZE:           8993 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-08-16 20:40:13,538][INFO] [start] eval_cross_common
+[2026-08-16 20:40:13,538][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json",
+  "source_domain": "eclair",
+  "target_domain": "dales",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_id.yaml",
+  "source_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_manifest": "/scratch/m23csa510/dales/manifests/test.txt",
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_pub_m1_s1_e2d_w120_test_39099",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-08-16 20:40:14,149][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/checkpoints/best.pt in_channels=10 out_channels=11 D=3 device=cuda
+[2026-08-16 20:40:14,159][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-08-16 20:40:14,159][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-08-16 20:40:14,159][INFO] [mapcheck] source_train_to_common=[0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7]
+[2026-08-16 20:40:14,164][INFO] [target] DALES split=test n_tiles=11 root=/scratch/m23csa510/dales/dales/test manifest=/scratch/m23csa510/dales/manifests/test.txt cache_kind=raw
+[2026-08-16 20:40:14,194][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_pub_m1_s1_e2d_w120_test_39099/eval_manifest.json
+[2026-08-16 20:40:14,194][INFO] [train_space] disabled because source_domain != target_domain.
+[2026-08-16 20:40:16,843][INFO] [tile] 1/11 /scratch/m23csa510/dales/dales/test/5080_54400.las
+[2026-08-16 20:40:26,533][INFO] [tile_done] 1/11 points=12219779 eval_points_common=12181083 running_common_miou=0.563086 running_common_macro_f1=0.668113
+[2026-08-16 20:40:26,534][INFO] [hist_common] gt_common=[0, 5268499, 3773996, 2961003, 953, 5301, 41644, 129687]
+[2026-08-16 20:40:26,534][INFO] [hist_common] pred_common=[218890, 5412175, 3517066, 2953658, 4461, 2157, 34075, 38601]
+[2026-08-16 20:40:26,535][INFO] [cuda] alloc=0.057GB reserved=1.420GB
+[2026-08-16 20:40:28,552][INFO] [tile] 2/11 /scratch/m23csa510/dales/dales/test/5080_54470.las
+[2026-08-16 20:40:36,570][INFO] [tile_done] 2/11 points=11862897 eval_points_common=11802314 running_common_miou=0.657320 running_common_macro_f1=0.762295
+[2026-08-16 20:40:36,571][INFO] [hist_common] gt_common=[0, 11469749, 6772613, 5249883, 34584, 16994, 151468, 288106]
+[2026-08-16 20:40:36,571][INFO] [hist_common] pred_common=[399980, 11842528, 6344581, 5154039, 44453, 8046, 109029, 80741]
+[2026-08-16 20:40:36,572][INFO] [cuda] alloc=0.057GB reserved=1.321GB
+[2026-08-16 20:40:38,550][INFO] [tile] 3/11 /scratch/m23csa510/dales/dales/test/5100_54440.las
+[2026-08-16 20:40:46,364][INFO] [tile_done] 3/11 points=11680495 eval_points_common=11423047 running_common_miou=0.638865 running_common_macro_f1=0.742371
+[2026-08-16 20:40:46,365][INFO] [hist_common] gt_common=[0, 17115708, 9585004, 8054405, 50803, 33940, 186835, 379749]
+[2026-08-16 20:40:46,365][INFO] [hist_common] pred_common=[511538, 17958342, 8968760, 7649029, 63313, 12187, 147823, 95452]
+[2026-08-16 20:40:46,366][INFO] [cuda] alloc=0.057GB reserved=1.023GB
+[2026-08-16 20:40:48,398][INFO] [tile] 4/11 /scratch/m23csa510/dales/dales/test/5100_54490.las
+[2026-08-16 20:40:56,639][INFO] [tile_done] 4/11 points=12045879 eval_points_common=12014668 running_common_miou=0.635543 running_common_macro_f1=0.739284
+[2026-08-16 20:40:56,639][INFO] [hist_common] gt_common=[0, 23859795, 12708511, 9951190, 64508, 45159, 275939, 516010]
+[2026-08-16 20:40:56,640][INFO] [hist_common] pred_common=[675665, 24889385, 11936239, 9493448, 80103, 16663, 205462, 124147]
+[2026-08-16 20:40:56,640][INFO] [cuda] alloc=0.057GB reserved=1.776GB
+[2026-08-16 20:40:58,971][INFO] [tile] 5/11 /scratch/m23csa510/dales/dales/test/5120_54445.las
+[2026-08-16 20:41:10,960][INFO] [tile_done] 5/11 points=13886734 eval_points_common=13865807 running_common_miou=0.645469 running_common_macro_f1=0.745708
+[2026-08-16 20:41:10,961][INFO] [hist_common] gt_common=[0, 30144645, 18389920, 11674082, 100185, 50742, 325969, 601376]
+[2026-08-16 20:41:10,961][INFO] [hist_common] pred_common=[825567, 31564801, 17148422, 11217217, 118860, 20096, 253779, 138177]
+[2026-08-16 20:41:10,961][INFO] [cuda] alloc=0.057GB reserved=1.231GB
+[2026-08-16 20:41:13,087][INFO] [tile] 6/11 /scratch/m23csa510/dales/dales/test/5135_54430.las
+[2026-08-16 20:41:22,714][INFO] [tile_done] 6/11 points=12448577 eval_points_common=12390172 running_common_miou=0.645260 running_common_macro_f1=0.746148
+[2026-08-16 20:41:22,715][INFO] [hist_common] gt_common=[0, 36402914, 22073006, 13903695, 100933, 54027, 397236, 745280]
+[2026-08-16 20:41:22,715][INFO] [hist_common] pred_common=[963037, 37940925, 20707646, 13438383, 123573, 22097, 311727, 169703]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: eclair_to_dales_pub_repro_m0_e2d_w120_test_39095
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_pub_repro_m0_e2d_w120_test_39095
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            eclair_to_dales_pub_repro_m0_e2d_w120_test_39095
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_pub_repro_m0_e2d_w120_test_39095/eval_cross_common.log
+TIMESTAMP:      2026-08-16 20:28:40 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-08-16 20:28:40
+SIZE:           9004 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-08-16 20:26:22,521][INFO] [start] eval_cross_common
+[2026-08-16 20:26:22,522][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json",
+  "source_domain": "eclair",
+  "target_domain": "dales",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_id.yaml",
+  "source_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_manifest": "/scratch/m23csa510/dales/manifests/test.txt",
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_pub_repro_m0_e2d_w120_test_39095",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-08-16 20:26:23,050][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/e0_eclair_repro_29306/checkpoints/best.pt in_channels=10 out_channels=11 D=3 device=cuda
+[2026-08-16 20:26:23,062][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-08-16 20:26:23,062][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-08-16 20:26:23,062][INFO] [mapcheck] source_train_to_common=[0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7]
+[2026-08-16 20:26:23,092][INFO] [target] DALES split=test n_tiles=11 root=/scratch/m23csa510/dales/dales/test manifest=/scratch/m23csa510/dales/manifests/test.txt cache_kind=raw
+[2026-08-16 20:26:23,115][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_pub_repro_m0_e2d_w120_test_39095/eval_manifest.json
+[2026-08-16 20:26:23,115][INFO] [train_space] disabled because source_domain != target_domain.
+[2026-08-16 20:26:27,027][INFO] [tile] 1/11 /scratch/m23csa510/dales/dales/test/5080_54400.las
+[2026-08-16 20:26:37,688][INFO] [tile_done] 1/11 points=12219779 eval_points_common=12181083 running_common_miou=0.537961 running_common_macro_f1=0.637408
+[2026-08-16 20:26:37,689][INFO] [hist_common] gt_common=[0, 5268499, 3773996, 2961003, 953, 5301, 41644, 129687]
+[2026-08-16 20:26:37,689][INFO] [hist_common] pred_common=[124038, 5388052, 3599349, 3005749, 5225, 1822, 29349, 27499]
+[2026-08-16 20:26:37,690][INFO] [cuda] alloc=0.057GB reserved=1.420GB
+[2026-08-16 20:26:41,300][INFO] [tile] 2/11 /scratch/m23csa510/dales/dales/test/5080_54470.las
+[2026-08-16 20:26:49,880][INFO] [tile_done] 2/11 points=11862897 eval_points_common=11802314 running_common_miou=0.633743 running_common_macro_f1=0.736325
+[2026-08-16 20:26:49,881][INFO] [hist_common] gt_common=[0, 11469749, 6772613, 5249883, 34584, 16994, 151468, 288106]
+[2026-08-16 20:26:49,881][INFO] [hist_common] pred_common=[241263, 11800514, 6496503, 5236075, 45138, 6708, 96202, 60994]
+[2026-08-16 20:26:49,881][INFO] [cuda] alloc=0.057GB reserved=1.321GB
+[2026-08-16 20:26:52,930][INFO] [tile] 3/11 /scratch/m23csa510/dales/dales/test/5100_54440.las
+[2026-08-16 20:27:00,766][INFO] [tile_done] 3/11 points=11680495 eval_points_common=11423047 running_common_miou=0.619020 running_common_macro_f1=0.718081
+[2026-08-16 20:27:00,766][INFO] [hist_common] gt_common=[0, 17115708, 9585004, 8054405, 50803, 33940, 186835, 379749]
+[2026-08-16 20:27:00,766][INFO] [hist_common] pred_common=[317719, 17878102, 9155918, 7778892, 63944, 10282, 128773, 72814]
+[2026-08-16 20:27:00,767][INFO] [cuda] alloc=0.057GB reserved=1.023GB
+[2026-08-16 20:27:03,212][INFO] [tile] 4/11 /scratch/m23csa510/dales/dales/test/5100_54490.las
+[2026-08-16 20:27:11,478][INFO] [tile_done] 4/11 points=12045879 eval_points_common=12014668 running_common_miou=0.616133 running_common_macro_f1=0.715476
+[2026-08-16 20:27:11,479][INFO] [hist_common] gt_common=[0, 23859795, 12708511, 9951190, 64508, 45159, 275939, 516010]
+[2026-08-16 20:27:11,479][INFO] [hist_common] pred_common=[412500, 24811976, 12190559, 9638304, 80026, 14425, 180604, 92718]
+[2026-08-16 20:27:11,480][INFO] [cuda] alloc=0.057GB reserved=1.776GB
+[2026-08-16 20:27:13,775][INFO] [tile] 5/11 /scratch/m23csa510/dales/dales/test/5120_54445.las
+[2026-08-16 20:27:25,848][INFO] [tile_done] 5/11 points=13886734 eval_points_common=13865807 running_common_miou=0.625964 running_common_macro_f1=0.721923
+[2026-08-16 20:27:25,849][INFO] [hist_common] gt_common=[0, 30144645, 18389920, 11674082, 100185, 50742, 325969, 601376]
+[2026-08-16 20:27:25,849][INFO] [hist_common] pred_common=[496162, 31492132, 17463231, 11373887, 118628, 17107, 222098, 103674]
+[2026-08-16 20:27:25,850][INFO] [cuda] alloc=0.057GB reserved=1.231GB
+[2026-08-16 20:27:28,004][INFO] [tile] 6/11 /scratch/m23csa510/dales/dales/test/5135_54430.las
+[2026-08-16 20:27:37,662][INFO] [tile_done] 6/11 points=12448577 eval_points_common=12390172 running_common_miou=0.626296 running_common_macro_f1=0.722850
+[2026-08-16 20:27:37,663][INFO] [hist_common] gt_common=[0, 36402914, 22073006, 13903695, 100933, 54027, 397236, 745280]
+[2026-08-16 20:27:37,663][INFO] [hist_common] pred_common=[578491, 37869164, 21085133, 13604085, 122129, 18842, 271175, 128072]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: eclair_to_dales_test_37185
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_test_37185
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            eclair_to_dales_test_37185
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_test_37185/eval_cross_common.log
+TIMESTAMP:      2026-06-13 12:37:01 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-06-13 12:37:01
+SIZE:           8872 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-06-13 12:34:36,818][INFO] [start] eval_cross_common
+[2026-06-13 12:34:36,818][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_dales_train_29364/config_resolved.json",
+  "source_domain": "eclair",
+  "target_domain": "dales",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_id.yaml",
+  "source_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_manifest": "/scratch/m23csa510/dales/manifests/test.txt",
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_test_37185",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-06-13 12:34:38,747][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/e0_eclair_repro_29306/checkpoints/best.pt in_channels=10 out_channels=11 D=3 device=cuda
+[2026-06-13 12:34:38,791][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-06-13 12:34:38,791][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-06-13 12:34:38,791][INFO] [mapcheck] source_train_to_common=[0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7]
+[2026-06-13 12:34:38,797][INFO] [target] DALES split=test n_tiles=11 root=/scratch/m23csa510/dales/dales/test manifest=/scratch/m23csa510/dales/manifests/test.txt cache_kind=raw
+[2026-06-13 12:34:38,826][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_test_37185/eval_manifest.json
+[2026-06-13 12:34:38,826][INFO] [train_space] disabled because source_domain != target_domain.
+[2026-06-13 12:34:42,232][INFO] [tile] 1/11 /scratch/m23csa510/dales/dales/test/5080_54400.las
+[2026-06-13 12:34:54,006][INFO] [tile_done] 1/11 points=12219779 eval_points_common=12181083 running_common_miou=0.537961 running_common_macro_f1=0.637408
+[2026-06-13 12:34:54,006][INFO] [hist_common] gt_common=[0, 5268499, 3773996, 2961003, 953, 5301, 41644, 129687]
+[2026-06-13 12:34:54,006][INFO] [hist_common] pred_common=[124038, 5388052, 3599349, 3005749, 5225, 1822, 29349, 27499]
+[2026-06-13 12:34:54,007][INFO] [cuda] alloc=0.057GB reserved=1.420GB
+[2026-06-13 12:34:57,065][INFO] [tile] 2/11 /scratch/m23csa510/dales/dales/test/5080_54470.las
+[2026-06-13 12:35:05,776][INFO] [tile_done] 2/11 points=11862897 eval_points_common=11802314 running_common_miou=0.633743 running_common_macro_f1=0.736325
+[2026-06-13 12:35:05,776][INFO] [hist_common] gt_common=[0, 11469749, 6772613, 5249883, 34584, 16994, 151468, 288106]
+[2026-06-13 12:35:05,777][INFO] [hist_common] pred_common=[241263, 11800514, 6496503, 5236075, 45138, 6708, 96202, 60994]
+[2026-06-13 12:35:05,777][INFO] [cuda] alloc=0.057GB reserved=1.321GB
+[2026-06-13 12:35:08,112][INFO] [tile] 3/11 /scratch/m23csa510/dales/dales/test/5100_54440.las
+[2026-06-13 12:35:15,892][INFO] [tile_done] 3/11 points=11680495 eval_points_common=11423047 running_common_miou=0.619020 running_common_macro_f1=0.718081
+[2026-06-13 12:35:15,893][INFO] [hist_common] gt_common=[0, 17115708, 9585004, 8054405, 50803, 33940, 186835, 379749]
+[2026-06-13 12:35:15,893][INFO] [hist_common] pred_common=[317719, 17878102, 9155918, 7778892, 63944, 10282, 128773, 72814]
+[2026-06-13 12:35:15,894][INFO] [cuda] alloc=0.057GB reserved=1.023GB
+[2026-06-13 12:35:18,279][INFO] [tile] 4/11 /scratch/m23csa510/dales/dales/test/5100_54490.las
+[2026-06-13 12:35:26,602][INFO] [tile_done] 4/11 points=12045879 eval_points_common=12014668 running_common_miou=0.616133 running_common_macro_f1=0.715476
+[2026-06-13 12:35:26,603][INFO] [hist_common] gt_common=[0, 23859795, 12708511, 9951190, 64508, 45159, 275939, 516010]
+[2026-06-13 12:35:26,603][INFO] [hist_common] pred_common=[412500, 24811976, 12190559, 9638304, 80026, 14425, 180604, 92718]
+[2026-06-13 12:35:26,604][INFO] [cuda] alloc=0.057GB reserved=1.776GB
+[2026-06-13 12:35:29,295][INFO] [tile] 5/11 /scratch/m23csa510/dales/dales/test/5120_54445.las
+[2026-06-13 12:35:41,242][INFO] [tile_done] 5/11 points=13886734 eval_points_common=13865807 running_common_miou=0.625964 running_common_macro_f1=0.721923
+[2026-06-13 12:35:41,243][INFO] [hist_common] gt_common=[0, 30144645, 18389920, 11674082, 100185, 50742, 325969, 601376]
+[2026-06-13 12:35:41,243][INFO] [hist_common] pred_common=[496162, 31492132, 17463231, 11373887, 118628, 17107, 222098, 103674]
+[2026-06-13 12:35:41,243][INFO] [cuda] alloc=0.057GB reserved=1.231GB
+[2026-06-13 12:35:43,724][INFO] [tile] 6/11 /scratch/m23csa510/dales/dales/test/5135_54430.las
+[2026-06-13 12:35:53,311][INFO] [tile_done] 6/11 points=12448577 eval_points_common=12390172 running_common_miou=0.626296 running_common_macro_f1=0.722850
+[2026-06-13 12:35:53,312][INFO] [hist_common] gt_common=[0, 36402914, 22073006, 13903695, 100933, 54027, 397236, 745280]
+[2026-06-13 12:35:53,312][INFO] [hist_common] pred_common=[578491, 37869164, 21085133, 13604085, 122129, 18842, 271175, 128072]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: eclair_to_eclair_default_test_39082
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_default_test_39082
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            eclair_to_eclair_default_test_39082
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_default_test_39082/eval_cross_common.log
+TIMESTAMP:      2026-08-16 16:52:05 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-08-16 16:52:05
+SIZE:           113224 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-08-16 16:50:57,531][INFO] [start] eval_cross_common
+[2026-08-16 16:50:57,532][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "source_domain": "eclair",
+  "target_domain": "eclair",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_id.yaml",
+  "source_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_manifest": null,
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_default_test_39082",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-08-16 16:50:58,063][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/e0_eclair_repro_29306/checkpoints/best.pt in_channels=10 out_channels=11 D=3 device=cuda
+[2026-08-16 16:50:58,073][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-08-16 16:50:58,073][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-08-16 16:50:58,073][INFO] [mapcheck] source_train_to_common=[0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7]
+[2026-08-16 16:50:58,082][INFO] [target] ECLAIR split=test n_tiles=125 allowed_review_categories=['approved']
+[2026-08-16 16:50:58,102][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_default_test_39082/eval_manifest.json
+[2026-08-16 16:50:58,102][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-08-16 16:50:58,102][INFO] [train_space] enabled because source_domain == target_domain. num_classes=11, ignore_index=-100, class_names=['class_0', 'class_1', 'class_2', 'class_3', 'class_4', 'class_5', 'class_6', 'class_7', 'class_8', 'class_9', 'class_10']
+[2026-08-16 16:50:58,307][INFO] [tile] 1/125 pointcloud_10.laz
+[2026-08-16 16:50:59,191][INFO] [tile_done] 1/125 points=710166 eval_points_common=710144 running_common_miou=0.271744 running_common_macro_f1=0.278506
+[2026-08-16 16:50:59,191][INFO] [hist_common] gt_common=[0, 165169, 544970, 0, 0, 5, 0, 0]
+[2026-08-16 16:50:59,191][INFO] [hist_common] pred_common=[15, 176807, 533320, 0, 0, 0, 2, 0]
+[2026-08-16 16:50:59,191][INFO] [train_space] running_train_miou=0.227471 running_train_macro_f1=0.245412
+[2026-08-16 16:50:59,191][INFO] [hist_train] gt_train=[12, 165169, 544970, 0, 10, 0, 0, 5, 0, 0, 0]
+[2026-08-16 16:50:59,191][INFO] [hist_train] pred_train=[15, 176807, 533334, 0, 6, 0, 0, 2, 0, 2, 0]
+[2026-08-16 16:50:59,192][INFO] [cuda] alloc=0.057GB reserved=0.789GB
+[2026-08-16 16:50:59,510][INFO] [tile] 2/125 pointcloud_100.laz
+[2026-08-16 16:51:00,112][INFO] [tile_done] 2/125 points=419583 eval_points_common=419579 running_common_miou=0.271279 running_common_macro_f1=0.278237
+[2026-08-16 16:51:00,113][INFO] [hist_common] gt_common=[0, 209512, 920206, 0, 0, 5, 0, 0]
+[2026-08-16 16:51:00,113][INFO] [hist_common] pred_common=[16, 224143, 905562, 0, 0, 0, 2, 0]
+[2026-08-16 16:51:00,113][INFO] [train_space] running_train_miou=0.233237 running_train_macro_f1=0.249787
+[2026-08-16 16:51:00,113][INFO] [hist_train] gt_train=[12, 209512, 920206, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-08-16 16:51:00,113][INFO] [hist_train] pred_train=[15, 224143, 905576, 0, 11, 0, 0, 2, 0, 2, 0]
+[2026-08-16 16:51:00,113][INFO] [cuda] alloc=0.057GB reserved=0.568GB
+[2026-08-16 16:51:00,218][INFO] [tile] 3/125 pointcloud_1009.laz
+[2026-08-16 16:51:00,481][INFO] [tile_done] 3/125 points=6021 eval_points_common=6021 running_common_miou=0.271088 running_common_macro_f1=0.278136
+[2026-08-16 16:51:00,482][INFO] [hist_common] gt_common=[0, 213935, 921804, 0, 0, 5, 0, 0]
+[2026-08-16 16:51:00,482][INFO] [hist_common] pred_common=[16, 229056, 906642, 0, 28, 0, 2, 0]
+[2026-08-16 16:51:00,482][INFO] [train_space] running_train_miou=0.233115 running_train_macro_f1=0.249722
+[2026-08-16 16:51:00,482][INFO] [hist_train] gt_train=[12, 213935, 921804, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-08-16 16:51:00,482][INFO] [hist_train] pred_train=[15, 229056, 906656, 0, 11, 28, 0, 2, 0, 2, 0]
+[2026-08-16 16:51:00,483][INFO] [cuda] alloc=0.057GB reserved=0.096GB
+[2026-08-16 16:51:00,616][INFO] [tile] 4/125 pointcloud_1021.laz
+[2026-08-16 16:51:00,670][INFO] [tile_done] 4/125 points=59011 eval_points_common=59011 running_common_miou=0.273469 running_common_macro_f1=0.279419
+[2026-08-16 16:51:00,670][INFO] [hist_common] gt_common=[0, 272945, 921805, 0, 0, 5, 0, 0]
+[2026-08-16 16:51:00,670][INFO] [hist_common] pred_common=[16, 288066, 906643, 0, 28, 0, 2, 0]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: eclair_to_eclair_default_test_39083
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_default_test_39083
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            eclair_to_eclair_default_test_39083
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_default_test_39083/eval_cross_common.log
+TIMESTAMP:      2026-08-16 16:53:21 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-08-16 16:53:21
+SIZE:           113651 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-08-16 16:52:19,911][INFO] [start] eval_cross_common
+[2026-08-16 16:52:19,911][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/c1_e_eclair_alpha_rare_37237/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/c1_e_eclair_alpha_rare_37237/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "source_domain": "eclair",
+  "target_domain": "eclair",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_id.yaml",
+  "source_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_manifest": null,
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_default_test_39083",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-08-16 16:52:21,697][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/c1_e_eclair_alpha_rare_37237/checkpoints/best.pt in_channels=10 out_channels=11 D=3 device=cuda
+[2026-08-16 16:52:21,713][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-08-16 16:52:21,714][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-08-16 16:52:21,714][INFO] [mapcheck] source_train_to_common=[0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7]
+[2026-08-16 16:52:21,728][INFO] [target] ECLAIR split=test n_tiles=125 allowed_review_categories=['approved']
+[2026-08-16 16:52:21,758][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_default_test_39083/eval_manifest.json
+[2026-08-16 16:52:21,758][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-08-16 16:52:21,758][INFO] [train_space] enabled because source_domain == target_domain. num_classes=11, ignore_index=-100, class_names=['class_0', 'class_1', 'class_2', 'class_3', 'class_4', 'class_5', 'class_6', 'class_7', 'class_8', 'class_9', 'class_10']
+[2026-08-16 16:52:22,010][INFO] [tile] 1/125 pointcloud_10.laz
+[2026-08-16 16:52:23,097][INFO] [tile_done] 1/125 points=710166 eval_points_common=710144 running_common_miou=0.271514 running_common_macro_f1=0.278385
+[2026-08-16 16:52:23,098][INFO] [hist_common] gt_common=[0, 165169, 544970, 0, 0, 5, 0, 0]
+[2026-08-16 16:52:23,098][INFO] [hist_common] pred_common=[243, 177198, 532652, 0, 0, 0, 51, 0]
+[2026-08-16 16:52:23,098][INFO] [train_space] running_train_miou=0.222514 running_train_macro_f1=0.245932
+[2026-08-16 16:52:23,098][INFO] [hist_train] gt_train=[12, 165169, 544970, 0, 10, 0, 0, 5, 0, 0, 0]
+[2026-08-16 16:52:23,098][INFO] [hist_train] pred_train=[255, 177198, 532655, 0, 5, 0, 0, 2, 0, 51, 0]
+[2026-08-16 16:52:23,099][INFO] [cuda] alloc=0.057GB reserved=0.789GB
+[2026-08-16 16:52:23,316][INFO] [tile] 2/125 pointcloud_100.laz
+[2026-08-16 16:52:23,917][INFO] [tile_done] 2/125 points=419583 eval_points_common=419579 running_common_miou=0.271152 running_common_macro_f1=0.278170
+[2026-08-16 16:52:23,917][INFO] [hist_common] gt_common=[0, 209512, 920206, 0, 0, 5, 0, 0]
+[2026-08-16 16:52:23,918][INFO] [hist_common] pred_common=[244, 224703, 904724, 0, 0, 0, 52, 0]
+[2026-08-16 16:52:23,918][INFO] [train_space] running_train_miou=0.231374 running_train_macro_f1=0.253370
+[2026-08-16 16:52:23,918][INFO] [hist_train] gt_train=[12, 209512, 920206, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-08-16 16:52:23,918][INFO] [hist_train] pred_train=[255, 224703, 904727, 0, 10, 0, 0, 2, 0, 52, 0]
+[2026-08-16 16:52:23,918][INFO] [cuda] alloc=0.057GB reserved=0.568GB
+[2026-08-16 16:52:24,004][INFO] [tile] 3/125 pointcloud_1009.laz
+[2026-08-16 16:52:24,032][INFO] [tile_done] 3/125 points=6021 eval_points_common=6021 running_common_miou=0.270993 running_common_macro_f1=0.278086
+[2026-08-16 16:52:24,032][INFO] [hist_common] gt_common=[0, 213935, 921804, 0, 0, 5, 0, 0]
+[2026-08-16 16:52:24,032][INFO] [hist_common] pred_common=[244, 229566, 905858, 0, 24, 0, 52, 0]
+[2026-08-16 16:52:24,032][INFO] [train_space] running_train_miou=0.231273 running_train_macro_f1=0.253317
+[2026-08-16 16:52:24,032][INFO] [hist_train] gt_train=[12, 213935, 921804, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-08-16 16:52:24,032][INFO] [hist_train] pred_train=[255, 229566, 905861, 0, 10, 24, 0, 2, 0, 52, 0]
+[2026-08-16 16:52:24,033][INFO] [cuda] alloc=0.057GB reserved=0.096GB
+[2026-08-16 16:52:24,125][INFO] [tile] 4/125 pointcloud_1021.laz
+[2026-08-16 16:52:24,175][INFO] [tile_done] 4/125 points=59011 eval_points_common=59011 running_common_miou=0.273381 running_common_macro_f1=0.279374
+[2026-08-16 16:52:24,175][INFO] [hist_common] gt_common=[0, 272945, 921805, 0, 0, 5, 0, 0]
+[2026-08-16 16:52:24,175][INFO] [hist_common] pred_common=[244, 288576, 905858, 0, 24, 0, 53, 0]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: eclair_to_eclair_default_test_39084
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_default_test_39084
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            eclair_to_eclair_default_test_39084
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_default_test_39084/eval_cross_common.log
+TIMESTAMP:      2026-08-16 16:53:20 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-08-16 16:53:20
+SIZE:           113284 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-08-16 16:52:27,709][INFO] [start] eval_cross_common
+[2026-08-16 16:52:27,709][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "source_domain": "eclair",
+  "target_domain": "eclair",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_id.yaml",
+  "source_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_manifest": null,
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_default_test_39084",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-08-16 16:52:28,488][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/checkpoints/best.pt in_channels=10 out_channels=11 D=3 device=cuda
+[2026-08-16 16:52:28,498][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-08-16 16:52:28,498][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-08-16 16:52:28,498][INFO] [mapcheck] source_train_to_common=[0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7]
+[2026-08-16 16:52:28,507][INFO] [target] ECLAIR split=test n_tiles=125 allowed_review_categories=['approved']
+[2026-08-16 16:52:28,533][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_default_test_39084/eval_manifest.json
+[2026-08-16 16:52:28,533][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-08-16 16:52:28,533][INFO] [train_space] enabled because source_domain == target_domain. num_classes=11, ignore_index=-100, class_names=['class_0', 'class_1', 'class_2', 'class_3', 'class_4', 'class_5', 'class_6', 'class_7', 'class_8', 'class_9', 'class_10']
+[2026-08-16 16:52:28,736][INFO] [tile] 1/125 pointcloud_10.laz
+[2026-08-16 16:52:29,606][INFO] [tile_done] 1/125 points=710166 eval_points_common=710144 running_common_miou=0.311784 running_common_macro_f1=0.340809
+[2026-08-16 16:52:29,606][INFO] [hist_common] gt_common=[0, 165169, 544970, 0, 0, 5, 0, 0]
+[2026-08-16 16:52:29,606][INFO] [hist_common] pred_common=[141, 176158, 533826, 0, 1, 18, 0, 0]
+[2026-08-16 16:52:29,606][INFO] [train_space] running_train_miou=0.233272 running_train_macro_f1=0.263211
+[2026-08-16 16:52:29,606][INFO] [hist_train] gt_train=[12, 165169, 544970, 0, 10, 0, 0, 5, 0, 0, 0]
+[2026-08-16 16:52:29,606][INFO] [hist_train] pred_train=[141, 176158, 533830, 0, 5, 0, 1, 31, 0, 0, 0]
+[2026-08-16 16:52:29,607][INFO] [cuda] alloc=0.057GB reserved=0.789GB
+[2026-08-16 16:52:29,804][INFO] [tile] 2/125 pointcloud_100.laz
+[2026-08-16 16:52:30,368][INFO] [tile_done] 2/125 points=419583 eval_points_common=419579 running_common_miou=0.311248 running_common_macro_f1=0.340503
+[2026-08-16 16:52:30,368][INFO] [hist_common] gt_common=[0, 209512, 920206, 0, 0, 5, 0, 0]
+[2026-08-16 16:52:30,368][INFO] [hist_common] pred_common=[152, 223320, 906232, 0, 1, 18, 0, 0]
+[2026-08-16 16:52:30,369][INFO] [train_space] running_train_miou=0.242022 running_train_macro_f1=0.270592
+[2026-08-16 16:52:30,369][INFO] [hist_train] gt_train=[12, 209512, 920206, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-08-16 16:52:30,369][INFO] [hist_train] pred_train=[151, 223320, 906236, 0, 10, 0, 1, 31, 0, 0, 0]
+[2026-08-16 16:52:30,369][INFO] [cuda] alloc=0.057GB reserved=0.568GB
+[2026-08-16 16:52:30,442][INFO] [tile] 3/125 pointcloud_1009.laz
+[2026-08-16 16:52:30,463][INFO] [tile_done] 3/125 points=6021 eval_points_common=6021 running_common_miou=0.311090 running_common_macro_f1=0.340420
+[2026-08-16 16:52:30,463][INFO] [hist_common] gt_common=[0, 213935, 921804, 0, 0, 5, 0, 0]
+[2026-08-16 16:52:30,463][INFO] [hist_common] pred_common=[152, 228208, 907364, 0, 2, 18, 0, 0]
+[2026-08-16 16:52:30,464][INFO] [train_space] running_train_miou=0.241922 running_train_macro_f1=0.270539
+[2026-08-16 16:52:30,464][INFO] [hist_train] gt_train=[12, 213935, 921804, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-08-16 16:52:30,464][INFO] [hist_train] pred_train=[151, 228208, 907368, 0, 10, 1, 1, 31, 0, 0, 0]
+[2026-08-16 16:52:30,464][INFO] [cuda] alloc=0.057GB reserved=0.096GB
+[2026-08-16 16:52:30,534][INFO] [tile] 4/125 pointcloud_1021.laz
+[2026-08-16 16:52:30,582][INFO] [tile_done] 4/125 points=59011 eval_points_common=59011 running_common_miou=0.313423 running_common_macro_f1=0.341675
+[2026-08-16 16:52:30,583][INFO] [hist_common] gt_common=[0, 272945, 921805, 0, 0, 5, 0, 0]
+[2026-08-16 16:52:30,583][INFO] [hist_common] pred_common=[152, 287218, 907365, 0, 2, 18, 0, 0]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: eclair_to_eclair_pub_m1_s1_e2e_w120_test_39098
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_pub_m1_s1_e2e_w120_test_39098
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            eclair_to_eclair_pub_m1_s1_e2e_w120_test_39098
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_pub_m1_s1_e2e_w120_test_39098/eval_cross_common.log
+TIMESTAMP:      2026-08-16 20:40:52 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-08-16 20:40:52
+SIZE:           113394 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-08-16 20:40:00,058][INFO] [start] eval_cross_common
+[2026-08-16 20:40:00,058][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "source_domain": "eclair",
+  "target_domain": "eclair",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_id.yaml",
+  "source_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_manifest": null,
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_pub_m1_s1_e2e_w120_test_39098",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-08-16 20:40:00,518][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/checkpoints/best.pt in_channels=10 out_channels=11 D=3 device=cuda
+[2026-08-16 20:40:00,526][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-08-16 20:40:00,526][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-08-16 20:40:00,526][INFO] [mapcheck] source_train_to_common=[0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7]
+[2026-08-16 20:40:00,540][INFO] [target] ECLAIR split=test n_tiles=125 allowed_review_categories=['approved']
+[2026-08-16 20:40:00,566][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_pub_m1_s1_e2e_w120_test_39098/eval_manifest.json
+[2026-08-16 20:40:00,566][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-08-16 20:40:00,566][INFO] [train_space] enabled because source_domain == target_domain. num_classes=11, ignore_index=-100, class_names=['class_0', 'class_1', 'class_2', 'class_3', 'class_4', 'class_5', 'class_6', 'class_7', 'class_8', 'class_9', 'class_10']
+[2026-08-16 20:40:00,777][INFO] [tile] 1/125 pointcloud_10.laz
+[2026-08-16 20:40:01,654][INFO] [tile_done] 1/125 points=710166 eval_points_common=710144 running_common_miou=0.311784 running_common_macro_f1=0.340809
+[2026-08-16 20:40:01,654][INFO] [hist_common] gt_common=[0, 165169, 544970, 0, 0, 5, 0, 0]
+[2026-08-16 20:40:01,655][INFO] [hist_common] pred_common=[141, 176158, 533826, 0, 1, 18, 0, 0]
+[2026-08-16 20:40:01,655][INFO] [train_space] running_train_miou=0.233272 running_train_macro_f1=0.263211
+[2026-08-16 20:40:01,655][INFO] [hist_train] gt_train=[12, 165169, 544970, 0, 10, 0, 0, 5, 0, 0, 0]
+[2026-08-16 20:40:01,655][INFO] [hist_train] pred_train=[141, 176158, 533830, 0, 5, 0, 1, 31, 0, 0, 0]
+[2026-08-16 20:40:01,655][INFO] [cuda] alloc=0.057GB reserved=0.789GB
+[2026-08-16 20:40:01,846][INFO] [tile] 2/125 pointcloud_100.laz
+[2026-08-16 20:40:02,416][INFO] [tile_done] 2/125 points=419583 eval_points_common=419579 running_common_miou=0.311248 running_common_macro_f1=0.340503
+[2026-08-16 20:40:02,416][INFO] [hist_common] gt_common=[0, 209512, 920206, 0, 0, 5, 0, 0]
+[2026-08-16 20:40:02,416][INFO] [hist_common] pred_common=[152, 223320, 906232, 0, 1, 18, 0, 0]
+[2026-08-16 20:40:02,416][INFO] [train_space] running_train_miou=0.242022 running_train_macro_f1=0.270592
+[2026-08-16 20:40:02,416][INFO] [hist_train] gt_train=[12, 209512, 920206, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-08-16 20:40:02,416][INFO] [hist_train] pred_train=[151, 223320, 906236, 0, 10, 0, 1, 31, 0, 0, 0]
+[2026-08-16 20:40:02,417][INFO] [cuda] alloc=0.057GB reserved=0.568GB
+[2026-08-16 20:40:02,489][INFO] [tile] 3/125 pointcloud_1009.laz
+[2026-08-16 20:40:02,512][INFO] [tile_done] 3/125 points=6021 eval_points_common=6021 running_common_miou=0.311090 running_common_macro_f1=0.340420
+[2026-08-16 20:40:02,512][INFO] [hist_common] gt_common=[0, 213935, 921804, 0, 0, 5, 0, 0]
+[2026-08-16 20:40:02,512][INFO] [hist_common] pred_common=[152, 228208, 907364, 0, 2, 18, 0, 0]
+[2026-08-16 20:40:02,512][INFO] [train_space] running_train_miou=0.241922 running_train_macro_f1=0.270539
+[2026-08-16 20:40:02,512][INFO] [hist_train] gt_train=[12, 213935, 921804, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-08-16 20:40:02,512][INFO] [hist_train] pred_train=[151, 228208, 907368, 0, 10, 1, 1, 31, 0, 0, 0]
+[2026-08-16 20:40:02,513][INFO] [cuda] alloc=0.057GB reserved=0.096GB
+[2026-08-16 20:40:02,597][INFO] [tile] 4/125 pointcloud_1021.laz
+[2026-08-16 20:40:02,645][INFO] [tile_done] 4/125 points=59011 eval_points_common=59011 running_common_miou=0.313423 running_common_macro_f1=0.341675
+[2026-08-16 20:40:02,645][INFO] [hist_common] gt_common=[0, 272945, 921805, 0, 0, 5, 0, 0]
+[2026-08-16 20:40:02,645][INFO] [hist_common] pred_common=[152, 287218, 907365, 0, 2, 18, 0, 0]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: eclair_to_eclair_test_37189
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_test_37189
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            eclair_to_eclair_test_37189
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_test_37189/eval_cross_common.log
+TIMESTAMP:      2026-06-13 14:09:22 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-06-13 14:09:22
+SIZE:           113144 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-06-13 14:08:24,141][INFO] [start] eval_cross_common
+[2026-06-13 14:08:24,142][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306/config_resolved.json",
+  "source_domain": "eclair",
+  "target_domain": "eclair",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_id.yaml",
+  "source_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_manifest": null,
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_test_37189",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-06-13 14:08:24,675][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/e0_eclair_repro_29306/checkpoints/best.pt in_channels=10 out_channels=11 D=3 device=cuda
+[2026-06-13 14:08:24,687][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-06-13 14:08:24,687][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-06-13 14:08:24,687][INFO] [mapcheck] source_train_to_common=[0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7]
+[2026-06-13 14:08:24,715][INFO] [target] ECLAIR split=test n_tiles=125 allowed_review_categories=['approved']
+[2026-06-13 14:08:24,762][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_test_37189/eval_manifest.json
+[2026-06-13 14:08:24,762][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-06-13 14:08:24,762][INFO] [train_space] enabled because source_domain == target_domain. num_classes=11, ignore_index=-100, class_names=['class_0', 'class_1', 'class_2', 'class_3', 'class_4', 'class_5', 'class_6', 'class_7', 'class_8', 'class_9', 'class_10']
+[2026-06-13 14:08:25,006][INFO] [tile] 1/125 pointcloud_10.laz
+[2026-06-13 14:08:25,884][INFO] [tile_done] 1/125 points=710166 eval_points_common=710144 running_common_miou=0.271744 running_common_macro_f1=0.278506
+[2026-06-13 14:08:25,884][INFO] [hist_common] gt_common=[0, 165169, 544970, 0, 0, 5, 0, 0]
+[2026-06-13 14:08:25,884][INFO] [hist_common] pred_common=[15, 176807, 533320, 0, 0, 0, 2, 0]
+[2026-06-13 14:08:25,884][INFO] [train_space] running_train_miou=0.227471 running_train_macro_f1=0.245412
+[2026-06-13 14:08:25,884][INFO] [hist_train] gt_train=[12, 165169, 544970, 0, 10, 0, 0, 5, 0, 0, 0]
+[2026-06-13 14:08:25,885][INFO] [hist_train] pred_train=[15, 176807, 533334, 0, 6, 0, 0, 2, 0, 2, 0]
+[2026-06-13 14:08:25,885][INFO] [cuda] alloc=0.057GB reserved=0.789GB
+[2026-06-13 14:08:26,107][INFO] [tile] 2/125 pointcloud_100.laz
+[2026-06-13 14:08:26,673][INFO] [tile_done] 2/125 points=419583 eval_points_common=419579 running_common_miou=0.271279 running_common_macro_f1=0.278237
+[2026-06-13 14:08:26,673][INFO] [hist_common] gt_common=[0, 209512, 920206, 0, 0, 5, 0, 0]
+[2026-06-13 14:08:26,673][INFO] [hist_common] pred_common=[16, 224143, 905562, 0, 0, 0, 2, 0]
+[2026-06-13 14:08:26,674][INFO] [train_space] running_train_miou=0.233237 running_train_macro_f1=0.249787
+[2026-06-13 14:08:26,674][INFO] [hist_train] gt_train=[12, 209512, 920206, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-06-13 14:08:26,674][INFO] [hist_train] pred_train=[15, 224143, 905576, 0, 11, 0, 0, 2, 0, 2, 0]
+[2026-06-13 14:08:26,674][INFO] [cuda] alloc=0.057GB reserved=0.568GB
+[2026-06-13 14:08:26,748][INFO] [tile] 3/125 pointcloud_1009.laz
+[2026-06-13 14:08:26,771][INFO] [tile_done] 3/125 points=6021 eval_points_common=6021 running_common_miou=0.271088 running_common_macro_f1=0.278136
+[2026-06-13 14:08:26,771][INFO] [hist_common] gt_common=[0, 213935, 921804, 0, 0, 5, 0, 0]
+[2026-06-13 14:08:26,772][INFO] [hist_common] pred_common=[16, 229056, 906642, 0, 28, 0, 2, 0]
+[2026-06-13 14:08:26,772][INFO] [train_space] running_train_miou=0.233115 running_train_macro_f1=0.249722
+[2026-06-13 14:08:26,772][INFO] [hist_train] gt_train=[12, 213935, 921804, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-06-13 14:08:26,772][INFO] [hist_train] pred_train=[15, 229056, 906656, 0, 11, 28, 0, 2, 0, 2, 0]
+[2026-06-13 14:08:26,772][INFO] [cuda] alloc=0.057GB reserved=0.096GB
+[2026-06-13 14:08:26,861][INFO] [tile] 4/125 pointcloud_1021.laz
+[2026-06-13 14:08:26,908][INFO] [tile_done] 4/125 points=59011 eval_points_common=59011 running_common_miou=0.273469 running_common_macro_f1=0.279419
+[2026-06-13 14:08:26,908][INFO] [hist_common] gt_common=[0, 272945, 921805, 0, 0, 5, 0, 0]
+[2026-06-13 14:08:26,908][INFO] [hist_common] pred_common=[16, 288066, 906643, 0, 28, 0, 2, 0]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: mix_eclair_to_dales_test_38515
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/mix_eclair_to_dales_test_38515
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            mix_eclair_to_dales_test_38515
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/mix_eclair_to_dales_test_38515/eval_cross_common.log
+TIMESTAMP:      2026-07-27 15:44:06 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-07-27 15:44:06
+SIZE:           8879 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-07-27 15:41:36,008][INFO] [start] eval_cross_common
+[2026-07-27 15:41:36,008][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/m1_dales_mix3d_38163/config_resolved.json",
+  "source_domain": "eclair",
+  "target_domain": "dales",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_id.yaml",
+  "source_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_native_to_common": "configs/mapping_dales_to_common.yaml",
+  "target_manifest": "/scratch/m23csa510/dales/manifests/test.txt",
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_test_38515",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-07-27 15:41:36,614][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/checkpoints/best.pt in_channels=10 out_channels=11 D=3 device=cuda
+[2026-07-27 15:41:36,640][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-07-27 15:41:36,640][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-07-27 15:41:36,640][INFO] [mapcheck] source_train_to_common=[0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7]
+[2026-07-27 15:41:36,669][INFO] [target] DALES split=test n_tiles=11 root=/scratch/m23csa510/dales/dales/test manifest=/scratch/m23csa510/dales/manifests/test.txt cache_kind=raw
+[2026-07-27 15:41:36,694][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_dales_test_38515/eval_manifest.json
+[2026-07-27 15:41:36,694][INFO] [train_space] disabled because source_domain != target_domain.
+[2026-07-27 15:41:40,889][INFO] [tile] 1/11 /scratch/m23csa510/dales/dales/test/5080_54400.las
+[2026-07-27 15:41:52,079][INFO] [tile_done] 1/11 points=12219779 eval_points_common=12181083 running_common_miou=0.563086 running_common_macro_f1=0.668113
+[2026-07-27 15:41:52,080][INFO] [hist_common] gt_common=[0, 5268499, 3773996, 2961003, 953, 5301, 41644, 129687]
+[2026-07-27 15:41:52,080][INFO] [hist_common] pred_common=[218890, 5412175, 3517066, 2953658, 4461, 2157, 34075, 38601]
+[2026-07-27 15:41:52,081][INFO] [cuda] alloc=0.057GB reserved=1.420GB
+[2026-07-27 15:41:55,099][INFO] [tile] 2/11 /scratch/m23csa510/dales/dales/test/5080_54470.las
+[2026-07-27 15:42:03,074][INFO] [tile_done] 2/11 points=11862897 eval_points_common=11802314 running_common_miou=0.657320 running_common_macro_f1=0.762295
+[2026-07-27 15:42:03,075][INFO] [hist_common] gt_common=[0, 11469749, 6772613, 5249883, 34584, 16994, 151468, 288106]
+[2026-07-27 15:42:03,075][INFO] [hist_common] pred_common=[399980, 11842528, 6344581, 5154039, 44453, 8046, 109029, 80741]
+[2026-07-27 15:42:03,075][INFO] [cuda] alloc=0.057GB reserved=1.321GB
+[2026-07-27 15:42:06,827][INFO] [tile] 3/11 /scratch/m23csa510/dales/dales/test/5100_54440.las
+[2026-07-27 15:42:15,340][INFO] [tile_done] 3/11 points=11680495 eval_points_common=11423047 running_common_miou=0.638865 running_common_macro_f1=0.742371
+[2026-07-27 15:42:15,341][INFO] [hist_common] gt_common=[0, 17115708, 9585004, 8054405, 50803, 33940, 186835, 379749]
+[2026-07-27 15:42:15,341][INFO] [hist_common] pred_common=[511538, 17958342, 8968760, 7649029, 63313, 12187, 147823, 95452]
+[2026-07-27 15:42:15,341][INFO] [cuda] alloc=0.057GB reserved=1.023GB
+[2026-07-27 15:42:18,514][INFO] [tile] 4/11 /scratch/m23csa510/dales/dales/test/5100_54490.las
+[2026-07-27 15:42:26,731][INFO] [tile_done] 4/11 points=12045879 eval_points_common=12014668 running_common_miou=0.635543 running_common_macro_f1=0.739284
+[2026-07-27 15:42:26,732][INFO] [hist_common] gt_common=[0, 23859795, 12708511, 9951190, 64508, 45159, 275939, 516010]
+[2026-07-27 15:42:26,732][INFO] [hist_common] pred_common=[675665, 24889385, 11936239, 9493448, 80103, 16663, 205462, 124147]
+[2026-07-27 15:42:26,732][INFO] [cuda] alloc=0.057GB reserved=1.776GB
+[2026-07-27 15:42:30,886][INFO] [tile] 5/11 /scratch/m23csa510/dales/dales/test/5120_54445.las
+[2026-07-27 15:42:43,480][INFO] [tile_done] 5/11 points=13886734 eval_points_common=13865807 running_common_miou=0.645469 running_common_macro_f1=0.745708
+[2026-07-27 15:42:43,481][INFO] [hist_common] gt_common=[0, 30144645, 18389920, 11674082, 100185, 50742, 325969, 601376]
+[2026-07-27 15:42:43,481][INFO] [hist_common] pred_common=[825567, 31564801, 17148422, 11217217, 118860, 20096, 253779, 138177]
+[2026-07-27 15:42:43,481][INFO] [cuda] alloc=0.057GB reserved=1.231GB
+[2026-07-27 15:42:46,670][INFO] [tile] 6/11 /scratch/m23csa510/dales/dales/test/5135_54430.las
+[2026-07-27 15:42:56,275][INFO] [tile_done] 6/11 points=12448577 eval_points_common=12390172 running_common_miou=0.645260 running_common_macro_f1=0.746148
+[2026-07-27 15:42:56,276][INFO] [hist_common] gt_common=[0, 36402914, 22073006, 13903695, 100933, 54027, 397236, 745280]
+[2026-07-27 15:42:56,276][INFO] [hist_common] pred_common=[963037, 37940925, 20707646, 13438383, 123573, 22097, 311727, 169703]
+
+
+
+############################################################################################################################################
+RESULT FOLDER: mix_eclair_to_eclair_test_38514
+DIRECTORY:     /scratch/m23csa510/cross_eval_runs/clean_eval/mix_eclair_to_eclair_test_38514
+############################################################################################################################################
+
+------------------------------------------------------------------------------------------------------------------------
+RUN:            mix_eclair_to_eclair_test_38514
+FILE:           eval_cross_common.log
+FULL PATH:      /scratch/m23csa510/cross_eval_runs/clean_eval/mix_eclair_to_eclair_test_38514/eval_cross_common.log
+TIMESTAMP:      2026-07-27 16:14:02 [Modified time (creation time unavailable)]
+LAST MODIFIED:  2026-07-27 16:14:02
+SIZE:           113501 bytes
+------------------------------------------------------------------------------------------------------------------------
+CONTENTS: first 60 line(s), maximum configured = 60
+
+[2026-07-27 15:39:54,405][INFO] [start] eval_cross_common
+[2026-07-27 15:39:54,405][INFO] [args] {
+  "ckpt": "/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/checkpoints/best.pt",
+  "source_config": "/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/config_resolved.json",
+  "target_config": "/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/config_resolved.json",
+  "source_domain": "eclair",
+  "target_domain": "eclair",
+  "split": "test",
+  "source_train_to_common": "configs/train_id_to_common_id.yaml",
+  "source_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_native_to_common": "configs/mapping_eclair_to_common.yaml",
+  "target_manifest": null,
+  "out_dir": "/scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_test_38514",
+  "device": "cuda",
+  "seed": 1337,
+  "window_size_m": 120.0,
+  "window_stride_m": 120.0,
+  "aggregation": "mean_logits",
+  "max_voxels_per_forward": 180000,
+  "max_split_depth": 8,
+  "amp": false,
+  "limit_tiles": 0,
+  "force_raw_cache": true
+}
+[2026-07-27 15:39:54,997][INFO] [model] loaded OK ckpt=/scratch/m23csa510/e0_results/m1_eclair_mix3d_38162/checkpoints/best.pt in_channels=10 out_channels=11 D=3 device=cuda
+[2026-07-27 15:39:55,009][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-07-27 15:39:55,009][INFO] [mapcheck] OK: source_train_to_common matches source_native_to_train(source config) + source_native_to_common.
+[2026-07-27 15:39:55,009][INFO] [mapcheck] source_train_to_common=[0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7]
+[2026-07-27 15:39:55,018][INFO] [target] ECLAIR split=test n_tiles=125 allowed_review_categories=['approved']
+[2026-07-27 15:39:55,171][INFO] [saved] /scratch/m23csa510/cross_eval_runs/clean_eval/eclair_to_eclair_test_38514/eval_manifest.json
+[2026-07-27 15:39:55,171][INFO] [mapcheck] built ECLAIR native->train LUT by convention: native 1..out_channels -> train 0..out_channels-1.
+[2026-07-27 15:39:55,171][INFO] [train_space] enabled because source_domain == target_domain. num_classes=11, ignore_index=-100, class_names=['class_0', 'class_1', 'class_2', 'class_3', 'class_4', 'class_5', 'class_6', 'class_7', 'class_8', 'class_9', 'class_10']
+[2026-07-27 15:39:55,409][INFO] [tile] 1/125 pointcloud_10.laz
+[2026-07-27 15:40:36,991][INFO] [tile_done] 1/125 points=710166 eval_points_common=710144 running_common_miou=0.270425 running_common_macro_f1=0.277801
+[2026-07-27 15:40:36,992][INFO] [hist_common] gt_common=[0, 165169, 544970, 0, 0, 5, 0, 0]
+[2026-07-27 15:40:36,993][INFO] [hist_common] pred_common=[29, 172984, 537127, 0, 4, 0, 0, 0]
+[2026-07-27 15:40:36,993][INFO] [train_space] running_train_miou=0.221975 running_train_macro_f1=0.245844
+[2026-07-27 15:40:36,993][INFO] [hist_train] gt_train=[12, 165169, 544970, 0, 10, 0, 0, 5, 0, 0, 0]
+[2026-07-27 15:40:36,993][INFO] [hist_train] pred_train=[31, 172984, 537142, 0, 5, 0, 4, 0, 0, 0, 0]
+[2026-07-27 15:40:36,994][INFO] [cuda] alloc=0.057GB reserved=0.730GB
+[2026-07-27 15:40:37,159][INFO] [tile] 2/125 pointcloud_100.laz
+[2026-07-27 15:41:10,953][INFO] [tile_done] 2/125 points=419583 eval_points_common=419579 running_common_miou=0.270577 running_common_macro_f1=0.277859
+[2026-07-27 15:41:10,954][INFO] [hist_common] gt_common=[0, 209512, 920206, 0, 0, 5, 0, 0]
+[2026-07-27 15:41:10,954][INFO] [hist_common] pred_common=[30, 219035, 910654, 0, 4, 0, 0, 0]
+[2026-07-27 15:41:10,954][INFO] [train_space] running_train_miou=0.231164 running_train_macro_f1=0.253457
+[2026-07-27 15:41:10,954][INFO] [hist_train] gt_train=[12, 209512, 920206, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-07-27 15:41:10,954][INFO] [hist_train] pred_train=[31, 219035, 910669, 0, 10, 0, 4, 0, 0, 0, 0]
+[2026-07-27 15:41:10,955][INFO] [cuda] alloc=0.057GB reserved=0.854GB
+[2026-07-27 15:41:11,025][INFO] [tile] 3/125 pointcloud_1009.laz
+[2026-07-27 15:41:11,434][INFO] [tile_done] 3/125 points=6021 eval_points_common=6021 running_common_miou=0.270383 running_common_macro_f1=0.277756
+[2026-07-27 15:41:11,434][INFO] [hist_common] gt_common=[0, 213935, 921804, 0, 0, 5, 0, 0]
+[2026-07-27 15:41:11,435][INFO] [hist_common] pred_common=[162, 223884, 911651, 0, 4, 0, 43, 0]
+[2026-07-27 15:41:11,435][INFO] [train_space] running_train_miou=0.227657 running_train_macro_f1=0.247013
+[2026-07-27 15:41:11,435][INFO] [hist_train] gt_train=[12, 213935, 921804, 0, 14, 0, 0, 5, 0, 0, 0]
+[2026-07-27 15:41:11,435][INFO] [hist_train] pred_train=[163, 223884, 911666, 0, 10, 0, 4, 0, 0, 43, 0]
+[2026-07-27 15:41:11,435][INFO] [cuda] alloc=0.057GB reserved=0.090GB
+[2026-07-27 15:41:11,495][INFO] [tile] 4/125 pointcloud_1021.laz
+[2026-07-27 15:41:14,116][INFO] [tile_done] 4/125 points=59011 eval_points_common=59011 running_common_miou=0.272901 running_common_macro_f1=0.279119
+[2026-07-27 15:41:14,117][INFO] [hist_common] gt_common=[0, 272945, 921805, 0, 0, 5, 0, 0]
+[2026-07-27 15:41:14,117][INFO] [hist_common] pred_common=[162, 282894, 911651, 0, 4, 0, 44, 0]
+

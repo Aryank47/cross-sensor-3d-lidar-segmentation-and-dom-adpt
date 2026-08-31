@@ -1,13 +1,11 @@
-extends: m0_dales_frozen_29364.yaml
+extends: m0_eclair_frozen_29306.yaml
 
 method:
   name: bev_als
 
 run:
-  name: dg_dales_bev_als_h4_ml_seed1337
-  out_dir: /scratch/m23csa510/e0_results/dg_dales_bev_als_h4_ml_seed1337
-  # last.pt is atomically overwritten every epoch; epoch snapshots remain disabled.
-  # This gives one-epoch recovery granularity without growing storage per epoch.
+  name: dg_eclair_bev_als_h4_ml_seed1337
+  out_dir: /scratch/m23csa510/e0_results/dg_eclair_bev_als_h4_ml_seed1337
   save_every_epochs: 1
   keep_epoch_snapshots: false
   keep_last_k_epoch_snapshots: 0

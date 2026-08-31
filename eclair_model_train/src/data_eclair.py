@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing as mp
-import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -262,6 +261,8 @@ class EclairTiles(Dataset):
         undefined_id: int = 0,
         use_cache: bool = True,
         cache_root: Optional[str | Path] = None,
+        require_cache: bool = False,
+        require_cache_metadata: bool = False,
         seed: int = 1337,
         meta_filename: str = "labels.json",
         allowed_review_categories: Optional[Sequence[str]] = ("approved",),
@@ -291,7 +292,12 @@ class EclairTiles(Dataset):
 
         self.use_cache = use_cache and cache_root is not None
         self.cache_root = Path(cache_root) if cache_root is not None else None
-        self._rng = np.random.default_rng(seed + (0 if split == "train" else 10))
+        self.require_cache = bool(require_cache)
+        self.require_cache_metadata = bool(require_cache_metadata)
+        if self.require_cache and not self.use_cache:
+            raise ValueError("ECLAIR require_cache=true requires use_cache=true and a cache_root.")
+        if self.require_cache_metadata and not self.require_cache:
+            raise ValueError("ECLAIR require_cache_metadata=true requires require_cache=true.")
         self.voxel_cfg = voxel_cfg or VoxelizationConfig()
         self.bev_cfg = bev_cfg
         self.bev_als_cfg = bev_als_cfg or ALSBEVConfig(enabled=False)
@@ -310,7 +316,8 @@ class EclairTiles(Dataset):
         self._epoch_shared = mp.Value("q", 0, lock=False)
         self.sampling_cfg = sampling_cfg or EclairSamplingConfig()
         self.mix3d_cfg = mix3d_cfg or ALSMix3DConfig(enabled=False)
-        self._virtual_indices: Optional[np.ndarray] = None
+        self._sampling_cdf: Optional[np.ndarray] = None
+        self._virtual_epoch_size: Optional[int] = None
         self._sampling_summary: Optional[Dict[str, Any]] = None
 
         if self.mix3d_cfg.enabled and not self.is_train:
@@ -378,13 +385,9 @@ class EclairTiles(Dataset):
         epoch_size = int(round(self._base_len() * float(cfg.epoch_size_multiplier)))
         epoch_size = max(self._base_len(), epoch_size)
 
-        rng = np.random.default_rng(int(self.seed) + 73021)
-        self._virtual_indices = rng.choice(
-            np.arange(self._base_len(), dtype=np.int64),
-            size=epoch_size,
-            replace=True,
-            p=prob,
-        ).astype(np.int64, copy=False)
+        self._sampling_cdf = np.cumsum(prob, dtype=np.float64)
+        self._sampling_cdf[-1] = 1.0
+        self._virtual_epoch_size = int(epoch_size)
 
         self._sampling_summary = {
             "mode": str(cfg.mode),
@@ -452,8 +455,8 @@ class EclairTiles(Dataset):
         return out
 
     def __len__(self) -> int:
-        if self._virtual_indices is not None:
-            return int(self._virtual_indices.shape[0])
+        if self._virtual_epoch_size is not None:
+            return int(self._virtual_epoch_size)
         return len(self.names)
 
     def _base_len(self) -> int:
@@ -466,16 +469,23 @@ class EclairTiles(Dataset):
         For normal mode:
           idx maps to itself.
 
-        For weighted_tiles:
-          idx maps through self._virtual_indices.
+        For weighted_tiles, the mapping is deterministic for
+        (seed, epoch, virtual index) and therefore also stable with persistent
+        DataLoader workers and after checkpoint resume.
         """
-        if self._virtual_indices is None:
+        if self._sampling_cdf is None:
             return int(idx)
-
-        if int(self._virtual_indices.shape[0]) <= 0:
-            raise RuntimeError("ECLAIR weighted sampling has empty virtual index array.")
-
-        return int(self._virtual_indices[int(idx) % int(self._virtual_indices.shape[0])])
+        if self._virtual_epoch_size is None or self._virtual_epoch_size <= 0:
+            raise RuntimeError("ECLAIR weighted sampling has an invalid virtual epoch size.")
+        virtual_idx = int(idx) % int(self._virtual_epoch_size)
+        rng = np.random.default_rng(
+            stable_seed(self.seed, self.epoch, virtual_idx, "weighted_tile")
+        )
+        u = float(rng.random())
+        return min(
+            self._base_len() - 1,
+            int(np.searchsorted(self._sampling_cdf, u, side="right")),
+        )
 
     @property
     def sampling_summary(self) -> Optional[Dict[str, Any]]:
@@ -508,17 +518,21 @@ class EclairTiles(Dataset):
 
             def _is_cache_fresh(cmeta: Optional[dict], pc_path: Path) -> bool:
                 if not isinstance(cmeta, dict):
-                    return True  # old caches: treat as fresh (backward compatible)
+                    return not self.require_cache_metadata
                 try:
                     st = pc_path.stat()
                     return (int(cmeta.get("source_size", -1)) == int(st.st_size)) and (
                         int(cmeta.get("source_mtime_ns", -1)) == int(st.st_mtime_ns)
                     )
-                except Exception:
-                    return True
+                except OSError:
+                    return False
 
             # Case A: old cache stored a PyG Data object
             if isinstance(obj, Data):
+                if self.require_cache_metadata:
+                    raise RuntimeError(
+                        f"ECLAIR strict cache mode rejects metadata-free PyG cache: {cpath}"
+                    )
                 # Support both .xyz or .pos
                 if hasattr(obj, "xyz"):
                     xyz = obj.xyz
@@ -568,27 +582,25 @@ class EclairTiles(Dataset):
             # Case B: new raw-cache dict (the script above writes this)
             if isinstance(obj, dict) and "xyz" in obj and "native_labels" in obj:
                 # If cache meta exists, verify against current LAS/LAZ file. If stale, ignore cache.
-                try:
-                    pc_path = _resolve_pc_path(self.eclair_root, fname)
-                    if not _is_cache_fresh(obj.get("_cache_meta", None), pc_path):
-                        # stale cache -> fall back to reading LAS/LAZ (WITH dtype hygiene)
-                        raw = _read_las_arrays(pc_path)
-
-                        raw["xyz"] = raw["xyz"].astype(np.float64, copy=False)
-                        if "native_labels" in raw and raw["native_labels"] is not None:
-                            raw["native_labels"] = raw["native_labels"].astype(np.int64, copy=False)
-                        if raw.get("intensity", None) is not None:
-                            raw["intensity"] = raw["intensity"].astype(np.float32, copy=False)
-                        if raw.get("return_number", None) is not None:
-                            raw["return_number"] = raw["return_number"].astype(np.int64, copy=False)
-                        if raw.get("number_of_returns", None) is not None:
-                            raw["number_of_returns"] = raw["number_of_returns"].astype(np.int64, copy=False)
-                        if raw.get("rgb", None) is not None:
-                            raw["rgb"] = raw["rgb"].astype(np.float32, copy=False)
-
-                        return raw
-                except Exception:
-                    pass  # don't break training if meta check fails
+                pc_path = _resolve_pc_path(self.eclair_root, fname)
+                if not _is_cache_fresh(obj.get("_cache_meta", None), pc_path):
+                    if self.require_cache:
+                        raise RuntimeError(
+                            f"ECLAIR cache is stale or lacks required metadata: {cpath}"
+                        )
+                    raw = _read_las_arrays(pc_path)
+                    raw["xyz"] = raw["xyz"].astype(np.float64, copy=False)
+                    if "native_labels" in raw and raw["native_labels"] is not None:
+                        raw["native_labels"] = raw["native_labels"].astype(np.int64, copy=False)
+                    if raw.get("intensity", None) is not None:
+                        raw["intensity"] = raw["intensity"].astype(np.float32, copy=False)
+                    if raw.get("return_number", None) is not None:
+                        raw["return_number"] = raw["return_number"].astype(np.int64, copy=False)
+                    if raw.get("number_of_returns", None) is not None:
+                        raw["number_of_returns"] = raw["number_of_returns"].astype(np.int64, copy=False)
+                    if raw.get("rgb", None) is not None:
+                        raw["rgb"] = raw["rgb"].astype(np.float32, copy=False)
+                    return raw
 
                 # these are usually numpy arrays already, just ensure dtypes
                 xyz = obj["xyz"].astype(np.float64, copy=False)
@@ -622,6 +634,11 @@ class EclairTiles(Dataset):
                 return out
 
             raise TypeError(f"Unsupported cache object type in {cpath}: {type(obj)}")
+
+        if self.require_cache:
+            raise FileNotFoundError(
+                f"ECLAIR required cache entry is missing for tile={fname!r}: {cpath}"
+            )
 
         # 2) No cache -> read LAS/LAZ
         pc_path = _resolve_pc_path(self.eclair_root, fname)
@@ -866,11 +883,13 @@ class EclairTiles(Dataset):
         base_idx = self._resolve_item_index(virtual_idx)
         fname = self.names[base_idx]
 
-        # Preserve the existing worker-local augmentation diversity, including
-        # distinct augmentations for repeated weighted appearances of one tile.
-        base_seed = int(self._rng.integers(0, 2**31 - 1))
-        h = zlib.crc32(f"{fname}:{virtual_idx}:{self.seed}".encode("utf-8")) & 0x7FFFFFFF
-        sample_seed = (base_seed ^ int(h)) & 0x7FFFFFFF
+        sample_seed = stable_seed(
+            self.seed,
+            self.epoch,
+            fname,
+            virtual_idx,
+            "eclair_augment",
+        )
         payload, voxel_rng = self._prepare_training_payload(
             fname=fname,
             sample_seed=int(sample_seed),
@@ -1028,6 +1047,18 @@ class EclairTiles(Dataset):
             out["meta_bev_als_empty_slices"] = torch.tensor(d["empty_slices"], dtype=torch.int64)
             out["meta_bev_als_multi_label_cells"] = torch.tensor(d["multi_label_cells"], dtype=torch.int64)
             out["meta_bev_als_multi_label_fraction"] = torch.tensor(d["multi_label_fraction"], dtype=torch.float32)
+            out["meta_bev_als_multi_class_xy_columns"] = torch.tensor(
+                d["multi_class_xy_columns"], dtype=torch.int64
+            )
+            out["meta_bev_als_multi_class_xy_column_fraction"] = torch.tensor(
+                d["multi_class_xy_column_fraction"], dtype=torch.float32
+            )
+            out["meta_bev_als_height_edge_min_gap_m"] = torch.tensor(
+                d["height_edge_min_gap_m"], dtype=torch.float32
+            )
+            out["meta_bev_als_degenerate_height_edges"] = torch.tensor(
+                d["degenerate_height_edges"], dtype=torch.int64
+            )
             out["meta_bev_als_class_before"] = torch.from_numpy(np.asarray(d["class_before"], dtype=np.int64))
             out["meta_bev_als_class_in_bounds"] = torch.from_numpy(np.asarray(d["class_in_bounds"], dtype=np.int64))
             out["meta_bev_als_class_retention"] = torch.from_numpy(np.asarray(d["class_retention"], dtype=np.float32))

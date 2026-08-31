@@ -760,6 +760,18 @@ class DalesTiles(torch.utils.data.Dataset):
         out["meta_bev_als_empty_slices"] = torch.tensor(d["empty_slices"], dtype=torch.int64)
         out["meta_bev_als_multi_label_cells"] = torch.tensor(d["multi_label_cells"], dtype=torch.int64)
         out["meta_bev_als_multi_label_fraction"] = torch.tensor(d["multi_label_fraction"], dtype=torch.float32)
+        out["meta_bev_als_multi_class_xy_columns"] = torch.tensor(
+            d["multi_class_xy_columns"], dtype=torch.int64
+        )
+        out["meta_bev_als_multi_class_xy_column_fraction"] = torch.tensor(
+            d["multi_class_xy_column_fraction"], dtype=torch.float32
+        )
+        out["meta_bev_als_height_edge_min_gap_m"] = torch.tensor(
+            d["height_edge_min_gap_m"], dtype=torch.float32
+        )
+        out["meta_bev_als_degenerate_height_edges"] = torch.tensor(
+            d["degenerate_height_edges"], dtype=torch.int64
+        )
         out["meta_bev_als_class_before"] = torch.from_numpy(np.asarray(d["class_before"], dtype=np.int64))
         out["meta_bev_als_class_in_bounds"] = torch.from_numpy(np.asarray(d["class_in_bounds"], dtype=np.int64))
         out["meta_bev_als_class_retention"] = torch.from_numpy(np.asarray(d["class_retention"], dtype=np.float32))

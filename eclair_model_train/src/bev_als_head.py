@@ -61,6 +61,12 @@ class ALSHeightSlicedProjector(nn.Module):
 
         center = center_xy_m.to(device=feats.device, dtype=torch.float32)
         edges = height_edges_m.to(device=feats.device, dtype=torch.float32)
+        if center.ndim != 2 or tuple(center.shape[1:]) != (2,):
+            raise ValueError("BEV-ALS center_xy_m must have shape [B,2].")
+        if edges.ndim != 2 or tuple(edges.shape[1:]) != (self.cfg.height_slices - 1,):
+            raise ValueError(
+                f"BEV-ALS height_edges_m must have shape [B,{self.cfg.height_slices - 1}]."
+            )
         b = coords[:, 0]
         batch_size = int(center.shape[0])
         if coords.numel() and (int(b.min()) < 0 or int(b.max()) >= batch_size):
@@ -94,8 +100,12 @@ class ALSHeightSlicedProjector(nn.Module):
             size,
         )
         valid_grid = valid.view(batch_size, self.cfg.height_slices, size, size)
+        sample_total = torch.bincount(b, minlength=batch_size).to(torch.float32)
+        sample_in_bounds = torch.bincount(b[in_bounds], minlength=batch_size).to(torch.float32)
+        per_sample_fraction = sample_in_bounds / sample_total.clamp_min(1.0)
         diagnostics = {
             "feature_in_bounds_fraction": in_bounds.float().mean().detach() if in_bounds.numel() else feats.new_tensor(1.0),
+            "feature_in_bounds_fraction_per_sample": per_sample_fraction.detach(),
             "feature_valid_cells": valid_grid.sum().detach().to(torch.float32),
         }
         return dense, diagnostics

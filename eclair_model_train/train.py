@@ -32,6 +32,7 @@ from src.data_dales import (
     minkowski_collate_dales,
 )
 from src.data_eclair import EclairSamplingConfig, EclairTiles, PatchConfig, minkowski_collate_fn
+from src.dg_dataset import get_dg_dataset_contract
 from src.dist import DistEnv, all_reduce_sum, init_distributed, is_main_process
 from src.features import FeatureConfig, build_features, infer_in_channels
 from src.label_maps import ECLAIR_CLASS_NAMES_11
@@ -89,6 +90,39 @@ def _cleanup_checkpoint_temp_files(checkpoint_dir: Path) -> List[str]:
         except FileNotFoundError:
             pass
     return removed
+
+
+def _resume_contract_payload(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Scientific/training state that must not change across resume boundaries."""
+
+    run = cfg.get("run", {}) or {}
+    return {
+        "method": validate_method_contract(cfg).to_dict(),
+        "run": {
+            "seed": int(run.get("seed", 0)),
+            "amp": bool(run.get("amp", True)),
+            "eval_every_epochs": int(run.get("eval_every_epochs", 1)),
+            "max_train_batches_per_epoch": int(run.get("max_train_batches_per_epoch", 0) or 0),
+            "skip_validation": bool(run.get("skip_validation", False)),
+            "skip_final_test": bool(run.get("skip_final_test", False)),
+        },
+        "data": cfg.get("data", {}) or {},
+        "model": cfg.get("model", {}) or {},
+        "optim": cfg.get("optim", {}) or {},
+        "sched": cfg.get("sched", {}) or {},
+        "loss": cfg.get("loss", {}) or {},
+        "eval": cfg.get("eval", {}) or {},
+        "eclair": cfg.get("eclair", {}) or {},
+    }
+
+
+def _resume_contract_sha256(cfg: Dict[str, Any]) -> str:
+    payload = json.dumps(
+        _resume_contract_payload(cfg),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _eclair_run_cache_key(cfg: Dict[str, Any]) -> str:
@@ -226,6 +260,8 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             undefined_id=undefined_id,
             use_cache=bool(data.get("use_cache", True)),
             cache_root=data.get("cache_root", None),
+            require_cache=bool(data.get("require_cache", False)),
+            require_cache_metadata=bool(data.get("require_cache_metadata", False)),
             seed=int(cfg["run"]["seed"]),
             meta_filename=meta_filename,
             allowed_review_categories=train_cats,
@@ -253,6 +289,8 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             undefined_id=undefined_id,
             use_cache=bool(data.get("use_cache", True)),
             cache_root=data.get("cache_root", None),
+            require_cache=bool(data.get("require_cache", False)),
+            require_cache_metadata=bool(data.get("require_cache_metadata", False)),
             seed=int(cfg["run"]["seed"]) + 1,
             meta_filename=meta_filename,
             allowed_review_categories=val_cats,
@@ -280,6 +318,8 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
             undefined_id=undefined_id,
             use_cache=bool(data.get("use_cache", True)),
             cache_root=data.get("cache_root", None),
+            require_cache=bool(data.get("require_cache", False)),
+            require_cache_metadata=bool(data.get("require_cache_metadata", False)),
             seed=int(cfg["run"]["seed"]) + 2,
             meta_filename=meta_filename,
             allowed_review_categories=test_cats,
@@ -1585,6 +1625,7 @@ def train(cfg_path: str):
     dist_env = init_distributed()  # <-- move this UP before any writes
 
     dataset = str(cfg.get("data", {}).get("dataset", "eclair")).lower()
+    dataset_contract = get_dg_dataset_contract(dataset)
     eclair_run_cache_dir: Optional[Path] = None
     eclair_run_cache_base: Optional[Path] = None
 
@@ -1697,8 +1738,12 @@ def train(cfg_path: str):
         "epoch",
         "method",
         "debug_limited_run",
+        "lr_start",
         "lr",
         "train_loss",
+        "train_objective_batch_mean",
+        "train_aux_weighted_loss",
+        "train_objective_reconstruction_error",
         "train_seg_clean_loss",
         "train_seg_perturbed_loss",
         "train_ocons_consistency_loss",
@@ -1713,6 +1758,7 @@ def train(cfg_path: str):
         "world_size",
         "train_batches_per_rank",
         "best_val_miou",
+        "best_epoch",
         "checkpoint_dir_gb",
         "run_dir_gb",
         "run_cache_gb",
@@ -1732,6 +1778,10 @@ def train(cfg_path: str):
             "ocons_coordinate_match_coverage",
             "ocons_protection_constrained_rate",
             "ocons_protected_disappearances",
+            "ocons_application_rate",
+            "ocons_clean_voxels",
+            "ocons_perturbed_voxels",
+            "ocons_protected_min_retention",
             "ocons_micro_kl",
             "ocons_macro_kl",
             "ocons_agreement",
@@ -1746,9 +1796,16 @@ def train(cfg_path: str):
             "bev_als_recall",
             "bev_als_f1",
             "bev_als_in_bounds_fraction",
+            "bev_als_in_bounds_fraction_min",
             "bev_als_multi_label_fraction",
+            "bev_als_multi_class_xy_column_fraction",
             "bev_als_empty_slice_rate",
             "bev_als_feature_in_bounds_fraction",
+            "bev_als_feature_in_bounds_fraction_min",
+            "bev_als_height_edge_min_gap_m",
+            "bev_als_degenerate_height_edge_rate",
+            "bev_als_macro_f1_supported",
+            "bev_als_utility_f1_supported",
         ]
 
     # DALES crop debug metrics (blank for non-DALES / non-crops)
@@ -1848,6 +1905,7 @@ def train(cfg_path: str):
             [
                 "epoch", "height_slice", "class_id", "class_name",
                 "input_voxels", "in_bounds_voxels", "bounds_retention",
+                "class_present",
                 "positive_support", "tp", "fp", "fn", "precision", "recall", "f1",
             ],
         )
@@ -1855,6 +1913,7 @@ def train(cfg_path: str):
         bev_als_class_logger = None
 
     best_val_miou = -1.0
+    best_epoch = 0
     global_step = 0
     start_epoch = 1
 
@@ -1875,6 +1934,16 @@ def train(cfg_path: str):
             raise ValueError(
                 "Refusing to resume across methods: "
                 f"checkpoint={checkpoint_contract.name!r}, current={method_contract.name!r}."
+            )
+        current_resume_hash = _resume_contract_sha256(cfg)
+        checkpoint_resume_hash = str(
+            checkpoint.get("resume_contract_sha256")
+            or _resume_contract_sha256(checkpoint_cfg)
+        )
+        if checkpoint_resume_hash != current_resume_hash:
+            raise ValueError(
+                "Refusing to resume after a scientific/training configuration change: "
+                f"checkpoint_sha256={checkpoint_resume_hash} current_sha256={current_resume_hash}."
             )
 
         unwrap_model(model).load_state_dict(checkpoint["model_state"], strict=True)
@@ -1897,6 +1966,7 @@ def train(cfg_path: str):
         completed_epoch = int(checkpoint["epoch"])
         start_epoch = completed_epoch + 1
         best_val_miou = float(checkpoint.get("best_val_miou", -1.0))
+        best_epoch = int(checkpoint.get("best_epoch", 0))
         global_step = int(checkpoint.get("global_step", 0))
 
         if start_epoch > epochs:
@@ -1905,6 +1975,19 @@ def train(cfg_path: str):
                 "Increase epochs or remove run.resume_from."
             )
         if is_main_process(dist_env):
+            save_json(
+                out_dir / "resume_state.json",
+                {
+                    "status": "ok",
+                    "checkpoint": str(resume_path.resolve()),
+                    "completed_epoch": completed_epoch,
+                    "start_epoch": start_epoch,
+                    "global_step": global_step,
+                    "best_val_miou": best_val_miou,
+                    "best_epoch": best_epoch,
+                    "resume_contract_sha256": current_resume_hash,
+                },
+            )
             print(
                 f"[resume] loaded={resume_path} completed_epoch={completed_epoch} "
                 f"start_epoch={start_epoch} best_val_miou={best_val_miou:.6f}",
@@ -1940,6 +2023,7 @@ def train(cfg_path: str):
     for epoch in range(start_epoch, epochs + 1):
 
         epoch_wall_start = time.perf_counter()
+        epoch_lr_start = float(optimizer.param_groups[0]["lr"])
 
         model.train()
 
@@ -1980,15 +2064,21 @@ def train(cfg_path: str):
         ocons_loss_sum = 0.0
         bev_als_loss_sum = 0.0
         aux_weight_sum = 0.0
+        objective_batch_sum = 0.0
+        weighted_aux_loss_sum = 0.0
         grad_measurements = 0.0
         backbone_grad_norm_sum = 0.0
         aux_grad_norm_sum = 0.0
-        ocons_scalar_sum = torch.zeros(11, dtype=torch.float64)
+        ocons_scalar_sum = torch.zeros(13, dtype=torch.float64)
         ocons_class_before = torch.zeros(num_classes, dtype=torch.float64)
         ocons_class_after = torch.zeros(num_classes, dtype=torch.float64)
         ocons_class_kl_sum = torch.zeros(num_classes, dtype=torch.float64)
         ocons_class_kl_support = torch.zeros(num_classes, dtype=torch.float64)
-        bev_als_scalar_sum = torch.zeros(9, dtype=torch.float64)
+        ocons_min_protected_retention = 1.0
+        bev_als_scalar_sum = torch.zeros(13, dtype=torch.float64)
+        bev_target_bounds_min = 1.0
+        bev_feature_bounds_min = 1.0
+        bev_height_edge_gap_min = float("inf")
         bev_als_tp = torch.zeros((bev_als_cfg.height_slices, num_classes), dtype=torch.float64)
         bev_als_fp = torch.zeros_like(bev_als_tp)
         bev_als_fn = torch.zeros_like(bev_als_tp)
@@ -2141,12 +2231,16 @@ def train(cfg_path: str):
             n = int(valid.sum().item())
             train_loss_sum += float(total.item()) * max(1, n)
             train_n_sum += max(1, n)
+            objective_batch_sum += float(total.item())
 
             seg_clean_sum += float(seg_loss.item())
             if ocons_result is not None:
                 seg_pert_sum += float(ocons_result["perturbed_loss"].item())
                 ocons_loss_sum += float(ocons_result["consistency_loss"].item())
                 aux_weight_sum += float(ocons_result["consistency_weight"])
+                weighted_aux_loss_sum += float(
+                    ocons_result["consistency_weight"] * ocons_result["consistency_loss"].item()
+                )
                 vd = ocons_result["view_diagnostics"]
                 cd = ocons_result["consistency_diagnostics"]
                 ocons_scalar_sum += torch.tensor(
@@ -2162,8 +2256,14 @@ def train(cfg_path: str):
                         float(cd["agreement"].item()),
                         float(cd["clean_confidence"].item()),
                         float(cd["perturbed_confidence"].item()),
+                        float(vd.clean_voxels),
+                        float(vd.perturbed_voxels),
                     ],
                     dtype=torch.float64,
+                )
+                ocons_min_protected_retention = min(
+                    ocons_min_protected_retention,
+                    float(vd.protected_min_retention_observed),
                 )
                 ocons_class_before += vd.class_before.to(torch.float64)
                 ocons_class_after += vd.class_after.to(torch.float64)
@@ -2174,18 +2274,38 @@ def train(cfg_path: str):
                 assert bev_loss_step is not None and bev_als_diag is not None
                 bev_als_loss_sum += float(bev_loss_step.item())
                 aux_weight_sum += float(bev_w)
-                in_bounds = float(batch["meta_bev_als_in_bounds_fraction"].float().mean().item())
+                weighted_aux_loss_sum += float(bev_w * bev_loss_step.item())
+                target_bounds_per_sample = batch["meta_bev_als_in_bounds_fraction"].float()
+                in_bounds = float(target_bounds_per_sample.mean().item())
+                target_bounds_min = float(target_bounds_per_sample.min().item())
                 multi = float(batch["meta_bev_als_multi_label_fraction"].float().mean().item())
+                multi_column = float(
+                    batch["meta_bev_als_multi_class_xy_column_fraction"].float().mean().item()
+                )
                 feature_in_bounds = float(bev_als_diag["feature_in_bounds_fraction"].item())
-                if in_bounds < bev_als_cfg.min_in_bounds_fraction or feature_in_bounds < bev_als_cfg.min_in_bounds_fraction:
+                feature_bounds_per_sample = bev_als_diag["feature_in_bounds_fraction_per_sample"]
+                feature_bounds_min = float(feature_bounds_per_sample.min().item())
+                if (
+                    target_bounds_min < bev_als_cfg.min_in_bounds_fraction
+                    or feature_bounds_min < bev_als_cfg.min_in_bounds_fraction
+                ):
                     raise RuntimeError(
                         "BEV-ALS crop/frame coverage fell below the configured correctness floor: "
-                        f"target={in_bounds:.6f}, block8={feature_in_bounds:.6f}, "
+                        f"target_min={target_bounds_min:.6f}, block8_min={feature_bounds_min:.6f}, "
                         f"minimum={bev_als_cfg.min_in_bounds_fraction:.6f}."
                     )
+                bev_target_bounds_min = min(bev_target_bounds_min, target_bounds_min)
+                bev_feature_bounds_min = min(bev_feature_bounds_min, feature_bounds_min)
                 empty_rate = float(batch["meta_bev_als_empty_slices"].float().mean().item()) / float(
                     bev_als_cfg.height_slices
                 )
+                edge_gap = float(batch["meta_bev_als_height_edge_min_gap_m"].float().mean().item())
+                edge_gap_min = float(batch["meta_bev_als_height_edge_min_gap_m"].float().min().item())
+                degenerate_count = float(
+                    batch["meta_bev_als_degenerate_height_edges"].double().sum().item()
+                )
+                frame_count = float(batch["meta_bev_als_degenerate_height_edges"].numel())
+                bev_height_edge_gap_min = min(bev_height_edge_gap_min, edge_gap_min)
                 bev_als_scalar_sum += torch.tensor(
                     [
                         float(bev_als_diag["bce"].item()),
@@ -2197,6 +2317,10 @@ def train(cfg_path: str):
                         multi,
                         empty_rate,
                         feature_in_bounds,
+                        multi_column,
+                        edge_gap,
+                        degenerate_count,
+                        frame_count,
                     ],
                     dtype=torch.float64,
                 )
@@ -2358,6 +2482,8 @@ def train(cfg_path: str):
                 grad_measurements,
                 backbone_grad_norm_sum,
                 aux_grad_norm_sum,
+                objective_batch_sum,
+                weighted_aux_loss_sum,
             ],
             dtype=torch.float64,
             device=device,
@@ -2367,6 +2493,8 @@ def train(cfg_path: str):
         grad_denom = max(1.0, float(base_totals[8].item()))
         backbone_grad_mean = float(base_totals[9].item()) / grad_denom
         aux_grad_mean = float(base_totals[10].item()) / grad_denom
+        objective_batch_mean = float(base_totals[11].item()) / component_denom
+        weighted_aux_loss_mean = float(base_totals[12].item()) / component_denom
         strict_diagnostic = bool(
             max_train_batches > 0 or run.get("skip_validation", False) or run.get("skip_final_test", False)
         )
@@ -2382,6 +2510,13 @@ def train(cfg_path: str):
         ocons_after_global = all_reduce_sum(dist_env, ocons_class_after.to(device)).detach().cpu()
         ocons_kl_sum_global = all_reduce_sum(dist_env, ocons_class_kl_sum.to(device)).detach().cpu()
         ocons_kl_support_global = all_reduce_sum(dist_env, ocons_class_kl_support.to(device)).detach().cpu()
+        ocons_min_retention_global = torch.tensor(
+            ocons_min_protected_retention,
+            dtype=torch.float64,
+            device=device,
+        )
+        if dist_env.enabled:
+            torch.distributed.all_reduce(ocons_min_retention_global, op=torch.distributed.ReduceOp.MIN)
 
         bev_als_global = all_reduce_sum(dist_env, bev_als_scalar_sum.to(device)).detach().cpu()
         bev_als_tp_global = all_reduce_sum(dist_env, bev_als_tp.to(device)).detach().cpu()
@@ -2392,6 +2527,13 @@ def train(cfg_path: str):
         bev_als_class_in_bounds_global = all_reduce_sum(
             dist_env, bev_als_class_in_bounds.to(device)
         ).detach().cpu()
+        bev_minima_global = torch.tensor(
+            [bev_target_bounds_min, bev_feature_bounds_min, bev_height_edge_gap_min],
+            dtype=torch.float64,
+            device=device,
+        )
+        if dist_env.enabled:
+            torch.distributed.all_reduce(bev_minima_global, op=torch.distributed.ReduceOp.MIN)
 
         peak = torch.zeros(2, dtype=torch.float64, device=device)
         if torch.cuda.is_available():
@@ -2480,6 +2622,7 @@ def train(cfg_path: str):
         is_best = do_eval and (val_metrics["miou"] > best_val_miou)
         if is_best:
             best_val_miou = float(val_metrics["miou"])
+            best_epoch = int(epoch)
 
         if is_main_process(dist_env) and do_eval:
             confusion_payload = {
@@ -2506,6 +2649,8 @@ def train(cfg_path: str):
                 "model_state": unwrap_model(model).state_dict(),
                 "cfg": cfg,
                 "best_val_miou": best_val_miou,
+                "best_epoch": best_epoch,
+                "resume_contract_sha256": _resume_contract_sha256(cfg),
             }
             resumable_state = {
                 **common_checkpoint,
@@ -2573,12 +2718,35 @@ def train(cfg_path: str):
             torch.distributed.all_reduce(epoch_wall_time_max, op=torch.distributed.ReduceOp.MAX)
         epoch_wall_time_s = float(epoch_wall_time_max.item())
 
+        clean_component_mean = float(base_totals[3].item()) / component_denom
+        perturbed_component_mean = float(base_totals[4].item()) / component_denom
+        if ocons_cfg.enabled:
+            reconstructed_objective = (
+                0.5 * clean_component_mean
+                + 0.5 * perturbed_component_mean
+                + weighted_aux_loss_mean
+            )
+        elif bev_als_cfg.enabled:
+            reconstructed_objective = clean_component_mean + weighted_aux_loss_mean
+        else:
+            reconstructed_objective = clean_component_mean
+        objective_reconstruction_error = abs(objective_batch_mean - reconstructed_objective)
+        if (ocons_cfg.enabled or bev_als_cfg.enabled) and objective_reconstruction_error > 1e-5:
+            raise RuntimeError(
+                "Logged DG objective components do not reconstruct the optimized objective: "
+                f"error={objective_reconstruction_error:.8g}."
+            )
+
         row = {
             "epoch": epoch,
             "method": method_contract.name,
             "debug_limited_run": int(strict_diagnostic),
+            "lr_start": epoch_lr_start,
             "lr": lr,
             "train_loss": train_loss,
+            "train_objective_batch_mean": objective_batch_mean,
+            "train_aux_weighted_loss": weighted_aux_loss_mean,
+            "train_objective_reconstruction_error": objective_reconstruction_error,
             "train_seg_clean_loss": float(base_totals[3].item()) / component_denom,
             "train_seg_perturbed_loss": (
                 float(base_totals[4].item()) / component_denom if ocons_cfg.enabled else float("nan")
@@ -2603,6 +2771,7 @@ def train(cfg_path: str):
             "world_size": int(dist_env.world_size),
             "train_batches_per_rank": int(processed_steps),
             "best_val_miou": best_val_miou,
+            "best_epoch": best_epoch,
             "checkpoint_dir_gb": checkpoint_dir_gb,
             "run_dir_gb": run_dir_gb,
             "run_cache_gb": run_cache_gb,
@@ -2618,14 +2787,21 @@ def train(cfg_path: str):
         }
 
         if ocons_cfg.enabled:
+            clean_voxels = float(ocons_global[11].item())
+            perturbed_voxels = float(ocons_global[12].item())
+            exact_retention = perturbed_voxels / max(1.0, clean_voxels)
             row.update(
                 {
-                    "ocons_actual_mask_fraction": float(ocons_global[0].item()) / component_denom,
-                    "ocons_active_jaccard": float(ocons_global[1].item()) / component_denom,
+                    "ocons_actual_mask_fraction": 1.0 - exact_retention,
+                    "ocons_active_jaccard": exact_retention,
                     "ocons_coordinate_match_coverage": float(ocons_global[2].item()) / component_denom,
                     "ocons_protection_constrained_rate": float(ocons_global[3].item())
                     / max(1.0, float(ocons_global[4].item())),
                     "ocons_protected_disappearances": int(ocons_global[5].item()),
+                    "ocons_application_rate": 1.0,
+                    "ocons_clean_voxels": int(clean_voxels),
+                    "ocons_perturbed_voxels": int(perturbed_voxels),
+                    "ocons_protected_min_retention": float(ocons_min_retention_global.item()),
                     "ocons_micro_kl": float(ocons_global[6].item()) / component_denom,
                     "ocons_macro_kl": float(ocons_global[7].item()) / component_denom,
                     "ocons_agreement": float(ocons_global[8].item()) / component_denom,
@@ -2659,6 +2835,23 @@ def train(cfg_path: str):
             precision = tp_all / max(1.0, tp_all + fp_all)
             recall = tp_all / max(1.0, tp_all + fn_all)
             f1 = 2.0 * precision * recall / max(1e-8, precision + recall)
+            f1_by_slice_class = (
+                2.0 * bev_als_tp_global
+                / (2.0 * bev_als_tp_global + bev_als_fp_global + bev_als_fn_global).clamp_min(1.0)
+            )
+            supported = bev_als_positive_global > 0
+            macro_supported = (
+                float(f1_by_slice_class[supported].mean().item())
+                if bool(supported.any())
+                else float("nan")
+            )
+            utility_supported = supported[:, list(dataset_contract.utility_class_ids)]
+            utility_values = f1_by_slice_class[:, list(dataset_contract.utility_class_ids)]
+            utility_f1_supported = (
+                float(utility_values[utility_supported].mean().item())
+                if bool(utility_supported.any())
+                else float("nan")
+            )
             row.update(
                 {
                     "bev_als_bce": float(bev_als_global[0].item()) / component_denom,
@@ -2667,9 +2860,17 @@ def train(cfg_path: str):
                     "bev_als_recall": recall,
                     "bev_als_f1": f1,
                     "bev_als_in_bounds_fraction": float(bev_als_global[5].item()) / component_denom,
+                    "bev_als_in_bounds_fraction_min": float(bev_minima_global[0].item()),
                     "bev_als_multi_label_fraction": float(bev_als_global[6].item()) / component_denom,
+                    "bev_als_multi_class_xy_column_fraction": float(bev_als_global[9].item()) / component_denom,
                     "bev_als_empty_slice_rate": float(bev_als_global[7].item()) / component_denom,
                     "bev_als_feature_in_bounds_fraction": float(bev_als_global[8].item()) / component_denom,
+                    "bev_als_feature_in_bounds_fraction_min": float(bev_minima_global[1].item()),
+                    "bev_als_height_edge_min_gap_m": float(bev_minima_global[2].item()),
+                    "bev_als_degenerate_height_edge_rate": float(bev_als_global[11].item())
+                    / max(1.0, float(bev_als_global[12].item())),
+                    "bev_als_macro_f1_supported": macro_supported,
+                    "bev_als_utility_f1_supported": utility_f1_supported,
                 }
             )
             if is_main_process(dist_env):
@@ -2683,6 +2884,7 @@ def train(cfg_path: str):
                         r = tp / max(1.0, tp + fn)
                         class_before = float(bev_als_class_before_global[class_id].item())
                         class_in_bounds = float(bev_als_class_in_bounds_global[class_id].item())
+                        class_present = class_before > 0.0
                         bev_als_class_logger.log(
                             {
                                 "epoch": epoch,
@@ -2691,7 +2893,10 @@ def train(cfg_path: str):
                                 "class_name": class_name,
                                 "input_voxels": int(class_before),
                                 "in_bounds_voxels": int(class_in_bounds),
-                                "bounds_retention": class_in_bounds / max(1.0, class_before),
+                                "bounds_retention": (
+                                    class_in_bounds / class_before if class_present else float("nan")
+                                ),
+                                "class_present": int(class_present),
                                 "positive_support": int(bev_als_positive_global[slice_id, class_id].item()),
                                 "tp": int(tp),
                                 "fp": int(fp),
@@ -2880,6 +3085,10 @@ def train(cfg_path: str):
                     "max_train_batches_per_epoch": int(run.get("max_train_batches_per_epoch", 0) or 0),
                     "skip_validation": bool(run.get("skip_validation", False)),
                     "skip_final_test": True,
+                    "best_val_miou": best_val_miou,
+                    "best_epoch": best_epoch,
+                    "output_dir": str(out_dir.resolve()),
+                    "resume_exercised": (out_dir / "resume_state.json").is_file(),
                     "warning": "This is an integration diagnostic, not a scientific result.",
                 },
             )
