@@ -1,0 +1,37 @@
+[
+  {
+    "path": "diagnose_project.py",
+    "sha256": "25fb7ca26e259d07765c5178f76c98dbd89b984364014b9ae35146c4576abb5a",
+    "bytes": 84999
+  },
+  {
+    "path": "README.md",
+    "sha256": "3f49b317e5c3eac841895c86320e0f018271f66664b536cd1c8381802821044d",
+    "bytes": 5590
+  },
+  {
+    "path": "test_diagnose_project.py",
+    "sha256": "ad153fb681df66623489bf85d2fd931dadf37c5d3fe370b89f919839407b69c3",
+    "bytes": 12188
+  },
+  {
+    "path": "validation.json",
+    "sha256": "36414bcc6496c6953cdcb37b98e8f4356738f5bf0ae859d42e2b6941ca46970a",
+    "bytes": 999
+  },
+  {
+    "path": "original_archive_crosscheck.json",
+    "sha256": "27b6b1f401f20bb1f0a1fe41c9ca2bb55abe6b040517f127ac65a7a7a0bfc6c4",
+    "bytes": 7844
+  },
+  {
+    "path": "existing_evidence_recheck.json",
+    "sha256": "a9109ed3b39f27a139a77e7bfa8e072d69a05df4951de7e1a8f2157470ed4ced",
+    "bytes": 50814
+  },
+  {
+    "path": "Adversarial_Review_and_One_Shot_Diagnosis.md",
+    "sha256": "ca47601b2e889a869e89556fb1d90ac6f902377c959cb9bcbe875f561e291da3",
+    "bytes": 20462
+  }
+]

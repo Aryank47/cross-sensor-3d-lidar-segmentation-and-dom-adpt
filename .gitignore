@@ -212,3 +212,5 @@ eclair_mini/*
 runs/
 *.patch
 *.before_mix3d
+*.tar.gz
+*.sha256

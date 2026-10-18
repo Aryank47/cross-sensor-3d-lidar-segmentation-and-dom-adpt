@@ -1,0 +1,327 @@
+{
+  "archive": "output\\evidence\\cross_eval_complete_history_baseline_mix3d_ocons_bev_20260903_185132.tar.gz",
+  "archive_sha256": "8b876c6e63b70583c8cebce621cd8acc1f02b1ed01186a3fa990a09cbf056b0a",
+  "checks": [
+    {
+      "job": "39100",
+      "source": "dales",
+      "target": "dales",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 135962320,
+      "matrix_total": 135962320
+    },
+    {
+      "job": "39096",
+      "source": "dales",
+      "target": "dales",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 135962320,
+      "matrix_total": 135962320
+    },
+    {
+      "job": "39101",
+      "source": "dales",
+      "target": "eclair",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 55647987,
+      "matrix_total": 55647987
+    },
+    {
+      "job": "39097",
+      "source": "dales",
+      "target": "eclair",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 55647987,
+      "matrix_total": 55647987
+    },
+    {
+      "job": "39099",
+      "source": "eclair",
+      "target": "dales",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 135962320,
+      "matrix_total": 135962320
+    },
+    {
+      "job": "39095",
+      "source": "eclair",
+      "target": "dales",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 135962320,
+      "matrix_total": 135962320
+    },
+    {
+      "job": "39082",
+      "source": "eclair",
+      "target": "eclair",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 55647987,
+      "matrix_total": 55647987
+    },
+    {
+      "job": "39098",
+      "source": "eclair",
+      "target": "eclair",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 55647987,
+      "matrix_total": 55647987
+    },
+    {
+      "job": "39924",
+      "source": "dales",
+      "target": "dales",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 135962320,
+      "matrix_total": 135962320
+    },
+    {
+      "job": "39925",
+      "source": "dales",
+      "target": "eclair",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 55647987,
+      "matrix_total": 55647987
+    },
+    {
+      "job": "39926",
+      "source": "eclair",
+      "target": "dales",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 135962320,
+      "matrix_total": 135962320
+    },
+    {
+      "job": "39927",
+      "source": "eclair",
+      "target": "eclair",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 55647987,
+      "matrix_total": 55647987
+    },
+    {
+      "job": "39919",
+      "source": "dales",
+      "target": "dales",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 135962320,
+      "matrix_total": 135962320
+    },
+    {
+      "job": "39920",
+      "source": "dales",
+      "target": "eclair",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 55647987,
+      "matrix_total": 55647987
+    },
+    {
+      "job": "39921",
+      "source": "eclair",
+      "target": "dales",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 135962320,
+      "matrix_total": 135962320
+    },
+    {
+      "job": "39923",
+      "source": "eclair",
+      "target": "eclair",
+      "original_npy_matches_inventory": true,
+      "original_json_cm_matches_npy": true,
+      "miou_absolute_error": 0.0,
+      "class_names": [
+        "ignore",
+        "ground",
+        "vegetation",
+        "buildings",
+        "wires",
+        "poles",
+        "fence",
+        "vehicle"
+      ],
+      "n_points_eval": 55647987,
+      "matrix_total": 55647987
+    }
+  ],
+  "all_pass": true
+}
