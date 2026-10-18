@@ -1,0 +1,7 @@
+extends: study_dales_reference120.yaml
+run:
+  name: study_dales_context120
+model:
+  layers: [1, 1, 2, 1, 1, 1, 1, 1]
+study:
+  arm: context

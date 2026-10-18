@@ -9,6 +9,7 @@
 #SBATCH --time=04:00:00
 #SBATCH --output=/scratch/m23csa510/e0_logs/dg_diag_%j.out
 #SBATCH --error=/scratch/m23csa510/e0_logs/dg_diag_%j.err
+#SBATCH --exclude=C07
 
 set -euo pipefail
 set +u

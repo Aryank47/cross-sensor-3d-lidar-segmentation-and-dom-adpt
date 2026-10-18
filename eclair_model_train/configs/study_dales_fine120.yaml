@@ -1,0 +1,7 @@
+extends: study_dales_reference120.yaml
+run:
+  name: study_dales_fine120
+model:
+  layers: [1, 1, 1, 1, 1, 1, 1, 2]
+study:
+  arm: fine

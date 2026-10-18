@@ -9,6 +9,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=/scratch/m23csa510/e0_logs/project_diag_%j.out
 #SBATCH --error=/scratch/m23csa510/e0_logs/project_diag_%j.err
+#SBATCH --exclude=C07
 
 # Uses the same partition/resources/modules as the existing cross-eval launcher.
 # Submit with sbatch; the Python diagnostic itself is a single-process program.

@@ -223,7 +223,10 @@ class MinkUNetBase(ResNetBase):
     INIT_DIM = 32
     OUT_TENSOR_STRIDE = 1
 
-    def __init__(self, in_channels, out_channels, D=3):
+    def __init__(self, in_channels, out_channels, D=3, layers=None):
+        if layers is not None:
+            from .study_architecture import block_counts
+            self.LAYERS = block_counts({"model": {"layers": layers}})
         ResNetBase.__init__(self, in_channels, out_channels, D)
 
     def network_initialization(self, in_channels, out_channels, D):
@@ -483,7 +486,24 @@ class MinkUNetWithALSBEV(torch.nn.Module):
 
 
 def build_model(in_channels: int, out_channels: int, D: int = 3, *, cfg: Optional[dict[str, Any]] = None):
-    base = MinkUNet14C(in_channels=in_channels, out_channels=out_channels, D=D)
+    from .study_architecture import block_counts
+    study_enabled = bool((cfg or {}).get("study", {}).get("enabled", False))
+    if study_enabled:
+        from .study_architecture import initialize_matched
+        with torch.random.fork_rng(devices=[]):
+            base = MinkUNet14C(in_channels=in_channels, out_channels=out_channels, D=D, layers=block_counts(cfg))
+            initialize_matched(base, cfg)
+        base._study_enabled = True
+        base._study_capture = False
+        base._study_classifier_features = None
+        base._study_classifier_coords = None
+        def capture_classifier(_module, inputs):
+            if base._study_capture:
+                base._study_classifier_features = inputs[0].F.detach()
+                base._study_classifier_coords = inputs[0].C
+        base.final.register_forward_pre_hook(capture_classifier)
+    else:
+        base = MinkUNet14C(in_channels=in_channels, out_channels=out_channels, D=D, layers=block_counts(cfg))
 
     if cfg is None:
         return base

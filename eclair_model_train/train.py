@@ -49,6 +49,7 @@ from src.ocons import (
     ocons_weight_for_epoch,
     stable_ocons_seed,
 )
+from src.study_runtime import StudyRuntime
 from src.utils import CSVLogger, atomic_save_torch, format_seconds, save_json, set_seed, unwrap_model
 from src.voxelization import VoxelizationConfig, voxelize_from_q
 from torch.utils.data import DataLoader
@@ -96,7 +97,10 @@ def _resume_contract_payload(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Scientific/training state that must not change across resume boundaries."""
 
     run = cfg.get("run", {}) or {}
+    study = cfg.get("study", {})
+    study_contract = {"study_contract": {k: v for k, v in study.items() if k != "storage"}} if study.get("enabled") else {}
     return {
+        **study_contract,
         "method": validate_method_contract(cfg).to_dict(),
         "run": {
             "seed": int(run.get("seed", 0)),
@@ -497,7 +501,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
 
         # NOTE: caching is handled inside DalesTiles only if you add the
         # cache params as in my earlier patch; if you want that,
-        # tell me and I’ll diff it cleanly against your current
+        # tell me and Iâ€™ll diff it cleanly against your current
         # src/data_dales.py version.
 
         collate = minkowski_collate_dales
@@ -515,12 +519,13 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
         val_sampler = None
         test_sampler = None
 
+    study_enabled = bool(cfg.get("study", {}).get("enabled", False))
     dl_kwargs = dict(
         batch_size=int(data["batch_size"]),
         num_workers=int(data["num_workers"]),
         pin_memory=True,
         collate_fn=collate,
-        persistent_workers=int(data["num_workers"]) > 0,
+        persistent_workers=(int(data["num_workers"]) > 0 and not study_enabled),
     )
     # Speed: prefetch more batches per worker (PyTorch default is 2).
     if int(data["num_workers"]) > 0:
@@ -531,6 +536,7 @@ def build_dataloaders(cfg: Dict[str, Any], dist_env: DistEnv, *, eclair_run_cach
         shuffle=(train_sampler is None),
         sampler=train_sampler,
         drop_last=True,
+        generator=(torch.Generator().manual_seed(int(cfg["run"]["seed"])) if study_enabled else None),
         **dl_kwargs,
     )
     val_loader = DataLoader(val_ds, shuffle=False, sampler=val_sampler, drop_last=False, **dl_kwargs)
@@ -774,7 +780,7 @@ def eval_and_visualize_bev(
                 out_st, bev_pred = out
             else:
                 # If the model doesn't return BEV even when requested, skip
-                out_st, bev_pred = out, None
+                _out_st, bev_pred = out, None
 
         if bev_pred is None:
             continue
@@ -916,6 +922,19 @@ def _forward_batch(
     if isinstance(out, (tuple, list)) and len(out) == 2:
         out, bev_pred = out  # out is SparseTensor
     logits = out.F  # [N, C]
+    base = unwrap_model(model)
+    if getattr(base, "_study_enabled", False):
+        base._study_label_reordered = not torch.equal(batch["coords"].cpu(), out.C.cpu())
+        if base._study_label_reordered:
+            labels, coverage = _labels_in_output_order(coords, labels, out.C)
+            if coverage != 1.0:
+                raise RuntimeError("Study sparse output does not cover all input labels")
+        if base._study_capture and not torch.equal(base._study_classifier_coords, out.C):
+            indices, coverage = match_sparse_coordinates(base._study_classifier_coords, out.C, require_all=True)
+            if coverage != 1.0:
+                raise RuntimeError("Classifier audit feature/logit coordinate coverage mismatch")
+            base._study_classifier_features = base._study_classifier_features.index_select(
+                0, indices.to(base._study_classifier_features.device))
     return logits, labels, bev_pred
 
 
@@ -1668,6 +1687,7 @@ def train(cfg_path: str):
     device = torch.device(f"cuda:{dist_env.local_rank}" if torch.cuda.is_available() else "cpu")
 
     amp = bool(run.get("amp", True))
+    study = StudyRuntime(cfg, dist_env, device, out_dir)
 
     train_loader, val_loader, test_loader = build_dataloaders(cfg, dist_env, eclair_run_cache_dir=eclair_run_cache_dir)
 
@@ -1923,7 +1943,7 @@ def train(cfg_path: str):
         if not resume_path.is_file():
             raise FileNotFoundError(f"Resume checkpoint does not exist: {resume_path}")
 
-        checkpoint = torch.load(resume_path, map_location="cpu")
+        checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
         required = {"epoch", "model_state", "optimizer_state"}
         missing = sorted(required.difference(checkpoint.keys()))
         if missing:
@@ -1969,7 +1989,12 @@ def train(cfg_path: str):
         best_epoch = int(checkpoint.get("best_epoch", 0))
         global_step = int(checkpoint.get("global_step", 0))
 
-        if start_epoch > epochs:
+        if study.enabled:
+            if "study_rank_states" not in checkpoint:
+                raise ValueError("Study resume requires its own per-rank RNG checkpoint")
+            study.restore(checkpoint["study_rank_states"], completed_epoch)
+            study.repair_best(checkpoint)
+        if start_epoch > epochs and not study.enabled:
             raise ValueError(
                 f"Checkpoint already completed epoch {completed_epoch}, but epochs={epochs}. "
                 "Increase epochs or remove run.resume_from."
@@ -2022,6 +2047,8 @@ def train(cfg_path: str):
 
     for epoch in range(start_epoch, epochs + 1):
 
+        if study.enabled:
+            study.begin_epoch(epoch, train_loader)
         epoch_wall_start = time.perf_counter()
         epoch_lr_start = float(optimizer.param_groups[0]["lr"])
 
@@ -2145,6 +2172,9 @@ def train(cfg_path: str):
         for step, batch in enumerate(train_loader, start=1):
             if max_train_batches > 0 and step > max_train_batches:
                 break
+            if study.enabled:
+                study.observe_batch(batch)
+                unwrap_model(model)._study_capture = step <= int(study.options.get("gradient_batches_per_epoch", 1))
             processed_steps += 1
             component_steps += 1.0
             bev_loss_step = None
@@ -2221,7 +2251,11 @@ def train(cfg_path: str):
                             **(bev_pred.get("bev_als_diagnostics", {}) or {}),
                         }
 
+                if study.enabled:
+                    study.audit_loss(logits, labels, criterion, unwrap_model(model), step)
                 scaler.scale(total / float(grad_accum)).backward()
+                if study.enabled:
+                    unwrap_model(model)._study_classifier_features = None
 
             if cm_train is not None:
                 preds = logits.argmax(dim=1)
@@ -2394,8 +2428,11 @@ def train(cfg_path: str):
                 grad_measurements += 1.0
                 backbone_grad_norm_sum += backbone_norm
                 aux_grad_norm_sum += aux_norm
-                scaler.step(optimizer)
-                scaler.update()
+                if study.enabled:
+                    study.optimizer_step(scaler, optimizer)
+                else:
+                    scaler.step(optimizer)
+                    scaler.update()
                 optimizer.zero_grad(set_to_none=True)
 
             global_step += 1
@@ -2446,8 +2483,11 @@ def train(cfg_path: str):
             grad_measurements += 1.0
             backbone_grad_norm_sum += backbone_norm
             aux_grad_norm_sum += aux_norm
-            scaler.step(optimizer)
-            scaler.update()
+            if study.enabled:
+                study.optimizer_step(scaler, optimizer)
+            else:
+                scaler.step(optimizer)
+                scaler.update()
             optimizer.zero_grad(set_to_none=True)
 
         if scheduler is not None:
@@ -2618,6 +2658,8 @@ def train(cfg_path: str):
             torch.distributed.all_reduce(eval_time_max, op=torch.distributed.ReduceOp.MAX)
         eval_time_s = float(eval_time_max.item())
 
+        if study.enabled:
+            study.end_epoch(val_metrics, time.perf_counter() - epoch_wall_start, unwrap_model(model))
         # ---- Checkpointing ----
         is_best = do_eval and (val_metrics["miou"] > best_val_miou)
         if is_best:
@@ -2641,7 +2683,7 @@ def train(cfg_path: str):
 
         save_every = int(run.get("save_every_epochs", 5))
 
-        if is_main_process(dist_env) and (epoch % save_every == 0 or epoch == epochs or is_best):
+        if study.enabled or (is_main_process(dist_env) and (epoch % save_every == 0 or epoch == epochs or is_best)):
             common_checkpoint = {
                 "epoch": epoch,
                 "global_step": global_step,
@@ -2659,30 +2701,34 @@ def train(cfg_path: str):
                 "scaler_state": scaler.state_dict(),
             }
             ckpt_dir = out_dir / "checkpoints"
-            # last.pt is resumable and is atomically overwritten; it never accumulates.
-            atomic_save_torch(resumable_state, ckpt_dir / "last.pt")
-            if is_best:
-                best_model_only = bool(run.get("best_checkpoint_model_only", False))
-                atomic_save_torch(
-                    common_checkpoint if best_model_only else resumable_state,
-                    ckpt_dir / "best.pt",
-                )
+            # Study writes on rank zero and broadcasts errors to all ranks.
+            if study.enabled:
+                study.save(common_checkpoint, resumable_state, is_best)
+            # Legacy path remains unchanged outside the opt-in study.
+            if not study.enabled:
+                atomic_save_torch(resumable_state, ckpt_dir / "last.pt")
+                if is_best:
+                    best_model_only = bool(run.get("best_checkpoint_model_only", False))
+                    atomic_save_torch(
+                        common_checkpoint if best_model_only else resumable_state,
+                        ckpt_dir / "best.pt",
+                    )
 
-            keep_epoch_snapshots = bool(run.get("keep_epoch_snapshots", False))
-            if keep_epoch_snapshots and (epoch % save_every == 0 or epoch == epochs):
-                snapshot_model_only = bool(run.get("epoch_snapshots_model_only", True))
-                atomic_save_torch(
-                    common_checkpoint if snapshot_model_only else resumable_state,
-                    ckpt_dir / f"epoch_{epoch:03d}.pt",
-                )
+                keep_epoch_snapshots = bool(run.get("keep_epoch_snapshots", False))
+                if keep_epoch_snapshots and (epoch % save_every == 0 or epoch == epochs):
+                    snapshot_model_only = bool(run.get("epoch_snapshots_model_only", True))
+                    atomic_save_torch(
+                        common_checkpoint if snapshot_model_only else resumable_state,
+                        ckpt_dir / f"epoch_{epoch:03d}.pt",
+                    )
 
-            keep_last_k = int(run.get("keep_last_k_epoch_snapshots", 0))
-            removed = _prune_epoch_snapshots(
-                ckpt_dir,
-                keep_last_k if keep_epoch_snapshots else 0,
-            )
-            if removed:
-                print(f"[storage] pruned epoch checkpoints: {removed}", flush=True)
+                keep_last_k = int(run.get("keep_last_k_epoch_snapshots", 0))
+                removed = _prune_epoch_snapshots(
+                    ckpt_dir,
+                    keep_last_k if keep_epoch_snapshots else 0,
+                )
+                if removed:
+                    print(f"[storage] pruned epoch checkpoints: {removed}", flush=True)
 
         if dist_env.enabled:
             torch.distributed.barrier()  # optional but nice: sync after saving
@@ -3073,6 +3119,15 @@ def train(cfg_path: str):
                 f"best={best_val_miou:.4f} train_time={format_seconds(epoch_s)} "
                 f"eval_time={format_seconds(eval_time_s)} wall_time={format_seconds(epoch_wall_time_s)}"
             )
+
+        if study.enabled and epoch < epochs and study.should_stop():
+            study.finish("needs_resume")
+            return
+
+    if study.enabled:
+        study.last_completed = epochs
+        study.finish("training_complete")
+        return  # frozen canonical evaluation runs as separate resumable stages
 
     if bool(run.get("skip_final_test", False)):
         if is_main_process(dist_env):

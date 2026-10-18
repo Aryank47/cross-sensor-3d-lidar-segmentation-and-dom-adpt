@@ -1,0 +1,22 @@
+extends: m0_dales_frozen_29364.yaml
+run:
+  name: study_dales_reference120
+  seed: 1337
+  save_every_epochs: 1
+  keep_epoch_snapshots: false
+  keep_last_k_epoch_snapshots: 0
+  best_checkpoint_model_only: true
+  max_run_dir_gb: 2.0
+model:
+  layers: [1, 1, 1, 1, 1, 1, 1, 1]
+study:
+  enabled: true
+  version: 1
+  arm: reference
+  gradient_batches_per_epoch: 1
+  checkpoint_selection: source_native_miou
+  balanced_gate: zero_per_class_regression_screen
+  storage:
+    run_budget_bytes: 2147483648
+    reserve_bytes: 536870912
+    diagnostics_budget_bytes: 134217728
