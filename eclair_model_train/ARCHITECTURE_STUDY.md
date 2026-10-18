@@ -140,6 +140,23 @@ The user-reported scratch quota had approximately 92 GiB below its soft limit;
 the submission helper checks the current quota again rather than trusting that
 old value. It admits two 2 GiB arms plus 2 GiB additional headroom by default.
 
+Quota must be readable on the login node at every submission, including resume.
+The launcher passes a timestamped quota receipt through Slurm's job environment.
+The allocation checks its user, study directory, arms, budget and maximum age of
+48 hours. It prefers a live compute-node quota query. If that query is unavailable
+(for example, a remote mount has no matching quota row), it records and announces
+use of the login-node observation in `storage_admission.json`. A readable live
+quota below the required budget still stops the job. Missing or stale receipts
+are refused. Filesystem free-space, inode and per-run limits remain active.
+The receipt does not reserve quota: unrelated writes by this account can consume
+space after submission, and a filesystem free-space check cannot detect that.
+
+If an attempt failed before training and the launcher code has since changed,
+start with a new study name, for example `dales_arch_s1337_qfix`. Keep the old
+directory as the failure record. Do not use `--resume` across a code change:
+the source-manifest check intentionally refuses it. This does not discard any
+trained checkpoint in the old directory.
+
 Retain only full-resume `last.pt` and model-only `best.pt`. Atomic replacement needs
 space for the previous and new checkpoint simultaneously. Storage is checked
 before each save; errors are propagated across DDP ranks. The previous atomic

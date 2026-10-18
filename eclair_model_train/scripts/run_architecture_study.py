@@ -91,15 +91,15 @@ def run(args):
     storage_guard(out, 512 * 1024**2, cfg["study"]["storage"])
     import shutil
 
-    from scripts.submit_architecture_study import quota_headroom
+    from scripts.submit_architecture_study import allocation_quota_admission
 
-    headroom = quota_headroom(out)
-    if headroom < cfg["study"]["storage"]["run_budget_bytes"] + 512 * 1024**2:
-        raise RuntimeError("User quota headroom fell below the admitted run budget")
+    admission = allocation_quota_admission(
+        out, cfg["study"]["storage"]["run_budget_bytes"] + 512 * 1024**2
+    )
     atomic_json(
         out / "storage_admission.json",
         {
-            "quota_headroom_bytes": headroom,
+            **admission,
             "filesystem_free_bytes": shutil.disk_usage(out).free,
             "checked_at_unix": time.time(),
             "run_budget_bytes": cfg["study"]["storage"]["run_budget_bytes"],

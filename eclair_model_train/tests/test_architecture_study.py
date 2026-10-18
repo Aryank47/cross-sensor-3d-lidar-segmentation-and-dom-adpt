@@ -16,7 +16,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from src.config_loader import load_yaml
 from src.study_architecture import ARMS, block_counts
-from src.study_metrics import balanced_gate, common_confusion, common_histogram, confusion, summary
+from src.study_metrics import (
+    balanced_gate,
+    common_confusion,
+    common_histogram,
+    confusion,
+    summary,
+)
 from src.study_runtime import atomic_json, storage_guard, trim_jsonl_after
 
 
@@ -170,6 +176,110 @@ def test_unknown_quota_is_not_treated_as_unlimited(monkeypatch, tmp_path):
     monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=""))
     with pytest.raises(RuntimeError):
         module.quota_headroom(tmp_path)
+
+
+def admitted_allocation(monkeypatch, tmp_path):
+    module = script("submit_architecture_study")
+    study = tmp_path / "study"
+    receipt = module.quota_admission(study, ["reference", "context"], 92 * 1024**3)
+    monkeypatch.setenv("STUDY_QUOTA_ADMISSION", json.dumps(receipt))
+    return module, study / "reference", receipt
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("no matching row"), FileNotFoundError("quota")])
+def test_compute_quota_unavailable_uses_recorded_login_check(monkeypatch, tmp_path, failure):
+    module, out, receipt = admitted_allocation(monkeypatch, tmp_path)
+
+    def unavailable(_path):
+        raise failure
+
+    monkeypatch.setattr(module, "quota_headroom", unavailable)
+    result = module.allocation_quota_admission(out, 2 * 1024**3 + 512 * 1024**2)
+    assert result["quota_check_mode"] == "submission_snapshot_compute_query_unavailable"
+    assert result["submission_admission"] == receipt
+    assert result["quota_headroom_bytes"] is None
+    assert not result["quota_reservation"]
+
+
+def test_compute_live_quota_shortage_cannot_fall_back(monkeypatch, tmp_path):
+    module, out, _ = admitted_allocation(monkeypatch, tmp_path)
+    monkeypatch.setattr(module, "quota_headroom", lambda _p: 1024)
+    with pytest.raises(RuntimeError, match="Live user quota"):
+        module.allocation_quota_admission(out, 2 * 1024**3)
+
+
+def test_compute_prefers_live_quota_and_keeps_submission_record(monkeypatch, tmp_path):
+    module, out, receipt = admitted_allocation(monkeypatch, tmp_path)
+    monkeypatch.setattr(module, "quota_headroom", lambda _p: 80 * 1024**3)
+    result = module.allocation_quota_admission(out, 2 * 1024**3)
+    assert result["quota_check_mode"] == "live_compute_query"
+    assert result["quota_headroom_bytes"] == 80 * 1024**3
+    assert result["submission_admission"] == receipt
+
+
+@pytest.mark.parametrize("change", [
+    {"user": "a-different-account"},
+    {"study_dir": "/different/study"},
+    {"arms": ["fine"]},
+    {"arms": ["reference", "reference"]},
+    {"checked_at_unix": 0},
+    {"checked_at_unix": float("inf")},
+    {"quota_headroom_bytes": 1},
+    {"run_budget_bytes": 1},
+    {"reserved_total_bytes": 1},
+])
+def test_invalid_or_stale_receipt_is_refused(monkeypatch, tmp_path, change):
+    module, out, receipt = admitted_allocation(monkeypatch, tmp_path)
+    receipt.update(change)
+    monkeypatch.setenv("STUDY_QUOTA_ADMISSION", json.dumps(receipt))
+    with pytest.raises(RuntimeError, match="quota receipt"):
+        module.allocation_quota_admission(out, 2 * 1024**3)
+
+
+@pytest.mark.parametrize("value", [None, "not JSON", "{}", "null"])
+def test_missing_or_malformed_receipt_is_not_unlimited(monkeypatch, tmp_path, value):
+    module = script("submit_architecture_study")
+    if value is None:
+        monkeypatch.delenv("STUDY_QUOTA_ADMISSION", raising=False)
+    else:
+        monkeypatch.setenv("STUDY_QUOTA_ADMISSION", value)
+    with pytest.raises(RuntimeError, match="quota receipt"):
+        module.allocation_quota_admission(tmp_path / "reference", 2 * 1024**3)
+
+
+def test_submit_passes_quota_receipt_through_job_environment(monkeypatch, tmp_path):
+    module = script("submit_architecture_study")
+    submitted = []
+
+    def output(command, **kwargs):
+        if command[0] == "sinfo":
+            return "cn02\ncn07\n"
+        if command[0] == "squeue":
+            return ""
+        if command[0] == "sbatch":
+            submitted.append((command, kwargs["env"]))
+            return str(44000 + len(submitted))
+        raise AssertionError(command)
+
+    monkeypatch.setattr(module.subprocess, "check_output", output)
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(module, "quota_headroom", lambda _p: 92 * 1024**3)
+    monkeypatch.setattr(module.shutil, "disk_usage", lambda _p: SimpleNamespace(free=100 * 1024**3))
+    # Keep login log-directory creation inside this test's temporary workspace.
+    monkeypatch.setattr(module.Path, "mkdir", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "submit", "--study", "newstudy", "--out-root", str(tmp_path),
+        "--arms", "reference", "context",
+    ])
+    module.main()
+    assert len(submitted) == 2
+    for command, env in submitted:
+        assert "--exclude=cn07" in command
+        assert "--export=ALL" in command
+        receipt = json.loads(env["STUDY_QUOTA_ADMISSION"])
+        assert receipt["reserved_total_bytes"] == 6 * 1024**3
+        assert receipt["study_dir"] == str((tmp_path / "newstudy").resolve())
+        assert receipt["arms"] == ["reference", "context"]
 
 
 def test_actual_optimizer_update_count_excludes_amp_skips():
