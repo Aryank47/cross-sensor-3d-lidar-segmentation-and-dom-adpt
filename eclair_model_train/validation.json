@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-17",
+  "python": "3.12.14",
+  "numpy": "2.3.5",
+  "script_sha256": "25fb7ca26e259d07765c5178f76c98dbd89b984364014b9ae35146c4576abb5a",
+  "local_tests": {
+    "count": 24,
+    "passed": 24,
+    "failed": 0,
+    "exit_code": 0,
+    "scope": "Scientific calculations, static API compatibility, resume/error/packaging logic"
+  },
+  "original_archive_checks": {
+    "canonical_npy_arrays": 16,
+    "all_match_inventory_and_original_json": true,
+    "maximum_miou_error": 0.0
+  },
+  "audit_only_cli": {
+    "exit_code": 0,
+    "status": "audit_only"
+  },
+  "gpu_cluster_execution_performed": false,
+  "unvalidated_scope": [
+    "PyTorch/MinkowskiEngine runtime integration",
+    "Actual checkpoint loading and identity",
+    "Actual raw/cache data scan",
+    "Instrumented GPU inference and phase probe",
+    "Cluster duration and memory"
+  ],
+  "source_reference": "Uploaded repaired implementation; strict source/config checks precede full execution"
+}
