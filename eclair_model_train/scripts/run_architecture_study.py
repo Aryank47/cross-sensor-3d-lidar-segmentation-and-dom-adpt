@@ -34,9 +34,7 @@ def provenance(root, out, resume):
         with tarfile.open(out / "source_snapshot.tar.gz", "w:gz") as archive:
             for name in names:
                 archive.add(root / name, arcname=name)
-        (out / "git_commit.txt").write_text(
-            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True)
-        )
+        (out / "git_commit.txt").write_text(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True))
     return sha256(destination)
 
 
@@ -55,8 +53,8 @@ def run(args):
     import yaml
 
     root = Path(__file__).resolve().parents[1]
-    if socket.gethostname().split(".")[0].lower() == "c07":
-        raise RuntimeError("C07 is excluded from all study computation")
+    if socket.gethostname().split(".")[0].lower() == "cn07":
+        raise RuntimeError("cn07 is excluded from all study computation")
     os.chdir(root)
     out = Path(args.study_dir).resolve() / args.arm
     out.mkdir(parents=True, exist_ok=True)
@@ -137,11 +135,7 @@ def run(args):
         _, _, identity = load_dataset(domain, split, cfg, logging.getLogger("study_preflight"))
         inventories.append(identity)
     inventory_path = out / "dataset_inventory.json"
-    if (
-        resume
-        and inventory_path.exists()
-        and json.loads(inventory_path.read_text()) != {"datasets": inventories}
-    ):
+    if resume and inventory_path.exists() and json.loads(inventory_path.read_text()) != {"datasets": inventories}:
         raise RuntimeError("Dataset/cache identities changed; original inventory preserved")
     atomic_json(inventory_path, {"datasets": inventories})
     inventory_id = sha256(out / "dataset_inventory.json")
@@ -157,7 +151,7 @@ def run(args):
             "source_only_selection": True,
             "guardrail": "both target means improve; no target class/source mean regression",
             "single_seed_screen": True,
-            "excluded_node": "C07 (scheduler name resolved at submission)",
+            "excluded_node": "cn07 (scheduler name resolved at submission)",
         },
     )
     completed = (
@@ -218,15 +212,11 @@ def run(args):
         references[name] = {"model_sha256": model_id, "epoch": int(checkpoint["epoch"])}
         stage = out / "evaluation" / model_id
         stage.mkdir(parents=True, exist_ok=True)
-        model = build_model(int(cfg["model"]["in_channels"]), int(cfg["model"]["out_channels"]), cfg=cfg).to(
-            device
-        )
+        model = build_model(int(cfg["model"]["in_channels"]), int(cfg["model"]["out_channels"]), cfg=cfg).to(device)
         model.load_state_dict(checkpoint["model_state"], strict=True)
         model.eval()
         del checkpoint
-        identity = fingerprint(
-            {"model_sha256": model_id, "source_manifest": source_id, "datasets": inventory_id}
-        )
+        identity = fingerprint({"model_sha256": model_id, "source_manifest": source_id, "datasets": inventory_id})
         for domain in ("dales", "eclair"):
             if not evaluate_tiles(model, cfg, identity, domain, stage, deadline, logger):
                 status("needs_resume", phase="evaluation", checkpoint=name, domain=domain)

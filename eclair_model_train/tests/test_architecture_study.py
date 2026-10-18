@@ -16,13 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from src.config_loader import load_yaml
 from src.study_architecture import ARMS, block_counts
-from src.study_metrics import (
-    balanced_gate,
-    common_confusion,
-    common_histogram,
-    confusion,
-    summary,
-)
+from src.study_metrics import balanced_gate, common_confusion, common_histogram, confusion, summary
 from src.study_runtime import atomic_json, storage_guard, trim_jsonl_after
 
 
@@ -141,10 +135,10 @@ def test_resume_trims_only_uncommitted_epochs_and_partial_tail(tmp_path):
         trim_jsonl_after(path, 2)
 
 
-def test_c07_is_resolved_case_insensitively_and_unknown_refused():
+def test_cn07_is_resolved_case_insensitively_and_unknown_refused():
     resolve = script("submit_architecture_study").resolve_excluded
-    assert resolve(["C01", "c07", "C08"]) == "c07"
-    assert resolve(["C07.cluster.example", "C09"]) == "C07.cluster.example"
+    assert resolve(["C01", "cn07", "C08"]) == "cn07"
+    assert resolve(["cn07.cluster.example", "C09"]) == "cn07.cluster.example"
     with pytest.raises(ValueError):
         resolve(["C01", "C08"])
 
@@ -154,9 +148,7 @@ def test_quota_admission_uses_user_soft_limit_not_filesystem_free(monkeypatch, t
     monkeypatch.setattr(
         module.subprocess,
         "check_output",
-        lambda *a, **k: (
-            "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sdb3 999999 1 999998 1% /scratch\n"
-        ),
+        lambda *a, **k: ("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sdb3 999999 1 999998 1% /scratch\n"),
     )
     monkeypatch.setattr(
         module.subprocess,
@@ -173,9 +165,7 @@ def test_unknown_quota_is_not_treated_as_unlimited(monkeypatch, tmp_path):
     monkeypatch.setattr(
         module.subprocess,
         "check_output",
-        lambda *a, **k: (
-            "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sdb3 999999 1 999998 1% /scratch\n"
-        ),
+        lambda *a, **k: ("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sdb3 999999 1 999998 1% /scratch\n"),
     )
     monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=""))
     with pytest.raises(RuntimeError):

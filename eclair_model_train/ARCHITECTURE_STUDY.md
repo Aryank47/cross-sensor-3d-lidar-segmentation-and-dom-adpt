@@ -8,11 +8,11 @@ DALES crop, 0.2 m physical input grid, returns-only inputs, existing sampling,
 weighted focal implementation and scheduled Lovasz. The current focal alpha is
 inside weighted CE before exponentiation; this study records and preserves it.
 
-| Arm | Stage block counts | Change |
-|---|---|---|
-| reference | 1,1,1,1,1,1,1,1 | Existing MinkUNet14C |
-| context | 1,1,2,1,1,1,1,1 | Extra 128-to-128 block at encoder stride 8 |
-| fine | 1,1,1,1,1,1,1,2 | Extra 128-to-128 block at final decoder stride 1 |
+| Arm       | Stage block counts | Change                                           |
+| --------- | ------------------ | ------------------------------------------------ |
+| reference | 1,1,1,1,1,1,1,1    | Existing MinkUNet14C                             |
+| context   | 1,1,2,1,1,1,1,1    | Extra 128-to-128 block at encoder stride 8       |
+| fine      | 1,1,1,1,1,1,1,2    | Extra 128-to-128 block at final decoder stride 1 |
 
 Shared weights start identically; the two added blocks also start identically.
 Added parameter counts match each other, but computation does not. Model creation
@@ -31,9 +31,9 @@ python scripts/submit_architecture_study.py --study dales_arch_s1337 --arms refe
 
 This submits two independent two-GPU jobs, each with a 36-hour allocation. It
 checks the total existing queue against the default limit of two, verifies quota
-and filesystem headroom, resolves C07's actual scheduler spelling, and excludes
-it. All shipped study/legacy GPU batch scripts also default to excluding C07.
-The compute entry point refuses to run on C07 even if manually mis-scheduled.
+and filesystem headroom, resolves cn07's actual scheduler spelling, and excludes
+it. All shipped study/legacy GPU batch scripts also default to excluding cn07.
+The compute entry point refuses to run on cn07 even if manually mis-scheduled.
 
 If the account actually permits three queued jobs, all three may instead be
 submitted together with `--arms reference context fine --max-queued 3`. Do not

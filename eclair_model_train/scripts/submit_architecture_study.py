@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Submit at most two study jobs by default, always excluding the C07 node."""
+"""Submit at most two study jobs by default, always excluding the cn07 node."""
 
 from __future__ import annotations
 
@@ -18,18 +18,16 @@ from src.study_architecture import ARMS
 
 
 def resolve_excluded(nodes):
-    matches = sorted({n.strip() for n in nodes if n.strip().split(".")[0].lower() == "c07"})
+    matches = sorted({n.strip() for n in nodes if n.strip().split(".")[0].lower() == "cn07"})
     if not matches:
-        raise ValueError("Cannot resolve C07 in sinfo; refuse submission without verified exclusion")
+        raise ValueError("Cannot resolve cn07 in sinfo; refuse submission without verified exclusion")
     return ",".join(matches)
 
 
 def quota_headroom(path):
     """Quota's default units are 1 KiB blocks; -w prevents line wrapping."""
     device = subprocess.check_output(["df", "-P", str(path)], text=True).splitlines()[-1].split()[0]
-    output = subprocess.run(
-        ["quota", "-w", "-u", getpass.getuser()], capture_output=True, text=True, check=False
-    )
+    output = subprocess.run(["quota", "-w", "-u", getpass.getuser()], capture_output=True, text=True, check=False)
     for line in output.stdout.splitlines():
         cells = line.split()
         if cells and cells[0] == device and len(cells) >= 4:

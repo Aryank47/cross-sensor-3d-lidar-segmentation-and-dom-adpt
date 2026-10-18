@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --mem=96G
 #SBATCH --time=36:00:00
-#SBATCH --exclude=C07
+#SBATCH --exclude=cn07
 #SBATCH --signal=B:USR1@900
 
 set -euo pipefail
