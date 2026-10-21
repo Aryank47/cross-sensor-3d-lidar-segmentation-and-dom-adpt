@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 # src/eval_cross_common.py
 """
 Fresh cross-domain/common-space evaluator for ECLAIR/DALES checkpoints.
@@ -17,6 +15,8 @@ Scientific contract:
 Expected usage:
   python -m src.eval_cross_common ...
 """
+
+from __future__ import annotations
 
 import argparse
 import csv
@@ -1086,6 +1086,7 @@ def run_model_on_voxel_subset(
     num_classes: int,
     device: torch.device,
     amp: bool,
+    observer=None,
 ) -> np.ndarray:
     coords_sub = coords_u[sel].astype(np.int32, copy=False)
     coords_sub = coords_sub - coords_sub.min(axis=0, keepdims=True)
@@ -1105,11 +1106,19 @@ def run_model_on_voxel_subset(
     else:
         ctx = nullcontext()
 
-    with torch.inference_mode():
-        with ctx:
-            out_any = model(st)
-            out = sparse_output_from_model_output(out_any)
-        logits_t = align_sparse_output_to_input_coords(out=out, coords_in_t=coords_t, device=device)
+    handle = observer.hook(model) if observer is not None else None
+    try:
+        with torch.inference_mode():
+            with ctx:
+                out_any = model(st)
+                out = sparse_output_from_model_output(out_any)
+            logits_t = align_sparse_output_to_input_coords(out=out, coords_in_t=coords_t, device=device)
+            if observer is not None:
+                observer.forwarded(sel, coords_t, device)
+    finally:
+        if handle is not None:
+            handle.remove()
+            observer.captured = None
 
     logits = logits_t.detach().float().cpu().numpy()
     if logits.shape[0] != sel.shape[0]:
@@ -1134,6 +1143,7 @@ def recursively_infer_subset(
     depth: int,
     max_depth: int,
     logger: logging.Logger,
+    observer=None,
 ) -> np.ndarray:
     """
     Inference for a selected voxel set. If selection is too large or OOMs,
@@ -1152,6 +1162,7 @@ def recursively_infer_subset(
                 num_classes=num_classes,
                 device=device,
                 amp=amp,
+                observer=observer,
             )
         except (RuntimeError, MemoryError) as e:
             if not is_oom_exception(e) or depth >= max_depth:
@@ -1166,6 +1177,9 @@ def recursively_infer_subset(
             f"Reached max split depth={max_depth} with n_vox={sel.size}. "
             f"Try lowering --window_size_m or --max_voxels_per_forward."
         )
+
+    if observer is not None:
+        observer.split(sel, depth)
 
     xy = coords_u[sel, :2]
     x_span = int(xy[:, 0].max() - xy[:, 0].min()) if sel.size else 0
@@ -1200,6 +1214,7 @@ def recursively_infer_subset(
         depth=depth + 1,
         max_depth=max_depth,
         logger=logger,
+        observer=observer,
     )
     right_logits = recursively_infer_subset(
         model=model,
@@ -1213,6 +1228,7 @@ def recursively_infer_subset(
         depth=depth + 1,
         max_depth=max_depth,
         logger=logger,
+        observer=observer,
     )
 
     # Fill output aligned to original sel order.
@@ -1245,6 +1261,7 @@ def infer_tile_point_logits(
     max_split_depth: int,
     logger: logging.Logger,
     target_domain: str,
+    observer=None,
 ) -> np.ndarray:
     """
     Returns point logits [N_points, source_num_classes].
@@ -1327,6 +1344,9 @@ def infer_tile_point_logits(
         raise RuntimeError("voxelize_from_q returned inverse_map=None; return_maps=True is required.")
     inverse_map = inverse_map.astype(np.int64, copy=False)
 
+    if observer is not None:
+        observer.prepared(coords_u, feats_u, inverse_map)
+
     n_vox = int(coords_u.shape[0])
     if n_vox == 0:
         return np.zeros((n_points, num_classes), dtype=np.float32)
@@ -1353,6 +1373,9 @@ def infer_tile_point_logits(
             if sel.size == 0:
                 continue
 
+            if observer is not None:
+                observer.window(sel, x0, y0, win_vox)
+
             lg = recursively_infer_subset(
                 model=model,
                 coords_u=coords_u,
@@ -1365,6 +1388,7 @@ def infer_tile_point_logits(
                 depth=0,
                 max_depth=max_split_depth,
                 logger=logger,
+                observer=observer,
             )
 
             logits_sum[sel] += lg
