@@ -6,6 +6,18 @@ import numpy as np
 
 COMMON_NAMES = ("ignore", "ground", "vegetation", "buildings", "wires", "poles", "fence", "vehicle")
 DALES_TRAIN_TO_COMMON = (1, 2, 7, 7, 3, 5, 4, 6)
+ECLAIR_TRAIN_TO_COMMON = (0, 1, 2, 3, 0, 4, 4, 5, 5, 6, 7)
+
+
+def source_train_to_common(cfg):
+    domain = cfg.get("data", {}).get("dataset", "dales")
+    mappings = {"dales": DALES_TRAIN_TO_COMMON, "eclair": ECLAIR_TRAIN_TO_COMMON}
+    if domain not in mappings:
+        raise ValueError(f"Unknown source dataset {domain!r}")
+    result = mappings[domain]
+    if int(cfg["model"]["out_channels"]) != len(result):
+        raise ValueError("Source output dimension does not match its native label space")
+    return result
 
 
 def common_histogram(native_counts, train_to_common=DALES_TRAIN_TO_COMMON):

@@ -115,7 +115,10 @@ def run_eval(
         out_channels=int(model_cfg["out_channels"]),
         D=int(model_cfg.get("D", 3)),
     ).to(device)
-    state = torch.load(ckpt_path, map_location="cpu")
+    state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    from .features import assert_checkpoint_feature_config
+
+    assert_checkpoint_feature_config(state, cfg)
     # supports either {"model_state": ...} (your train checkpoints) or raw state_dict
     sd = (
         state["model_state"]

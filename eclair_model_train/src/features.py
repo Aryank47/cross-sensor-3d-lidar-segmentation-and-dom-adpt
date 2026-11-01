@@ -21,6 +21,16 @@ class FeatureConfig:
     # optional extras
     use_rgb: bool = False
     include_coords: bool = False  # append xyz_local if True
+    return_input_mode: str = "observed"
+
+    def __post_init__(self):
+        if self.return_input_mode not in ("observed", "constant_pair"):
+            raise ValueError(f"Unknown return_input_mode={self.return_input_mode!r}")
+        if self.return_input_mode == "constant_pair" and (
+            self.returns_onehot_k != 5 or not self.use_return_number or not self.use_number_of_returns
+            or self.use_intensity or self.use_rgb or self.include_coords
+        ):
+            raise ValueError("constant_pair requires exactly two K=5 return groups and no other feature channels")
 
 
 def feature_dim(cfg: FeatureConfig) -> int:
@@ -73,6 +83,12 @@ def build_features(
     Returns float32 features [N, C] as numpy array (so callers can index with numpy idx).
     Option A: cfg.use_intensity=False -> intensity channel is omitted.
     """
+    if cfg.return_input_mode == "constant_pair":
+        # Retain nonzero occupancy features and the original channel count.
+        # Ignore raw AND cached return fields; never mutate the dataset/cache.
+        feats = np.zeros((len(xyz_local), 10), dtype=np.float32)
+        feats[:, (0, 5)] = 1.0
+        return feats
     parts: list[np.ndarray] = []
 
     # intensity
@@ -126,3 +142,18 @@ def infer_in_channels(cfg: FeatureConfig) -> int:
     if cfg.include_coords:
         c += 3
     return int(c)
+
+
+def assert_checkpoint_feature_config(checkpoint: dict, source_cfg: dict) -> None:
+    """Identical tensor shapes do not make observed and constant inputs compatible."""
+    from dataclasses import asdict
+
+    requested = FeatureConfig(**source_cfg["data"]["features"])
+    saved = checkpoint.get("cfg") if isinstance(checkpoint, dict) else None
+    if saved is None:
+        if requested.return_input_mode != "observed":
+            raise ValueError("A constant-input checkpoint must contain its source feature configuration")
+        return  # preserve support for legacy observed-input state dictionaries
+    actual = FeatureConfig(**saved["data"]["features"])
+    if asdict(actual) != asdict(requested):
+        raise ValueError("Checkpoint feature configuration differs from requested evaluation inputs")

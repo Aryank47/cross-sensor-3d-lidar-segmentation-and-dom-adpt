@@ -355,7 +355,10 @@ def load_model_for_eval(
     out_channels = int(source_cfg["model"]["out_channels"])
     D = int(source_cfg["model"].get("D", 3))
 
-    ckpt = torch.load(str(ckpt_path), map_location="cpu")
+    ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+    from .features import assert_checkpoint_feature_config
+
+    assert_checkpoint_feature_config(ckpt, source_cfg)
     sd = extract_state_dict(ckpt)
 
     # Important: pass cfg so BEV-wrapped checkpoints load correctly if BEV was enabled.

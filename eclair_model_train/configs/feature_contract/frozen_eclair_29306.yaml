@@ -1,0 +1,157 @@
+{
+  "status": "reference_only_not_a_training_config",
+  "warning": "Historical output paths are provenance only. New runnable configs must use new study directories and refuse overwrite.",
+  "historical_run_config": {
+    "data": {
+      "aug": {
+        "enabled": true,
+        "jitter_std": 0.01,
+        "random_flip_xy": true,
+        "random_rotate_deg": [
+          0.0,
+          360.0
+        ],
+        "scale_range": [
+          0.95,
+          1.05
+        ]
+      },
+      "batch_size": 2,
+      "cache_root": "/scratch/m23csa510/eclair_cache",
+      "dataset": "eclair",
+      "eclair_root": "/csehome/m23csa510/lidar_experiments/datasets/eclair",
+      "features": {
+        "include_coords": false,
+        "intensity_divisor": 65535.0,
+        "returns_onehot_k": 5,
+        "use_intensity": false,
+        "use_number_of_returns": true,
+        "use_return_number": true,
+        "use_rgb": false
+      },
+      "grad_accum_steps": 2,
+      "label_space": {
+        "eclair_undefined_id": 0,
+        "ignore_index": -100,
+        "num_classes": 11
+      },
+      "num_workers": 4,
+      "patch": {
+        "coord_norm_factor": 10.0,
+        "make_local_coords": true,
+        "voxel_size": 0.05
+      },
+      "run_cache_precompute_returns_onehot": true,
+      "use_cache": true,
+      "voxelization": {
+        "feat_pool": "mean_all",
+        "label_pool": "majority",
+        "random_seed_offset": 0
+      }
+    },
+    "eclair": {
+      "meta_filename": "labels.json",
+      "test_review_categories": [
+        "approved"
+      ],
+      "train_review_categories": [
+        "approved",
+        "rejected"
+      ],
+      "val_review_categories": [
+        "approved"
+      ]
+    },
+    "epochs": 100,
+    "eval": {
+      "bev": {
+        "enabled": false,
+        "every_epochs": 5,
+        "levels": null,
+        "max_batches": 2,
+        "save_npz": true,
+        "save_png": true
+      },
+      "mode": "point",
+      "window": {
+        "accum_dtype": "float32",
+        "aggregation": "mean_logits",
+        "compute_point_loss": true,
+        "size_xy_m": 50.0,
+        "stride_xy_m": 50.0
+      }
+    },
+    "loss": {
+      "alpha": null,
+      "gamma": 2.0,
+      "lovasz": {
+        "classes": "present",
+        "enabled": true,
+        "ramp_epochs": 10,
+        "warmup_epochs": 10,
+        "weight": 0.5
+      },
+      "name": "focal"
+    },
+    "model": {
+      "D": 3,
+      "aux_heads": {
+        "bev": {
+          "bev_img_sizes": [
+            200
+          ],
+          "dice_classes": "present",
+          "dice_smooth": 1.0,
+          "enabled": false,
+          "hidden_dim": 64,
+          "ignore_index": -1,
+          "label_pool": "last",
+          "levels": [
+            "block8"
+          ],
+          "loss": "dice",
+          "max_batches": 5,
+          "projector": {
+            "mode": "select",
+            "pool": "max",
+            "res_m": 0.5,
+            "x_max_m": 100.0,
+            "x_min_m": 0.0,
+            "y_flip": true,
+            "y_max_m": 100.0,
+            "y_min_m": 0.0,
+            "z_max_m": 200.0,
+            "z_min_m": -100.0
+          },
+          "vis_every_epochs": 5,
+          "warmup_epochs": 10,
+          "warmup_only_bev": true,
+          "weight": 0.5
+        }
+      },
+      "in_channels": 10,
+      "out_channels": 11
+    },
+    "optim": {
+      "lr": 0.001,
+      "name": "adam",
+      "weight_decay": 0.0001
+    },
+    "run": {
+      "amp": true,
+      "device": "cuda",
+      "eval_every_epochs": 2,
+      "keep_last_k_epoch_snapshots": 3,
+      "log_every_steps": 50,
+      "name": "e0_eclair_dropI",
+      "out_dir": "/scratch/m23csa510/e0_results/e0_eclair_repro_29306",
+      "save_every_epochs": 25,
+      "seed": 1337
+    },
+    "sched": {
+      "gamma": 0.5,
+      "name": "step",
+      "step_size_epochs": 10
+    }
+  }
+}

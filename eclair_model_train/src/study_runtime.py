@@ -14,7 +14,12 @@ from pathlib import Path
 
 import numpy as np
 
-from .study_metrics import common_confusion, common_histogram, summary
+from .study_metrics import (
+    common_confusion,
+    common_histogram,
+    source_train_to_common,
+    summary,
+)
 
 
 def atomic_json(path, payload):
@@ -105,6 +110,7 @@ class StudyRuntime:
         self.skips = 0
         self.last_completed = 0
         self.native_counts = np.zeros(int(cfg["model"]["out_channels"]), dtype=np.int64)
+        self.train_to_common = source_train_to_common(cfg)
         if self.enabled:
             for sig in (signal.SIGTERM, signal.SIGUSR1):
                 signal.signal(sig, self.request_stop)
@@ -160,12 +166,18 @@ class StudyRuntime:
         self.samples = self.microbatches = 0
         self.reordered_batches = 0
         self.meta = {}
+        self.exposure_digest = hashlib.sha256()
         # Per-epoch worker seeds are independent of model initialization and resume.
         loader.generator.manual_seed(int(self.cfg["run"]["seed"]) + epoch * 1009 + self.dist.rank)
 
     def observe_batch(self, batch):
         labels = batch["labels"].detach().cpu().numpy()
         coords = batch["coords"].detach().cpu().numpy()
+        if self.options.get("kind") == "feature_contract":
+            for value in (coords, labels):
+                self.exposure_digest.update(str((value.shape, value.dtype.str)).encode())
+                self.exposure_digest.update(np.ascontiguousarray(value).tobytes())
+            self.exposure_digest.update(json.dumps(batch.get("fnames", []), default=str).encode())
         nclasses = len(self.native_counts)
         valid = (labels >= 0) & (labels < nclasses)
         self.native_counts += np.bincount(labels[valid], minlength=nclasses)
@@ -262,6 +274,7 @@ class StudyRuntime:
             "metadata": self.meta,
             "optimizer_updates_cumulative": self.updates,
             "amp_skips_cumulative": self.skips,
+            "geometry_label_exposure_sha256": self.exposure_digest.hexdigest(),
         }
         gathered = [None] * self.dist.world_size
         if self.dist.enabled:
@@ -270,14 +283,14 @@ class StudyRuntime:
             gathered = [local]
         validation = None
         if val_metrics.get("confusion_matrix") is not None:
-            validation = summary(common_confusion(val_metrics["confusion_matrix"]))
+            validation = summary(common_confusion(val_metrics["confusion_matrix"], self.train_to_common))
             score = validation["utility_miou"]
             if self.best_utility is None or score > self.best_utility["score"]:
                 self.best_utility = {"epoch": self.epoch, "score": score, "weights_retained": False}
         self.epoch_times.append(seconds)
         if self.dist.rank == 0:
             counts = np.sum([g["native_counts"] for g in gathered], axis=0)
-            common = common_histogram(counts)
+            common = common_histogram(counts, self.train_to_common)
             row = {
                 "epoch": self.epoch,
                 "source_validation": validation,
