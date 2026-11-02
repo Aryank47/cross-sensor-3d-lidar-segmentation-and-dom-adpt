@@ -96,10 +96,14 @@ def gpu_preflight(cfg, frozen):
     loader.generator.manual_seed(int(cfg["run"]["seed"]) + 1009)
     batch = next(iter(loader))
     device = torch.device("cuda:0")
-    torch.cuda.reset_peak_memory_stats(device)
+    torch.cuda.set_device(device)
     model = build_model(10, 11, cfg=cfg).to(device).train()
     optimizer = build_optimizer(cfg, model)
     criterion = build_loss(cfg).to(device)
+    # The CUDA allocator exists only after the first device allocation.
+    # Reset after model transfer; is_available() alone does not initialize it.
+    torch.cuda.synchronize(device)
+    torch.cuda.reset_peak_memory_stats(device)
     if hasattr(criterion, "set_epoch"):
         criterion.set_epoch(21)  # exercise the fully active Lovasz memory/gradient path
     scaler = torch.cuda.amp.GradScaler(enabled=bool(cfg["run"]["amp"]))
