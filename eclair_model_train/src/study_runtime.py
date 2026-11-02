@@ -111,6 +111,10 @@ class StudyRuntime:
         self.last_completed = 0
         self.native_counts = np.zeros(int(cfg["model"]["out_channels"]), dtype=np.int64)
         self.train_to_common = source_train_to_common(cfg)
+        self.reference_epochs = None
+        if self.options.get("kind") == "optional_returns" and self.options.get("reference_epochs_path"):
+            rows = Path(self.options["reference_epochs_path"]).read_text().splitlines()
+            self.reference_epochs = {r["epoch"]: r for r in map(json.loads, rows)}
         if self.enabled:
             for sig in (signal.SIGTERM, signal.SIGUSR1):
                 signal.signal(sig, self.request_stop)
@@ -167,13 +171,34 @@ class StudyRuntime:
         self.reordered_batches = 0
         self.meta = {}
         self.exposure_digest = hashlib.sha256()
+        if self.options.get("kind") == "optional_returns":
+            self.return_exposure = {"masked_samples": 0, "observed_samples": 0,
+                                    "masked_native_counts": np.zeros(11, np.int64),
+                                    "observed_native_counts": np.zeros(11, np.int64)}
         # Per-epoch worker seeds are independent of model initialization and resume.
         loader.generator.manual_seed(int(self.cfg["run"]["seed"]) + epoch * 1009 + self.dist.rank)
+
+    def prepare_batch(self, batch):
+        """Called explicitly by the training loop, never by validation/inference."""
+        if self.options.get("kind") != "optional_returns":
+            return
+        from .optional_returns import mask_batch
+
+        if "_return_mask_audit" in batch:
+            raise RuntimeError("A training batch was return-masked twice")
+        original = batch["feats"]
+        values, audit = mask_batch(
+            batch["coords"].cpu().numpy(), batch["labels"].cpu().numpy(),
+            original.cpu().numpy(), batch["fnames"], seed=self.cfg["run"]["seed"],
+            epoch=self.epoch, probability=self.options["return_mask_probability"])
+        features = self.torch.from_numpy(values)
+        batch["feats"] = features.pin_memory() if original.is_pinned() else features
+        batch["_return_mask_audit"] = audit
 
     def observe_batch(self, batch):
         labels = batch["labels"].detach().cpu().numpy()
         coords = batch["coords"].detach().cpu().numpy()
-        if self.options.get("kind") == "feature_contract":
+        if self.options.get("kind") in ("feature_contract", "optional_returns"):
             for value in (coords, labels):
                 self.exposure_digest.update(str((value.shape, value.dtype.str)).encode())
                 self.exposure_digest.update(np.ascontiguousarray(value).tobytes())
@@ -186,6 +211,10 @@ class StudyRuntime:
             self.presence += np.bincount(ids, minlength=nclasses) > 0
             self.samples += 1
         self.microbatches += 1
+        if self.options.get("kind") == "optional_returns":
+            audit = batch["_return_mask_audit"]
+            for key in self.return_exposure:
+                self.return_exposure[key] += audit[key]
         for key in (
             "meta_crop_size_xy_m",
             "meta_shrink_steps",
@@ -254,6 +283,18 @@ class StudyRuntime:
                 for item in rows:
                     stream.write(json.dumps(item, allow_nan=False) + "\n")
 
+    def check_objective(self, objective):
+        if getattr(self, "options", {}).get("kind") != "optional_returns":
+            return
+        valid = self.torch.isfinite(objective.detach()).all().to(dtype=self.torch.int32)
+        if self.dist.enabled:
+            self.torch.distributed.all_reduce(valid, op=self.torch.distributed.ReduceOp.MIN)
+        if not bool(valid.item()):
+            if self.dist.rank == 0:
+                atomic_json(self.out / "numerical_failure.json", {"error": "Nonfinite training objective",
+                            "epoch": self.epoch, "automatic_restart": False})
+            raise RuntimeError("Nonfinite optional-return objective on at least one rank")
+
     def optimizer_step(self, scaler, optimizer):
         before = float(scaler.get_scale())
         scaler.step(optimizer)
@@ -262,6 +303,24 @@ class StudyRuntime:
             self.skips += 1
         else:
             self.updates += 1
+        if getattr(self, "options", {}).get("kind") == "optional_returns":
+            from .optional_returns import validate_update_counters
+
+            counts = self.torch.tensor([self.updates, self.skips], device=self.device, dtype=self.torch.int64)
+            if self.dist.enabled:
+                low, high = counts.clone(), counts.clone()
+                self.torch.distributed.all_reduce(low, op=self.torch.distributed.ReduceOp.MIN)
+                self.torch.distributed.all_reduce(high, op=self.torch.distributed.ReduceOp.MAX)
+                values = [low.cpu().tolist(), high.cpu().tolist()]
+            else:
+                values = [counts.cpu().tolist()]
+            try:
+                validate_update_counters(values, self.options["maximum_amp_skips"])
+            except RuntimeError as exc:
+                if self.dist.rank == 0:
+                    atomic_json(self.out / "numerical_failure.json", {"error": str(exc), "epoch": self.epoch,
+                                "rank_counter_extrema": values, "automatic_restart": False})
+                raise
 
     def end_epoch(self, val_metrics, seconds, model):
         t = self.torch
@@ -276,11 +335,23 @@ class StudyRuntime:
             "amp_skips_cumulative": self.skips,
             "geometry_label_exposure_sha256": self.exposure_digest.hexdigest(),
         }
+        if self.options.get("kind") == "optional_returns":
+            local["return_exposure"] = {k:(v.tolist() if isinstance(v, np.ndarray) else v)
+                                        for k,v in self.return_exposure.items()}
         gathered = [None] * self.dist.world_size
         if self.dist.enabled:
             t.distributed.all_gather_object(gathered, local)
         else:
             gathered = [local]
+        if self.reference_epochs is not None:
+            reference = self.reference_epochs[self.epoch]
+            keys = ("native_counts", "presence", "samples", "microbatches", "coordinate_reordered_batches",
+                    "metadata", "geometry_label_exposure_sha256")
+            if len(gathered) != len(reference["ranks"]):
+                raise RuntimeError("Optional-return world size differs from completed control")
+            for left, right in zip(gathered, reference["ranks"]):
+                if any(left[k] != right[k] for k in keys):
+                    raise RuntimeError(f"Accepted source geometry/label exposure differs from control at epoch {self.epoch}")
         validation = None
         if val_metrics.get("confusion_matrix") is not None:
             validation = summary(common_confusion(val_metrics["confusion_matrix"], self.train_to_common))

@@ -1,0 +1,58 @@
+{
+  "status": "approved_for_single_candidate_implementation",
+  "date": "2026-11-03",
+  "source": "eclair",
+  "target": "dales",
+  "mask_probability": 0.5,
+  "mask_scope": "both return groups together per training sample",
+  "primary_input": "observed",
+  "primary_checkpoint": "source_native_validation_best",
+  "secondary_checkpoint": "last",
+  "extra_diagnostic": {
+    "checkpoint": "best_only",
+    "input": "constant_pair",
+    "domains": [
+      "eclair",
+      "dales"
+    ],
+    "tiles": 136,
+    "deployment_selection": false,
+    "save": "sparse native-GT / primary-native-prediction / diagnostic-native-prediction counts"
+  },
+  "initial_trainings": 1,
+  "conditional_reverse_trainings": 2,
+  "automatic_runs_after_reverse_stage": 0,
+  "source_guard": {
+    "aggregate_max_loss_pp": 1,
+    "each_class_max_loss_pp": 2
+  },
+  "target_gate": {
+    "minimum_all_seven_gain_pp": 1,
+    "minimum_utility_gain_pp": 1,
+    "maximum_each_class_loss_pp": 2,
+    "aggregate_marginal_tile_CI_low_must_exceed_pp": 0
+  },
+  "final_veto": [
+    "either target aggregate change <=0",
+    "source guard fails",
+    "any target class loss >2pp"
+  ],
+  "numerical_development_policy": {
+    "attempts_per_rank": 13300,
+    "max_amp_skips_per_rank": 13,
+    "stop_on_skip": 14,
+    "require_rank_counter_agreement": true,
+    "old_exact_update_gate_unchanged": true,
+    "skip_limit_is": "engineering_health_limit_not_statistical_validity"
+  },
+  "no_automatic_sweeps": [
+    "masking rate",
+    "loss",
+    "class weights",
+    "architecture",
+    "seeds"
+  ],
+  "independent_review": "completed; clarified endpoint precedence, diagnostic comparators and conditional budget",
+  "remote_connections_this_turn": 0,
+  "jobs_submitted_this_turn": 0
+}

@@ -2173,6 +2173,7 @@ def train(cfg_path: str):
             if max_train_batches > 0 and step > max_train_batches:
                 break
             if study.enabled:
+                study.prepare_batch(batch)
                 study.observe_batch(batch)
                 unwrap_model(model)._study_capture = step <= int(study.options.get("gradient_batches_per_epoch", 1))
             processed_steps += 1
@@ -2252,6 +2253,7 @@ def train(cfg_path: str):
                         }
 
                 if study.enabled:
+                    study.check_objective(total)
                     study.audit_loss(logits, labels, criterion, unwrap_model(model), step)
                 scaler.scale(total / float(grad_accum)).backward()
                 if study.enabled:

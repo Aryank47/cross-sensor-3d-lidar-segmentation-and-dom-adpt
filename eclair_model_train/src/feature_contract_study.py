@@ -164,7 +164,7 @@ def load_inventory(cfg, logger):
     return {"datasets": inventories}
 
 
-def evaluate_tiles(model, cfg, checkpoint_id, domain, out, deadline, logger):
+def evaluate_tiles(model, cfg, checkpoint_id, domain, out, deadline, logger, *, paired_diagnostic=None):
     import torch
 
     from . import eval_cross_common as ev
@@ -200,6 +200,8 @@ def evaluate_tiles(model, cfg, checkpoint_id, domain, out, deadline, logger):
         "source_mapping_sha256": sha256("configs/train_id_to_common_id.yaml"),
         "target_mapping_sha256": sha256(f"configs/mapping_{domain}_to_common.yaml"),
     }
+    if paired_diagnostic is not None:
+        contract["paired_diagnostic"] = "constant_pair_best_only_v1"
     signature = fingerprint(contract)
     stage = Path(out) / domain
     stage.mkdir(parents=True, exist_ok=True)
@@ -257,9 +259,13 @@ def evaluate_tiles(model, cfg, checkpoint_id, domain, out, deadline, logger):
                 .tolist(),
                 "seconds": time.monotonic() - tick,
             }
+            del logits
+            if paired_diagnostic is not None:
+                result["paired_diagnostic"] = paired_diagnostic(
+                    model, raw, cfg, domain, prediction, native, logger)
             storage_guard(stage, 128 * 1024, cfg["study"]["storage"])
             atomic_json(path, result)
-            del logits, raw
+            del raw
         common_total += np.asarray(result["matrix"], np.int64)
         native_total += np.asarray(result["native_gt_by_source_prediction"], np.int64)
         subtype_total += np.asarray(result["native_gt_by_common_prediction"], np.int64)
