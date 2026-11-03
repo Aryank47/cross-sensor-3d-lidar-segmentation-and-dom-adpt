@@ -84,6 +84,11 @@ def allocation_admission(out):
 
 
 def export_code(root, destination, commit):
+    repository = Path(
+        subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"], cwd=root, text=True
+        ).strip()
+    )
     prefix = (
         subprocess.check_output(
             ["git", "rev-parse", "--show-prefix"], cwd=root, text=True
@@ -92,7 +97,7 @@ def export_code(root, destination, commit):
         .rstrip("/")
     )
     blob = subprocess.check_output(
-        ["git", "archive", "--format=tar", f"{commit}:{prefix}"], cwd=root
+        ["git", "archive", "--format=tar", f"{commit}:{prefix}"], cwd=repository
     )
     with tarfile.open(fileobj=io.BytesIO(blob)) as archive:
         members = archive.getmembers()

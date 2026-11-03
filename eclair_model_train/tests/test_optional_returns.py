@@ -6,6 +6,7 @@ import copy
 import io
 import json
 import random
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -557,6 +558,37 @@ def test_nonfinite_other_rank_aborts_before_backward(tmp_path):
     with pytest.raises(RuntimeError, match="at least one rank"):
         value.check_objective(ArrayTensor(1.0))
     assert (tmp_path / "numerical_failure.json").is_file()
+
+
+def test_real_git_export_from_tracked_subdirectory(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    root = repository / "eclair_model_train"
+    (root / "src").mkdir(parents=True)
+    (root / "src/file.py").write_text("print('committed')\n")
+    (repository / "outside.txt").write_text("Must not be exported")
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", *args], cwd=repository, text=True, stderr=subprocess.PIPE
+        ).strip()
+
+    git("init")
+    git("add", ".")
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "fixture",
+    )
+    commit = git("rev-parse", "HEAD")
+    result = export_code(root, tmp_path / "export", commit)
+    assert result["files"] == {"src/file.py": sha256(root / "src/file.py")}
+    assert (tmp_path / "export/src/file.py").read_text() == "print('committed')\n"
+    assert not (tmp_path / "export/outside.txt").exists()
 
 
 @pytest.mark.parametrize("age_hours,expected", [(1, "fallback"), (49, "expired")])
