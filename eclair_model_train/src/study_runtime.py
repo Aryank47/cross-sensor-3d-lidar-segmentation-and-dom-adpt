@@ -112,7 +112,7 @@ class StudyRuntime:
         self.native_counts = np.zeros(int(cfg["model"]["out_channels"]), dtype=np.int64)
         self.train_to_common = source_train_to_common(cfg)
         self.reference_epochs = None
-        if self.options.get("kind") == "optional_returns" and self.options.get("reference_epochs_path"):
+        if self.options.get("kind") in ("optional_returns", "mentor_guidance") and self.options.get("reference_epochs_path"):
             rows = Path(self.options["reference_epochs_path"]).read_text().splitlines()
             self.reference_epochs = {r["epoch"]: r for r in map(json.loads, rows)}
         if self.enabled:
@@ -175,6 +175,10 @@ class StudyRuntime:
             self.return_exposure = {"masked_samples": 0, "observed_samples": 0,
                                     "masked_native_counts": np.zeros(11, np.int64),
                                     "observed_native_counts": np.zeros(11, np.int64)}
+        if self.options.get("kind") == "mentor_guidance":
+            from .mentor_guidance import ARRAY_FIELDS
+            self.guidance = {key: np.zeros(7, np.float64) for key in ARRAY_FIELDS}
+            self.guidance.update(loss_sum=0., weight=0., batches=0, mentor_forward_seconds=0., gradient_diagnostics=[])
         # Per-epoch worker seeds are independent of model initialization and resume.
         loader.generator.manual_seed(int(self.cfg["run"]["seed"]) + epoch * 1009 + self.dist.rank)
 
@@ -198,7 +202,7 @@ class StudyRuntime:
     def observe_batch(self, batch):
         labels = batch["labels"].detach().cpu().numpy()
         coords = batch["coords"].detach().cpu().numpy()
-        if self.options.get("kind") in ("feature_contract", "optional_returns"):
+        if self.options.get("kind") in ("feature_contract", "optional_returns", "mentor_guidance"):
             for value in (coords, labels):
                 self.exposure_digest.update(str((value.shape, value.dtype.str)).encode())
                 self.exposure_digest.update(np.ascontiguousarray(value).tobytes())
@@ -283,8 +287,21 @@ class StudyRuntime:
                 for item in rows:
                     stream.write(json.dumps(item, allow_nan=False) + "\n")
 
+    def observe_guidance(self, values, weight):
+        from .mentor_guidance import ARRAY_FIELDS
+        for key in ARRAY_FIELDS:
+            self.guidance[key] += np.asarray(values[key])
+        self.guidance["loss_sum"] += values["loss"]
+        self.guidance["weight"] = weight
+        self.guidance["batches"] += 1
+        self.guidance["mentor_forward_seconds"] += values.get("mentor_forward_seconds", 0.)
+        if "weighted_logit_gradient_ratio" in values:
+            keys = ("weighted_logit_gradient_ratio", "logit_gradient_cosine",
+                    "guidance_logit_gradient_norm", "supervised_logit_gradient_norm")
+            self.guidance["gradient_diagnostics"].append({k: values[k] for k in keys})
+
     def check_objective(self, objective):
-        if getattr(self, "options", {}).get("kind") != "optional_returns":
+        if getattr(self, "options", {}).get("kind") not in ("optional_returns", "mentor_guidance"):
             return
         valid = self.torch.isfinite(objective.detach()).all().to(dtype=self.torch.int32)
         if self.dist.enabled:
@@ -303,7 +320,7 @@ class StudyRuntime:
             self.skips += 1
         else:
             self.updates += 1
-        if getattr(self, "options", {}).get("kind") == "optional_returns":
+        if getattr(self, "options", {}).get("kind") in ("optional_returns", "mentor_guidance"):
             from .optional_returns import validate_update_counters
 
             counts = self.torch.tensor([self.updates, self.skips], device=self.device, dtype=self.torch.int64)
@@ -338,6 +355,10 @@ class StudyRuntime:
         if self.options.get("kind") == "optional_returns":
             local["return_exposure"] = {k:(v.tolist() if isinstance(v, np.ndarray) else v)
                                         for k,v in self.return_exposure.items()}
+        if self.options.get("kind") == "mentor_guidance":
+            local["guidance"] = {k: (v.tolist() if isinstance(v, np.ndarray) else v)
+                                 for k, v in self.guidance.items()}
+            local["mentor_model_sha256"] = self.mentor_verified_sha256
         gathered = [None] * self.dist.world_size
         if self.dist.enabled:
             t.distributed.all_gather_object(gathered, local)

@@ -1,0 +1,69 @@
+{
+  "status": "approved_finite_two_mentor_comparison",
+  "date": "2026-11-03",
+  "source": "eclair",
+  "target": "dales",
+  "primary_input": "observed",
+  "primary_checkpoint": "source_native_validation_best",
+  "secondary_checkpoint": "last",
+  "extra_diagnostic": {
+    "checkpoint": "best_only",
+    "input": "constant_pair",
+    "domains": [
+      "eclair",
+      "dales"
+    ],
+    "tiles": 136,
+    "deployment_selection": false,
+    "save": "sparse native-GT / primary-native-prediction / diagnostic-native-prediction counts"
+  },
+  "initial_trainings": 2,
+  "conditional_reverse_trainings": 2,
+  "automatic_runs_after_reverse_stage": 0,
+  "source_guard": {
+    "aggregate_max_loss_pp": 1,
+    "each_class_max_loss_pp": 2
+  },
+  "target_gate": {
+    "minimum_all_seven_gain_pp": 1,
+    "minimum_utility_gain_pp": 1,
+    "maximum_each_class_loss_pp": 2,
+    "aggregate_marginal_tile_CI_low_must_exceed_pp": 0
+  },
+  "final_veto": [
+    "either target aggregate change <=0",
+    "source guard fails",
+    "any target class loss >2pp"
+  ],
+  "numerical_development_policy": {
+    "attempts_per_rank": 13300,
+    "max_amp_skips_per_rank": 13,
+    "stop_on_skip": 14,
+    "require_rank_counter_agreement": true,
+    "old_exact_update_gate_unchanged": true,
+    "skip_limit_is": "engineering_health_limit_not_statistical_validity"
+  },
+  "no_automatic_sweeps": [
+    "weight",
+    "temperature",
+    "correctness_filter",
+    "teacher",
+    "architecture",
+    "seeds"
+  ],
+  "independent_review": "completed; clarified endpoint precedence, diagnostic comparators and conditional budget",
+  "remote_connections_this_turn": 0,
+  "jobs_submitted_this_turn": 0,
+  "primary_comparison": "geometry_mentor_minus_fresh_observed_mentor",
+  "required_secondary_reference": "original_observed_46265",
+  "training_inputs": "observed_returns_only",
+  "mentor_guidance": {
+    "distribution": "full_native_eleven",
+    "temperature": 1,
+    "eligibility": "source_common_class_gt_and_mentor_native_argmax_equals_native_gt",
+    "normalization": "per_common_class_sum_eligible_KL_divided_by_ALL_valid_class_points_then_present_class_mean_and_DDP_rank_mean",
+    "maximum_weight": 0.1,
+    "ramp_epochs": 10,
+    "source_filter_is_not_target_reliability_guarantee": true
+  }
+}

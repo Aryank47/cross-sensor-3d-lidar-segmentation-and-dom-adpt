@@ -924,6 +924,8 @@ def _forward_batch(
     logits = out.F  # [N, C]
     base = unwrap_model(model)
     if getattr(base, "_study_enabled", False):
+        if hasattr(base, "_mentor_output_coords"):
+            base._mentor_output_coords = out.C.detach()
         base._study_label_reordered = not torch.equal(batch["coords"].cpu(), out.C.cpu())
         if base._study_label_reordered:
             labels, coverage = _labels_in_output_order(coords, labels, out.C)
@@ -1728,6 +1730,14 @@ def train(cfg_path: str):
 
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
 
+    mentor = None
+    if study.options.get("kind") == "mentor_guidance":
+        from src.mentor_guidance import FrozenMentor
+        mentor = FrozenMentor(cfg, device)
+        unwrap_model(model)._mentor_output_coords = None
+        if is_main_process(dist_env):
+            save_json(out_dir / "mentor_identity.json", mentor.identity)
+
     num_classes = int(cfg["data"]["label_space"]["num_classes"])
     ignore_index = int(cfg["data"]["label_space"]["ignore_index"])
     grad_accum = int(cfg["data"].get("grad_accum_steps", 1))
@@ -2204,6 +2214,7 @@ def train(cfg_path: str):
                 logits = ocons_result["clean_logits"]
                 labels = ocons_result["clean_labels"]
             else:
+                mentor_prediction = mentor.predict(batch) if mentor is not None else None
                 with torch.autocast(device_type="cuda", enabled=amp):
                     logits, labels, bev_pred = _forward_batch(model, batch, device, is_train=True)
                     seg_loss = criterion(logits, labels)
@@ -2252,6 +2263,16 @@ def train(cfg_path: str):
                             **(bev_pred.get("bev_als_diagnostics", {}) or {}),
                         }
 
+                if mentor is not None:
+                    from src.mentor_guidance import guidance_weight, gradient_diagnostics
+                    guide_loss, guide_stats = mentor.loss(
+                        mentor_prediction, logits, labels, unwrap_model(model)._mentor_output_coords)
+                    guide_weight = guidance_weight(epoch)
+                    total = total + guide_weight * guide_loss
+                    if step == 1:
+                        guide_stats.update(gradient_diagnostics(guide_loss, seg_loss, logits, guide_weight))
+                    study.observe_guidance(guide_stats, guide_weight)
+                    del mentor_prediction
                 if study.enabled:
                     study.check_objective(total)
                     study.audit_loss(logits, labels, criterion, unwrap_model(model), step)
@@ -2661,6 +2682,8 @@ def train(cfg_path: str):
         eval_time_s = float(eval_time_max.item())
 
         if study.enabled:
+            if mentor is not None:
+                study.mentor_verified_sha256 = mentor.verify_immutable()
             study.end_epoch(val_metrics, time.perf_counter() - epoch_wall_start, unwrap_model(model))
         # ---- Checkpointing ----
         is_best = do_eval and (val_metrics["miou"] > best_val_miou)
