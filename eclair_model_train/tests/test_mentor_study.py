@@ -257,11 +257,14 @@ class GuidanceAutograd(unittest.TestCase):
                 align_mentor_probabilities(q, coords, query, 2)
         with self.assertRaises(RuntimeError):
             align_mentor_probabilities(q, coords, coords[:1], 2)
-        with patch(
-            "src.ocons.match_sparse_coordinates", return_value=(t.tensor([1, 0]), 1.0)
+        with (
+            patch(
+                "src.ocons.match_sparse_coordinates",
+                return_value=(t.tensor([1, 0]), 1.0),
+            ),
+            self.assertRaises(RuntimeError),
         ):
-            with self.assertRaises(RuntimeError):
-                align_mentor_probabilities(q, coords, coords, 2)
+            align_mentor_probabilities(q, coords, coords, 2)
 
     def test_nonfinite_mentor_cannot_hide_in_ineligible_mask(self):
         t = self.t
