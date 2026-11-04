@@ -225,6 +225,44 @@ class Decisions(unittest.TestCase):
 
 @unittest.skipUnless(HAS_TORCH, "PyTorch is exercised on the cluster and GPU preflight")
 class GuidanceAutograd(unittest.TestCase):
+    def test_exact_alignment_accepts_rounded_coverage_and_reorders(self):
+        t = self.t
+        from src.mentor_guidance import align_mentor_probabilities
+        from src.ocons import match_sparse_coordinates
+
+        coords = t.tensor([[0, 1, 2, 3], [0, 4, 5, 6], [1, 1, 2, 3]], dtype=t.int32)
+        query = coords[[2, 0, 1]]
+        q = t.eye(11)[:3]
+
+        def rounded(reference, output, **kwargs):
+            indices, _ = match_sparse_coordinates(reference, output, **kwargs)
+            return indices, 0.9999999403953552
+
+        with patch("src.ocons.match_sparse_coordinates", side_effect=rounded):
+            aligned, coverage = align_mentor_probabilities(q, coords, query, 3)
+        self.assertTrue(t.equal(aligned, q[[2, 0, 1]]))
+        self.assertNotEqual(coverage, 1.0)
+
+    def test_exact_alignment_rejects_missing_duplicate_and_wrong_integer_rows(self):
+        t = self.t
+        from src.mentor_guidance import align_mentor_probabilities
+
+        coords = t.tensor([[0, 1, 2, 3], [0, 4, 5, 6]], dtype=t.int32)
+        q = t.eye(11)[:2]
+        for query in (
+            t.tensor([[0, 1, 2, 3], [0, 4, 5, 7]], dtype=t.int32),
+            coords[[0, 0]],
+        ):
+            with self.assertRaises(RuntimeError):
+                align_mentor_probabilities(q, coords, query, 2)
+        with self.assertRaises(RuntimeError):
+            align_mentor_probabilities(q, coords, coords[:1], 2)
+        with patch(
+            "src.ocons.match_sparse_coordinates", return_value=(t.tensor([1, 0]), 1.0)
+        ):
+            with self.assertRaises(RuntimeError):
+                align_mentor_probabilities(q, coords, coords, 2)
+
     def test_nonfinite_mentor_cannot_hide_in_ineligible_mask(self):
         t = self.t
         from src.mentor_guidance import check_mentor_finite

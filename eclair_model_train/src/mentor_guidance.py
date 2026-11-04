@@ -141,6 +141,42 @@ def distribution_guidance(logits, probabilities, labels):
     return loss, stats
 
 
+def align_mentor_probabilities(
+    probabilities, reference_coords, output_coords, student_rows
+):
+    """Exact integer bijection; float mean coverage is diagnostic only.
+
+    match_sparse_coordinates(require_all=True) already rejects every unmatched
+    coordinate. A GPU float32 mean of all-true flags need not round to exactly1.
+    Recheck integer rows directly instead of imposing floating equality.
+    """
+    import torch
+
+    from .ocons import match_sparse_coordinates
+
+    if (
+        len(reference_coords) != len(probabilities)
+        or len(output_coords) != student_rows
+        or len(reference_coords) != student_rows
+    ):
+        raise RuntimeError(
+            f"Mentor/student row counts differ: mentor_coords={len(reference_coords)}, mentor_probabilities={len(probabilities)}, student_coords={len(output_coords)}, student_logits={student_rows}"
+        )
+    indices, coverage = match_sparse_coordinates(
+        reference_coords, output_coords, require_all=True
+    )
+    if len(indices) != student_rows:
+        raise RuntimeError("Mentor/student coordinate index count differs")
+    aligned_coords = reference_coords.index_select(
+        0, indices.to(reference_coords.device)
+    )
+    if not torch.equal(aligned_coords.to(output_coords.device), output_coords):
+        raise RuntimeError("Mentor/student integer coordinate alignment differs")
+    return probabilities.index_select(0, indices.to(probabilities.device)), float(
+        coverage
+    )
+
+
 def gradient_diagnostics(guide, supervised, logits, weight):
     import torch
 
@@ -241,17 +277,13 @@ class FrozenMentor:
             return result
 
     def loss(self, prediction, logits, labels, output_coords):
-        from .ocons import match_sparse_coordinates
-
         q, coords = prediction
-        indices, coverage = match_sparse_coordinates(
-            coords, output_coords, require_all=True
+        aligned, coverage = align_mentor_probabilities(
+            q, coords, output_coords, len(logits)
         )
-        if coverage != 1.0 or len(indices) != len(logits):
-            raise RuntimeError("Mentor/student coordinate alignment incomplete")
-        loss, stats = distribution_guidance(
-            logits, q.index_select(0, indices.to(q.device)), labels
-        )
+        loss, stats = distribution_guidance(logits, aligned, labels)
+        stats["coordinate_match_coverage_diagnostic"] = coverage
+        stats["exact_integer_alignment"] = True
         stats["mentor_forward_seconds"] = self.last_seconds
         return loss, stats
 

@@ -39,13 +39,13 @@ Advancement requires source preservation and target gains against **both** the f
 From `eclair_model_train`, with `e0_env` active:
 
 ```bash
-python -B scripts/submit_mentor_study.py --study eclair_mentor_s1337_v1 --hours 36 --dry-run
-python -B scripts/submit_mentor_study.py --study eclair_mentor_s1337_v1 --hours 36
+python -B scripts/submit_mentor_study.py --study eclair_mentor_s1337_v2 --hours 36 --dry-run
+python -B scripts/submit_mentor_study.py --study eclair_mentor_s1337_v2 --hours 36
 ```
 
 One Slurm array contains two tasks, serialized with `%1`. Each task receives two GPUs and its own36-hour limit. Node `cn07` is excluded; automatic Slurm requeue is disabled. The array counts as two training tasks and does not reduce their combined cost.
 
-Root: `/scratch/m23csa510/e0_results/mentor_studies/eclair_mentor_s1337_v1/`.
+Root: `/scratch/m23csa510/e0_results/mentor_studies/eclair_mentor_s1337_v2/`.
 Logs: `/scratch/m23csa510/e0_logs/mentor_ARRAYID_0.{out,err}` and `_1.{out,err}`.
 Task0: `observed_mentor`; task1: `geometry_mentor`. Scheduler may run task1 first; comparison waits for both complete.
 
@@ -56,12 +56,16 @@ Code is exported immutably from the committed repository. Hash-pinned reference 
 Explicit resume, only after review:
 
 ```bash
-python -B scripts/submit_mentor_study.py --study eclair_mentor_s1337_v1 --resume-arm geometry_mentor --hours 36
-python -B scripts/submit_mentor_study.py --study eclair_mentor_s1337_v1 --refresh-admission
+python -B scripts/submit_mentor_study.py --study eclair_mentor_s1337_v2 --resume-arm geometry_mentor --hours 36
+python -B scripts/submit_mentor_study.py --study eclair_mentor_s1337_v2 --refresh-admission
 ```
 
 A14th AMP skip, nonfinite objective, disagreement between rank counters, changed mentor state, changed source exposure, runtime/code mismatch or insufficient storage stops the affected arm. Deadline stopping preserves completed work as `needs_resume`; nothing automatically resubmits.
 
 ## References
 
-Zhao, B., Cui, Q., Song, R., Qiu, Y., & Liang, J. (2022). Decoupled knowledge distillation. *Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition*,11953–11962. https://openaccess.thecvf.com/content/CVPR2022/html/Zhao_Decoupled_Knowledge_Distillation_CVPR_2022_paper.html
+Zhao, B., Cui, Q., Song, R., Qiu, Y., & Liang, J. (2022). Decoupled knowledge distillation. *Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition*,11953â€“11962. https://openaccess.thecvf.com/content/CVPR2022/html/Zhao_Decoupled_Knowledge_Distillation_CVPR_2022_paper.html
+
+## Preflight repair, 4 November 2026
+
+The v1 tasks stopped before training at a redundant floating-coverage equality check. The new mentor alignment verifies an exact integer bijection, while preserving missing/duplicate/count checks. Floating mean coverage is diagnostic only. The failed v1 directories and logs remain unchanged; v2 runs the same frozen scientific protocol from corrected code.
