@@ -8,7 +8,7 @@ Does spreading source crops across a wider set of measured spatial contexts impr
 
 - Fresh control and candidate use the 200-epoch, 120 m DALES architecture reference recipe. Keep MinkUNet14C, observed returns, native labels, focal/Lovász, optimizer, seed, source checkpoint selection and canonical point evaluation fixed.
 - Build the catalogue from the 26 DALES training geometry files in the completed transfer study. Verify archive hashes and inventory against the runtime data. Use source-class medians of local 2 m linearity and broad 16 m height span to form four measured geometry bins. Exclude truncated and nonfinite anchors. These are neighborhood descriptors, not verified instance counts or tower labels.
-- Candidate keeps the original tile and native center label. For half of eligible proposals it draws a geometry bin uniformly, then draws one of its occupied 60 m cells. Leave the existing proposal alone when fewer than two bins are available. This is a fixed policy, with no target-driven choice of bins, rates or weights.
+- Candidate keeps the original tile and native center label. For half of eligible proposals it draws a geometry bin uniformly, then draws one of its occupied 60 m cells. Anchor coordinates, crop membership and reported centers all use the same tile-local coordinates as the DALES loader. Leave the existing proposal alone when fewer than two bins are available. This is a fixed policy, with no target-driven choice of bins, rates or weights.
 - Catalogue admission requires at least three geometry bins represented in at least four tiles per monitored class. In the control allocation, replay two frozen crop draws per tile for both arms before training. Require at least 10% accepted center replacements, at least two monitored classes gaining at least two crops with anchors from their control's least-covered bin, and total accepted voxel workload within 20%. A miss stops training. The candidate waits for the complete control.
 - Both allocations exclude cn07 and use the existing quota and checkpoint limits. Use only the pinned committed code, existing read-only caches and bounded outputs.
 
@@ -38,7 +38,7 @@ This is a single-seed development comparison in one direction. It does not claim
 From the committed cluster checkout in e0_env, run:
 
 ```bash
-python -B scripts/submit_architecture_study.py --study dales_scene_coverage_s1337_v1 \
+python -B scripts/submit_architecture_study.py --study dales_scene_coverage_s1337_v2 \
   --arms coverage_control coverage_candidate --hours 36 \
   --out-root /scratch/m23csa510/e0_results/coverage_studies \
   --coverage-geometry /scratch/m23csa510/e0_results/transfer_evidence/transfer_evidence_v1

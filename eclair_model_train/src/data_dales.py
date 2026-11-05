@@ -1495,8 +1495,10 @@ class DalesTiles(torch.utils.data.Dataset):
             if self.coverage_catalog is not None:
                 from .coverage_study import TileCoverage
 
+                # The catalogue was generated from get_raw(), which applies the same
+                # tile-local coordinate conversion as the crop code above.
                 tile_coverage = TileCoverage(
-                    self.coverage_catalog["tiles"][path.name], raw["xyz"], y_native_pts,
+                    self.coverage_catalog["tiles"][path.name], xyz, y_native_pts,
                 )
             max_vox_soft = int(crop_cfg.max_voxels_per_crop_soft)
 
@@ -1750,10 +1752,10 @@ class DalesTiles(torch.utils.data.Dataset):
                 out["meta_accepted_over_soft"] = torch.tensor(int(chosen_meta.get("accepted_over_soft", 0)), dtype=torch.int64)
                 if tile_coverage is not None:
                     retained = pt_idx2 if chosen_meta["used_fallback"] else pt_idx
-                    hits = tile_coverage.crop_hits(raw["xyz"], retained, c_idx, chosen_meta["crop_size_xy_m"])
+                    hits = tile_coverage.crop_hits(xyz, retained, c_idx, chosen_meta["crop_size_xy_m"])
                     out["meta_coverage_hits"] = torch.from_numpy(hits)
                     out["meta_coverage_replaced"] = torch.tensor(c_idx != original_center)
-                    out["meta_coverage_center_xy"] = torch.from_numpy(raw["xyz"][c_idx, :2].copy())
+                    out["meta_coverage_center_xy"] = torch.from_numpy(xyz[c_idx, :2].copy())
                     out["meta_coverage_center_native"] = torch.tensor(y_native_pts[c_idx])
 
                 self._attach_bev_als(out)
