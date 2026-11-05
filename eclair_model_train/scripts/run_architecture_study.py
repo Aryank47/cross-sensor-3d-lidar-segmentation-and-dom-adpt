@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.config_loader import load_yaml
+from src.study_architecture import ARMS
 from src.study_runtime import atomic_json, sha256, storage_guard
 
 
@@ -55,6 +56,14 @@ def run(args):
     root = Path(__file__).resolve().parents[1]
     if socket.gethostname().split(".")[0].lower() == "cn07":
         raise RuntimeError("cn07 is excluded from all study computation")
+    coverage = args.arm.startswith("coverage_")
+    if coverage:
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        if commit != os.environ.get("STUDY_EXPECTED_COMMIT") or subprocess.run(
+            ["git", "diff", "--quiet", "HEAD", "--", "train.py", "src", "scripts", "configs"],
+            cwd=root, check=False,
+        ).returncode:
+            raise RuntimeError("Coverage job requires the clean submitted commit")
     os.chdir(root)
     out = Path(args.study_dir).resolve() / args.arm
     out.mkdir(parents=True, exist_ok=True)
@@ -66,7 +75,14 @@ def run(args):
     resume = args.resume_flag == "1"
     source_id = provenance(root, out, resume)
     (out / "STOP_REQUESTED").unlink(missing_ok=True)
-    cfg = load_yaml(root / f"configs/study_dales_{args.arm}120.yaml")
+    config_arm = "reference" if coverage else args.arm
+    cfg = load_yaml(root / f"configs/study_dales_{config_arm}120.yaml")
+    if coverage:
+        catalog_path = out.parent / "coverage_catalog.json"
+        cfg["data"]["sampling"].update(
+            coverage_catalog=str(catalog_path), coverage_resample=args.arm == "coverage_candidate",
+        )
+        cfg["study"].update(kind="scene_coverage", arm=args.arm, gradient_batches_per_epoch=0)
     cfg["run"]["out_dir"] = str(out)
     cp = out / "checkpoints/last.pt"
     if resume and cp.exists():
@@ -88,6 +104,11 @@ def run(args):
         )
 
     status("preflight")
+    if args.arm == "coverage_candidate":
+        control = json.loads((out.parent / "coverage_control/STATUS.json").read_text())
+        if control["status"] != "complete" or control["source_manifest_sha256"] != source_id:
+            status("coverage_admission_failed", phase="matched_control_not_complete")
+            raise SystemExit("Coverage candidate requires a complete matched control")
     storage_guard(out, 512 * 1024**2, cfg["study"]["storage"])
     import shutil
 
@@ -138,6 +159,24 @@ def run(args):
     if resume and inventory_path.exists() and json.loads(inventory_path.read_text()) != {"datasets": inventories}:
         raise RuntimeError("Dataset/cache identities changed; original inventory preserved")
     atomic_json(inventory_path, {"datasets": inventories})
+    if coverage:
+        from src.coverage_study import check_eval_inventory, replay_exposure
+
+        catalog = json.loads(catalog_path.read_text())
+        if catalog["inventory"] != inventories[0]:
+            raise ValueError("Source training archive and active source inventory differ")
+        for identity in inventories[-2:]:
+            check_eval_inventory(catalog, identity, identity["domain"])
+        replay_path = out.parent / "coverage_replay.json"
+        if args.arm == "coverage_control" and not resume:
+            status("preflight", phase="paired_source_crop_replay")
+            replay_exposure(cfg, replay_path)
+        replay = json.loads(replay_path.read_text())
+        if replay["catalog_sha256"] != sha256(catalog_path):
+            raise ValueError("Coverage catalogue changed after replay")
+        if replay["status"] != "admitted":
+            status("coverage_admission_failed", phase="paired_source_crop_replay")
+            raise SystemExit("Paired source replay failed the prespecified exposure gate")
     inventory_id = sha256(out / "dataset_inventory.json")
     original_inventory = out / "dataset_inventory_sha256.txt"
     if resume and original_inventory.exists() and original_inventory.read_text().strip() != inventory_id:
@@ -149,7 +188,10 @@ def run(args):
             "config": cfg,
             "source_manifest_sha256": source_id,
             "source_only_selection": True,
-            "guardrail": "both target means improve; no target class/source mean regression",
+            "guardrail": (
+                "coverage_comparison.json: +1 pp target aggregate gains, source and class preservation"
+                if coverage else "both target means improve; no target class/source mean regression"
+            ),
             "single_seed_screen": True,
             "excluded_node": "cn07 (scheduler name resolved at submission)",
         },
@@ -227,7 +269,7 @@ def run(args):
             (stage / filename).is_file() and sha256(stage / filename) == digest
             for filename, digest in json.loads(marker.read_text()).items()
         )
-        if not valid_marker and not bounded_analysis(model, cfg, stage, deadline, logger):
+        if not coverage and not valid_marker and not bounded_analysis(model, cfg, stage, deadline, logger):
             status("needs_resume", phase="bounded_analysis", checkpoint=name)
             return
         del model
@@ -258,9 +300,16 @@ def run(args):
         "last.pt is a prespecified secondary endpoint, not a target-selected replacement.\n\n"
         "Source exposure and class-presence counts include all ranks. Per-class classifier gradients "
         "are bounded focal-only diagnostic objectives; Lovasz is logged separately. "
-        "Frozen ridge heads use only source train/validation cohorts. "
-        "Perturbations use the same retained GT points and fixed quantization origin; "
-        "they are not physical acquisition simulators. Geometry uses a 1m radius on capped cohorts.\n\n"
+        + (
+            "Coverage rows use retained raw training anchors and separate post-voxel label counts. "
+            "Test geometry rows are descriptive recall/confusion counts on fixed sampled anchors "
+            "using 2 m linearity and 16 m height span. They do not identify instances or sensor effects.\n\n"
+            if coverage else
+            "Frozen ridge heads use only source train/validation cohorts. "
+            "Perturbations use the same retained GT points and fixed quantization origin; "
+            "they are not physical acquisition simulators. Geometry uses a 1m radius on capped cohorts.\n\n"
+        )
+        +
         "One seed is screening only. Target datasets already informed design. "
         "No intermediate checkpoints, per-point outputs, or feature banks are retained.\n"
     )
@@ -283,12 +332,16 @@ def run(args):
             "no intermediate weights retained",
         ],
     )
+    if coverage:
+        from src.coverage_study import compare_if_complete
+
+        compare_if_complete(out.parent)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--study-dir", required=True)
-    parser.add_argument("--arm", choices=["reference", "context", "fine"], required=True)
+    parser.add_argument("--arm", choices=list(ARMS), required=True)
     parser.add_argument("--resume-flag", choices=["0", "1"], default="0")
     args = parser.parse_args()
     try:

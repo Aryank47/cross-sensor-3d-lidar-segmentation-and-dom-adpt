@@ -8,6 +8,8 @@ ARMS = {
     "reference": (1, 1, 1, 1, 1, 1, 1, 1),
     "context": (1, 1, 2, 1, 1, 1, 1, 1),
     "fine": (1, 1, 1, 1, 1, 1, 1, 2),
+    "coverage_control": (1, 1, 1, 1, 1, 1, 1, 1),
+    "coverage_candidate": (1, 1, 1, 1, 1, 1, 1, 1),
 }
 
 

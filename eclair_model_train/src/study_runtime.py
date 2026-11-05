@@ -171,6 +171,9 @@ class StudyRuntime:
         self.reordered_batches = 0
         self.meta = {}
         self.exposure_digest = hashlib.sha256()
+        if self.options.get("kind") == "scene_coverage":
+            self.coverage_hits = np.zeros((8, 4), dtype=np.int64)
+            self.coverage_centres = []
         if self.options.get("kind") == "optional_returns":
             self.return_exposure = {"masked_samples": 0, "observed_samples": 0,
                                     "masked_native_counts": np.zeros(11, np.int64),
@@ -215,6 +218,12 @@ class StudyRuntime:
             self.presence += np.bincount(ids, minlength=nclasses) > 0
             self.samples += 1
         self.microbatches += 1
+        if self.options.get("kind") == "scene_coverage":
+            self.coverage_hits += batch["meta_coverage_hits"].sum(0).cpu().numpy()
+            xy = batch["meta_coverage_center_xy"].cpu().tolist()
+            native = batch["meta_coverage_center_native"].cpu().tolist()
+            replaced = batch["meta_coverage_replaced"].cpu().tolist()
+            self.coverage_centres.extend(zip(batch["paths"], xy, native, replaced, strict=True))
         if self.options.get("kind") == "optional_returns":
             audit = batch["_return_mask_audit"]
             for key in self.return_exposure:
@@ -352,6 +361,9 @@ class StudyRuntime:
             "amp_skips_cumulative": self.skips,
             "geometry_label_exposure_sha256": self.exposure_digest.hexdigest(),
         }
+        if self.options.get("kind") == "scene_coverage":
+            local["coverage_hits"] = self.coverage_hits.tolist()
+            local["coverage_centres"] = self.coverage_centres
         if self.options.get("kind") == "optional_returns":
             local["return_exposure"] = {k:(v.tolist() if isinstance(v, np.ndarray) else v)
                                         for k,v in self.return_exposure.items()}

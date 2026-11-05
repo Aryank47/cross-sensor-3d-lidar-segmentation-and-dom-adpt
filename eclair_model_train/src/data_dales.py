@@ -139,6 +139,8 @@ class DalesCropConfig:
     # NEW: optional frequency compensation inside rare set:
     # p(class) ∝ weight / (count ** beta). beta=0 means "ignore counts".
     rare_center_balance_beta: float = 0.0
+    coverage_catalog: Optional[str] = None
+    coverage_resample: bool = False
 
     # NEW: bundle multiple crops from the same tile into one __getitem__ call.
     # This avoids re-loading the same LAS/LAZ and redoing per-tile setup for each crop.
@@ -710,12 +712,22 @@ class DalesTiles(torch.utils.data.Dataset):
 
         self.sampling_mode = str(sampling_mode).lower().strip()
         self.crop_cfg = crop_cfg
+        self.mix3d_cfg = mix3d_cfg or ALSMix3DConfig(enabled=False)
+        self.coverage_catalog = None
+        if crop_cfg is not None and crop_cfg.coverage_catalog and self.is_train:
+            import json
+
+            if (self.sampling_mode != "crops" or self.mix3d_cfg.enabled
+                    or self.write_cache or not self.require_cache or self.cache_kind != "raw"):
+                raise ValueError("Coverage study requires read-only raw-cache training crops")
+            self.coverage_catalog = json.loads(Path(crop_cfg.coverage_catalog).read_text())
+            if set(self.coverage_catalog["tiles"]) != {p.name for p in self.files}:
+                raise ValueError("Coverage catalogue and training tiles differ")
         self._epoch_shared = mp.Value("q", 0, lock=False)
         self.voxel_cfg = voxel_cfg or VoxelizationConfig()
         self.bev_cfg = bev_cfg
         self.bev_als_cfg = bev_als_cfg or ALSBEVConfig(enabled=False)
         self.num_classes = int(num_classes)
-        self.mix3d_cfg = mix3d_cfg or ALSMix3DConfig(enabled=False)
 
         # Helpful safety: voxel-cache cannot apply per-epoch augmentation correctly.
         if self.is_train and self.sampling_mode == "crops":
@@ -1479,6 +1491,13 @@ class DalesTiles(torch.utils.data.Dataset):
             y_train_pts = self.label_lut[y_safe_pts]
 
             crop_cfg = self.crop_cfg
+            tile_coverage = None
+            if self.coverage_catalog is not None:
+                from .coverage_study import TileCoverage
+
+                tile_coverage = TileCoverage(
+                    self.coverage_catalog["tiles"][path.name], raw["xyz"], y_native_pts,
+                )
             max_vox_soft = int(crop_cfg.max_voxels_per_crop_soft)
 
             max_vox_hard = int(getattr(crop_cfg, "max_voxels_per_crop_hard", max_vox_soft))
@@ -1516,6 +1535,10 @@ class DalesTiles(torch.utils.data.Dataset):
                         fallback_rare_ids=tuple(self.preproc.rare_class_ids),
                         rng=rng,
                     )
+                    original_center = c_idx
+                    if tile_coverage is not None and crop_cfg.coverage_resample:
+                        center_rng = np.random.default_rng([sample_seed, _attempt, 7859])
+                        c_idx = tile_coverage.choose(c_idx, y_native_pts[c_idx], center_rng)
                     cx, cy = float(xyz[c_idx, 0]), float(xyz[c_idx, 1])
 
                     tried_min_size = False  # reset per center
@@ -1725,6 +1748,13 @@ class DalesTiles(torch.utils.data.Dataset):
                 out["meta_used_rare_center"] = torch.tensor(chosen_meta["used_rare_center"], dtype=torch.int64)
                 out["meta_used_fallback"] = torch.tensor(chosen_meta["used_fallback"], dtype=torch.int64)
                 out["meta_accepted_over_soft"] = torch.tensor(int(chosen_meta.get("accepted_over_soft", 0)), dtype=torch.int64)
+                if tile_coverage is not None:
+                    retained = pt_idx2 if chosen_meta["used_fallback"] else pt_idx
+                    hits = tile_coverage.crop_hits(raw["xyz"], retained, c_idx, chosen_meta["crop_size_xy_m"])
+                    out["meta_coverage_hits"] = torch.from_numpy(hits)
+                    out["meta_coverage_replaced"] = torch.tensor(c_idx != original_center)
+                    out["meta_coverage_center_xy"] = torch.from_numpy(raw["xyz"][c_idx, :2].copy())
+                    out["meta_coverage_center_native"] = torch.tensor(y_native_pts[c_idx])
 
                 self._attach_bev_als(out)
 

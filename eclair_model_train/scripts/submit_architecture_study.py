@@ -138,8 +138,16 @@ def main():
     parser.add_argument("--max-queued", type=int, choices=[2, 3], default=2)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--hours", type=int, choices=[36, 48], default=36)
+    parser.add_argument("--coverage-geometry", type=Path, help="Completed transfer evidence directory")
     parser.add_argument("--out-root", default=f"/scratch/{getpass.getuser()}/e0_results/architecture_studies")
     args = parser.parse_args()
+    from src.coverage_study import ARMS as coverage_arms
+
+    coverage = any(a in coverage_arms for a in args.arms)
+    if coverage and not args.resume and (tuple(args.arms) != coverage_arms or args.coverage_geometry is None):
+        parser.error("New coverage studies require the control/candidate pair in order and --coverage-geometry")
+    if args.coverage_geometry is not None and (not coverage or args.resume):
+        parser.error("--coverage-geometry is only for a new coverage study")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", args.study):
         parser.error("Study name must be a short safe directory name")
     if len(set(args.arms)) != len(args.arms):
@@ -160,6 +168,16 @@ def main():
     study_dir = out_root / args.study
     logs = Path(f"/scratch/{user}/e0_logs")
     logs.mkdir(parents=True, exist_ok=True)
+    if coverage and not args.resume:
+        from src.coverage_study import build_catalog
+        from src.study_runtime import atomic_json
+
+        catalog = build_catalog(args.coverage_geometry)
+        study_dir.mkdir(exist_ok=False)
+        atomic_json(study_dir / "coverage_catalog.json", catalog)
+        if catalog["status"] != "source_catalog_admitted":
+            parser.error(f"Insufficient supported source geometry; see {study_dir / 'coverage_catalog.json'}")
+    control_id = None
     for arm in args.arms:
         run_dir = study_dir / arm
         if run_dir.exists() and not args.resume:
@@ -181,6 +199,10 @@ def main():
             STUDY_RESUME="1" if args.resume else "0",
             STUDY_QUOTA_ADMISSION=json.dumps(quota_admission(study_dir, args.arms, headroom)),
         )
+        if coverage:
+            env["STUDY_EXPECTED_COMMIT"] = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True,
+            ).strip()
         command = [
             "sbatch",
             "--parsable",
@@ -194,7 +216,13 @@ def main():
             str(root),
             str(root / "scripts/slurm_architecture_study.sh"),
         ]
+        if coverage:
+            command[1:1] = ["--no-requeue"]
+        if arm == "coverage_candidate" and not args.resume:
+            command[1:1] = [f"--dependency=afterok:{control_id}", "--kill-on-invalid-dep=yes"]
         job_id = subprocess.check_output(command, cwd=root, env=env, text=True).strip()
+        if arm == "coverage_control":
+            control_id = job_id.split(";")[0]
         print(
             json.dumps(
                 {

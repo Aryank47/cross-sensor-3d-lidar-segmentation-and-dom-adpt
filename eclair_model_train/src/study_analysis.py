@@ -94,6 +94,13 @@ def evaluate_tiles(model, cfg, checkpoint_id, domain, out, deadline, logger):
     from . import eval_cross_common as ev
 
     ds, lut, identity = load_dataset(domain, "test", cfg, logger)
+    coverage = cfg["study"].get("kind") == "scene_coverage"
+    if coverage:
+        from .coverage_study import check_eval_inventory, geometry_eval_rows, verified_anchors
+
+        catalog_path = cfg["data"]["sampling"]["coverage_catalog"]
+        catalog = json.loads(Path(catalog_path).read_text())
+        geometry_root, geometry_manifest = check_eval_inventory(catalog, identity, domain)
     train_lut = ev.mapping_to_lut(
         ev.load_yaml_int_map("configs/train_id_to_common_dales.yaml"),
         size=8,
@@ -126,6 +133,8 @@ def evaluate_tiles(model, cfg, checkpoint_id, domain, out, deadline, logger):
         "source_mapping_sha256": sha256("configs/train_id_to_common_dales.yaml"),
         "target_mapping_sha256": sha256(f"configs/mapping_{domain}_to_common.yaml"),
     }
+    if coverage:
+        contract["coverage_catalog_sha256"] = sha256(catalog_path)
     signature = fingerprint(contract)
     stage = Path(out) / domain
     stage.mkdir(parents=True, exist_ok=True)
@@ -173,6 +182,13 @@ def evaluate_tiles(model, cfg, checkpoint_id, domain, out, deadline, logger):
                 "native_gt_by_common_prediction": native_cm.tolist(),
                 "seconds": time.monotonic() - tick,
             }
+            if coverage:
+                anchors = verified_anchors(geometry_root, geometry_manifest, domain, "test", index)
+                counts, predictions = geometry_eval_rows(
+                    anchors, raw, native, gt, pred, catalog["medians"],
+                )
+                result["geometry_anchor_counts"] = counts
+                result["anchor_predictions"] = predictions
             storage_guard(stage, 64 * 1024, cfg["study"]["storage"])
             atomic_json(path, result)
             del logits, raw

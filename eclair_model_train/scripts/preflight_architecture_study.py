@@ -24,8 +24,21 @@ def validate(cfg, frozen):
     arm = cfg["study"]["arm"]
     if arm not in ARMS or block_counts(cfg) != ARMS[arm]:
         raise ValueError("Arm and layer counts disagree")
+    comparable = copy.deepcopy(cfg)
+    if cfg["study"].get("kind") == "scene_coverage":
+        from src.coverage_study import ARMS as coverage_arms
+
+        sampling = comparable["data"]["sampling"]
+        path = Path(sampling.pop("coverage_catalog"))
+        resample = sampling.pop("coverage_resample")
+        catalog = json.loads(path.read_text())
+        if (catalog["status"] != "source_catalog_admitted" or arm not in coverage_arms
+                or resample is not (arm == "coverage_candidate")):
+            raise ValueError("Coverage arm or catalogue failed its frozen contract")
+    elif arm.startswith("coverage_"):
+        raise ValueError("Coverage arm requires a coverage contract")
     for key in ("data", "loss", "optim", "sched", "eval", "eclair", "epochs", "method", "ocons"):
-        if cfg.get(key) != frozen.get(key):
+        if comparable.get(key) != frozen.get(key):
             raise ValueError(f"Frozen baseline differs at {key}")
     model = copy.deepcopy(cfg["model"])
     model.pop("layers", None)
@@ -69,7 +82,7 @@ def gpu_smoke(cfg):
     # All shared weights must match across all arms, and extra block tensors must
     # match each other. This CPU-only part runs inside the GPU allocation.
     extras = {}
-    for arm in ARMS:
+    for arm in ("reference", "context", "fine"):
         variant_cfg = copy.deepcopy(cfg)
         variant_cfg["model"]["layers"] = list(ARMS[arm])
         variant = build_model(
