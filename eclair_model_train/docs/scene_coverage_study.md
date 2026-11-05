@@ -35,6 +35,35 @@ This is a single-seed development comparison in one direction. It does not claim
 
 ## Launch
 
+### Qualified crop-contents pair
+
+Replay 47041 cleared the exposure and workload checks on 52 fresh accepted slots.
+The new candidate uses the exact replay rule. Within the same tile and native
+center label, prefer a conservative 108 m proposed footprint that preserves
+every monitored least-covered group in the original 120 m proposal and adds a
+building, wire or pole group. The loader still uses its original crop limits,
+shrink and point-cap logic. Ties use all monitored gains, then distance and
+point ID. Keep the control sampler unchanged.
+
+Reuse the byte-pinned replay and catalogue. Both arms still run GPU smoke
+checks. During the full 200 epochs, require at least 10% accepted center
+replacements, at least +2 points in the crop hit rate for buildings and one
+utility class, and no monitored group losing exposure. Keep the same source and
+target performance gates. The earlier within-tile bin-uniform selector is a
+different policy with a separate record.
+
+From the committed cluster checkout in e0_env:
+
+```bash
+python -B scripts/submit_architecture_study.py --study dales_scene_coverage_contents_s1337_v1 \
+  --arms coverage_control coverage_candidate --hours 36 \
+  --out-root /scratch/m23csa510/e0_results/coverage_studies \
+  --coverage-geometry /scratch/m23csa510/e0_results/transfer_evidence/transfer_evidence_v1 \
+  --coverage-qualified-replay /scratch/m23csa510/e0_results/coverage_studies/dales_scene_coverage_contents_replay_v1/replay_result.json
+```
+
+### Earlier center-bin policy
+
 From the committed cluster checkout in e0_env, run:
 
 ```bash

@@ -1,6 +1,28 @@
 import numpy as np
 import pytest
-from src.coverage_study import TileCoverage, geometry_bins, geometry_eval_rows
+from src.coverage_study import (
+    ContentsCoverage,
+    TileCoverage,
+    geometry_bins,
+    geometry_eval_rows,
+)
+
+
+def test_contents_selector_prefers_a_new_group_without_losing_old_hits():
+    points = np.array(
+        [[0.0, 0.0, 2.0], [30.0, 0.0, 2.0], [80.0, 0.0, 2.0], [-25.0, 0.0, 2.0]]
+    )
+    native = np.array([5, 5, 8, 5])
+    # Slot 1 is a legal wire center. Slot 2 is a building anchor, not a legal center.
+    rows = [
+        [1, 5, 4, 1, *points[1]],
+        [2, 8, 3, 2, *points[2]],
+        [0, 5, 4, 0, *points[0]],
+    ]
+    rng = np.random.default_rng(0)
+    assert ContentsCoverage(rows, points, native).choose(0, 5, rng) == 1
+    rows[2] = [3, 5, 4, 0, *points[3]]
+    assert ContentsCoverage(rows, points, native).choose(0, 5, rng) == 0
 
 
 def test_same_native_label_choice_and_cache_identity():

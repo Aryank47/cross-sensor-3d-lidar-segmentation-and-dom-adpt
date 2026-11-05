@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -139,6 +140,7 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--hours", type=int, choices=[36, 48], default=36)
     parser.add_argument("--coverage-geometry", type=Path, help="Completed transfer evidence directory")
+    parser.add_argument("--coverage-qualified-replay", type=Path, help="Verified crop-contents replay result")
     parser.add_argument("--out-root", default=f"/scratch/{getpass.getuser()}/e0_results/architecture_studies")
     args = parser.parse_args()
     from src.coverage_study import ARMS as coverage_arms
@@ -148,6 +150,8 @@ def main():
         parser.error("New coverage studies require the control/candidate pair in order and --coverage-geometry")
     if args.coverage_geometry is not None and (not coverage or args.resume):
         parser.error("--coverage-geometry is only for a new coverage study")
+    if args.coverage_qualified_replay is not None and (not coverage or args.resume):
+        parser.error("--coverage-qualified-replay is only for a new coverage study")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", args.study):
         parser.error("Study name must be a short safe directory name")
     if len(set(args.arms)) != len(args.arms):
@@ -169,14 +173,22 @@ def main():
     logs = Path(f"/scratch/{user}/e0_logs")
     logs.mkdir(parents=True, exist_ok=True)
     if coverage and not args.resume:
-        from src.coverage_study import build_catalog
+        from src.coverage_study import build_catalog, qualify_contents
         from src.study_runtime import atomic_json
 
         catalog = build_catalog(args.coverage_geometry)
+        qualification = None
+        if args.coverage_qualified_replay is not None:
+            digest = hashlib.sha256(json.dumps(catalog, indent=2, allow_nan=False).encode()).hexdigest()
+            qualification = qualify_contents(args.coverage_qualified_replay, digest)
         study_dir.mkdir(exist_ok=False)
         atomic_json(study_dir / "coverage_catalog.json", catalog)
         if catalog["status"] != "source_catalog_admitted":
             parser.error(f"Insufficient supported source geometry; see {study_dir / 'coverage_catalog.json'}")
+        if qualification is not None:
+            proof = study_dir / "coverage_qualification.json"
+            proof.write_bytes(args.coverage_qualified_replay.read_bytes())
+            atomic_json(study_dir / "coverage_replay.json", qualify_contents(proof, digest))
     control_id = None
     for arm in args.arms:
         run_dir = study_dir / arm

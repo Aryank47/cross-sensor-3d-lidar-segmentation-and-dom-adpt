@@ -27,10 +27,19 @@ def validate(cfg, frozen):
     comparable = copy.deepcopy(cfg)
     if cfg["study"].get("kind") == "scene_coverage":
         from src.coverage_study import ARMS as coverage_arms
+        from src.coverage_study import CONTENTS_POLICY, qualify_contents
+        from src.study_runtime import sha256
 
         sampling = comparable["data"]["sampling"]
         path = Path(sampling.pop("coverage_catalog"))
         resample = sampling.pop("coverage_resample")
+        policy = sampling.pop("coverage_policy", None)
+        if policy == CONTENTS_POLICY:
+            qualification = qualify_contents(path.parent / "coverage_qualification.json", sha256(path))
+            if json.loads((path.parent / "coverage_replay.json").read_text()) != qualification:
+                raise ValueError("Contents replay qualification is inconsistent")
+        elif policy is not None:
+            raise ValueError(f"Unknown coverage policy {policy!r}")
         catalog = json.loads(path.read_text())
         if (catalog["status"] != "source_catalog_admitted" or arm not in coverage_arms
                 or resample is not (arm == "coverage_candidate")):

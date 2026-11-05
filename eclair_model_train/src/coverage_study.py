@@ -11,6 +11,35 @@ from .study_runtime import sha256
 ARMS = ("coverage_control", "coverage_candidate")
 CLASSES = (3, 4, 5, 6, 7)
 BINS = 4
+CONTENTS_POLICY = "contents_v1"
+CONTENTS_LEAST = {"3": 2, "4": 0, "5": 0, "6": 0, "7": 0}
+QUALIFIED_REPLAY_SHA = (
+    "bb7cf1612b779b93edc9ff8b755aaa73bbb8fdc9f8020fdef1343ca0d3c25881"
+)
+QUALIFIED_CATALOG_SHA = (
+    "c75ac34ff7d62c24fd34fa1e60bae8dd60a4238e82d5879f43412c1c85f5ce37"
+)
+
+
+def qualify_contents(path, catalog_digest):
+    """Reuse the exact completed 47041 source replay and its catalogue."""
+    if sha256(path) != QUALIFIED_REPLAY_SHA or catalog_digest != QUALIFIED_CATALOG_SHA:
+        raise ValueError(
+            "Contents training requires the qualified replay and catalogue bytes"
+        )
+    report = json.loads(Path(path).read_text())
+    if report["status"] != "passed" or not all(report["checks"].values()):
+        raise ValueError("Contents replay did not clear admission")
+    return {
+        "status": "admitted",
+        "policy": CONTENTS_POLICY,
+        "catalog_sha256": catalog_digest,
+        "qualification_sha256": QUALIFIED_REPLAY_SHA,
+        "least_represented_bins": CONTENTS_LEAST,
+        "qualification_delta": report["delta"],
+        "qualification_replacement_rate": report["accepted_replacement_rate"],
+        "qualification_workload_ratio": report["voxel_workload_ratio"],
+    }
 
 
 def verified_anchors(root, manifest, domain, split, index):
@@ -141,6 +170,55 @@ class TileCoverage:
         hits = np.zeros((8, BINS), dtype=np.int64)
         hits[self.rows[inside, 2].astype(int), self.rows[inside, 3].astype(int)] = 1
         return hits
+
+
+def select_center(xyz, original, alternatives, rare_xy, rare_class):
+    """Replace a center only when the predicted crop adds a priority group."""
+    if len(alternatives) == 0 or len(rare_xy) == 0:
+        return original
+    original_hits = np.any(
+        (np.all(np.abs(rare_xy - xyz[original]) <= 60, axis=1))[:, None] & rare_class,
+        axis=0,
+    )
+    keep = alternatives != original
+    candidates = alternatives[keep]
+    if len(candidates) == 0:
+        return original
+    inside = np.all(
+        np.abs(xyz[candidates, None, :] - rare_xy[None, :, :]) <= 54, axis=2
+    )
+    hits = (inside.astype(np.int32) @ rare_class.astype(np.int32)) > 0
+    gains = hits & ~original_hits
+    primary = gains[:, :3].sum(1)
+    eligible = np.all(hits | ~original_hits, axis=1) & (primary > 0)
+    if not eligible.any():
+        return original
+    choices = np.flatnonzero(eligible)
+    distance = np.sum((xyz[candidates[choices]] - xyz[original]) ** 2, axis=1)
+    order = np.lexsort(
+        (candidates[choices], distance, -gains[choices].sum(1), -primary[choices])
+    )
+    return int(candidates[choices[order[0]]])
+
+
+class ContentsCoverage(TileCoverage):
+    """Exact tile-local policy exercised in the fresh source replay."""
+
+    def __init__(self, rows, xyz, native):
+        super().__init__(rows, xyz, native)
+        self.xy = xyz[:, :2]
+        classes = np.arange(3, 8)
+        least = np.array([CONTENTS_LEAST[str(c)] for c in classes])
+        common = self.rows[:, 2].astype(int)
+        take = self.rows[:, 3] == least[common - 3]
+        self.rare_xy = self.rows[take, 4:6]
+        self.rare_class = common[take, None] == classes[None, :]
+
+    def choose(self, original, native_label, rng):
+        alternatives = self.ids[self.rows[:, 1] == native_label]
+        return select_center(
+            self.xy, original, alternatives, self.rare_xy, self.rare_class
+        )
 
 
 def check_eval_inventory(catalog, identity, domain):
@@ -346,6 +424,19 @@ def compare_if_complete(study):
             right["replaced"] / right["crops"] >= 0.10
             and sum(d >= 0.02 for d in changes.values()) >= 2
         )
+        if replay.get("policy") == CONTENTS_POLICY:
+            expected = qualify_contents(
+                study / "coverage_qualification.json",
+                sha256(study / "coverage_catalog.json"),
+            )
+            if replay != expected:
+                raise ValueError("Contents admission record changed")
+            delivered = (
+                delivered
+                and changes["3"] >= 0.02
+                and max(changes["4"], changes["5"]) >= 0.02
+                and min(changes.values()) >= 0.0
+            )
         names = [*COMMON_NAMES[1:], "all_seven_miou", "utility_miou"]
         result = {}
         for ep in ("best", "last"):

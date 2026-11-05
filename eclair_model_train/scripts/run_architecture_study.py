@@ -78,7 +78,19 @@ def run(args):
     config_arm = "reference" if coverage else args.arm
     cfg = load_yaml(root / f"configs/study_dales_{config_arm}120.yaml")
     if coverage:
+        from src.coverage_study import CONTENTS_POLICY, qualify_contents
+
         catalog_path = out.parent / "coverage_catalog.json"
+        proof = out.parent / "coverage_qualification.json"
+        replay_path = out.parent / "coverage_replay.json"
+        contents = proof.is_file()
+        if contents:
+            expected = qualify_contents(proof, sha256(catalog_path))
+            if json.loads(replay_path.read_text()) != expected:
+                raise ValueError("Contents replay admission differs from the verified record")
+            cfg["data"]["sampling"]["coverage_policy"] = CONTENTS_POLICY
+        elif replay_path.exists() and json.loads(replay_path.read_text()).get("policy") == CONTENTS_POLICY:
+            raise ValueError("Missing frozen contents qualification")
         cfg["data"]["sampling"].update(
             coverage_catalog=str(catalog_path), coverage_resample=args.arm == "coverage_candidate",
         )
@@ -168,7 +180,7 @@ def run(args):
         for identity in inventories[-2:]:
             check_eval_inventory(catalog, identity, identity["domain"])
         replay_path = out.parent / "coverage_replay.json"
-        if args.arm == "coverage_control" and not resume:
+        if args.arm == "coverage_control" and not resume and not contents:
             status("preflight", phase="paired_source_crop_replay")
             replay_exposure(cfg, replay_path)
         replay = json.loads(replay_path.read_text())

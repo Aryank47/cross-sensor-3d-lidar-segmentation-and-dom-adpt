@@ -141,6 +141,7 @@ class DalesCropConfig:
     rare_center_balance_beta: float = 0.0
     coverage_catalog: Optional[str] = None
     coverage_resample: bool = False
+    coverage_policy: Optional[str] = None
 
     # NEW: bundle multiple crops from the same tile into one __getitem__ call.
     # This avoids re-loading the same LAS/LAZ and redoing per-tile setup for each crop.
@@ -1493,11 +1494,16 @@ class DalesTiles(torch.utils.data.Dataset):
             crop_cfg = self.crop_cfg
             tile_coverage = None
             if self.coverage_catalog is not None:
-                from .coverage_study import TileCoverage
+                from .coverage_study import CONTENTS_POLICY, ContentsCoverage, TileCoverage
 
                 # The catalogue was generated from get_raw(), which applies the same
                 # tile-local coordinate conversion as the crop code above.
-                tile_coverage = TileCoverage(
+                coverage_type = (
+                    ContentsCoverage
+                    if crop_cfg.coverage_resample and crop_cfg.coverage_policy == CONTENTS_POLICY
+                    else TileCoverage
+                )
+                tile_coverage = coverage_type(
                     self.coverage_catalog["tiles"][path.name], xyz, y_native_pts,
                 )
             max_vox_soft = int(crop_cfg.max_voxels_per_crop_soft)
