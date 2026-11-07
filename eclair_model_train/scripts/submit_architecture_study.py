@@ -69,7 +69,7 @@ def quota_admission(study_dir, arms, headroom):
     }
 
 
-def allocation_quota_admission(out, required_bytes):
+def allocation_quota_admission(out, required_bytes, *, allowed_arms=ARMS):
     """Prefer live quota; otherwise use the explicitly recorded submission check.
 
     This receipt is an observation, not a filesystem quota reservation. Other
@@ -88,7 +88,7 @@ def allocation_quota_admission(out, required_bytes):
             and isinstance(arms, list)
             and 1 <= len(arms) <= 3
             and len(set(arms)) == len(arms)
-            and all(arm in ARMS for arm in arms)
+            and all(arm in allowed_arms for arm in arms)
             and out.name in arms
             and -300 <= age <= ADMISSION_MAX_AGE_SECONDS
             and receipt["run_budget_bytes"] == RUN_BUDGET_BYTES

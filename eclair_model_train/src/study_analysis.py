@@ -88,13 +88,13 @@ def load_dataset(domain, split, source_cfg, logger):
     return ds, native, identity
 
 
-def evaluate_tiles(model, cfg, checkpoint_id, domain, out, deadline, logger):
+def evaluate_tiles(model, cfg, checkpoint_id, domain, out, deadline, logger, *, split="test"):
     import torch
 
     from . import eval_cross_common as ev
 
-    ds, lut, identity = load_dataset(domain, "test", cfg, logger)
-    coverage = cfg["study"].get("kind") == "scene_coverage"
+    ds, lut, identity = load_dataset(domain, split, cfg, logger)
+    coverage = split == "test" and cfg["study"].get("kind") == "scene_coverage"
     if coverage:
         from .coverage_study import check_eval_inventory, geometry_eval_rows, verified_anchors
 
