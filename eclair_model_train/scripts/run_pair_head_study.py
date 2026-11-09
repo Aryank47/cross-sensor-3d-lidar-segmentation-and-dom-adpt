@@ -20,10 +20,40 @@ LEARNING_RATE = 0.0003
 MARGIN = 1.0
 PAIR_WEIGHT = 0.1
 PAIR_LIMIT = 32
+HARD_CROP_LIMIT = 32
+MIN_PAIR_ROWS = 128
+MIN_PAIR_TILES = 4
 CLASS_CROP_LIMIT = 128
 BATCH_ROWS = 4096
 # Native training IDs for ground, vegetation, building, pole and wire.
 PAIRS = ((0, 4), (1, 4), (1, 5), (6, 5))
+DIRECTIONS = tuple(direction for pair in PAIRS for direction in (pair, pair[::-1]))
+
+
+def hard_rows(logits, labels, actual, rival, limit):
+    import torch
+
+    gap = logits[:, actual] - logits[:, rival]
+    eligible = torch.where((labels == actual) & (gap < MARGIN))[0]
+    hardest = eligible[torch.argsort(gap[eligible], stable=True)[:limit]]
+    return hardest, eligible.numel()
+
+
+def select_crop_rows(logits, labels, rng):
+    import torch
+
+    hard = [hard_rows(logits, labels, *direction, HARD_CROP_LIMIT) for direction in DIRECTIONS]
+    # Keep the original seeded class sample and add the hardest examples missed by it.
+    cpu_labels = labels.cpu()
+    background = []
+    for label in range(8):
+        rows = torch.where(cpu_labels == label)[0]
+        if rows.numel() > CLASS_CROP_LIMIT:
+            rows = rows[torch.randperm(rows.numel(), generator=rng)[:CLASS_CROP_LIMIT]]
+        background.append(rows)
+    regular = torch.cat(background).to(labels.device)
+    ids = torch.cat([regular, *(rows for rows, _ in hard)]).unique(sorted=True)
+    return ids, [count for _, count in hard]
 
 
 def pair_loss(logits, labels, initial_logits):
@@ -31,15 +61,25 @@ def pair_loss(logits, labels, initial_logits):
 
     terms = []
     counts = []
-    for first, second in PAIRS:
-        for actual, rival in ((first, second), (second, first)):
-            gap = initial_logits[:, actual] - initial_logits[:, rival]
-            rows = torch.where((labels == actual) & (gap < MARGIN))[0]
-            rows = rows[torch.argsort(gap[rows], stable=True)[:PAIR_LIMIT]]
-            counts.append(rows.numel())
-            if rows.numel():
-                terms.append((MARGIN + logits[rows, rival] - logits[rows, actual]).relu().mean())
+    for actual, rival in DIRECTIONS:
+        rows, _ = hard_rows(initial_logits, labels, actual, rival, PAIR_LIMIT)
+        counts.append(rows.numel())
+        if rows.numel():
+            terms.append((MARGIN + logits[rows, rival] - logits[rows, actual]).relu().mean())
     return (torch.stack(terms).mean() if terms else logits.sum() * 0), counts
+
+
+def first_epoch_exposure(labels, scores):
+    import torch
+
+    rng = torch.Generator().manual_seed(SEED)
+    counts = [0] * len(DIRECTIONS)
+    for ids in torch.randperm(len(labels), generator=rng).split(BATCH_ROWS):
+        y, logits = labels[ids], scores[ids]
+        for index, (actual, rival) in enumerate(DIRECTIONS):
+            eligible = ((y == actual) & (logits[:, actual] - logits[:, rival] < MARGIN)).sum().item()
+            counts[index] += min(eligible, PAIR_LIMIT)
+    return counts
 
 
 def contrasts(metrics):
@@ -96,7 +136,8 @@ def collect_features(model, cfg, baseline, device):
     dataset.set_epoch(1)
     loader.generator.manual_seed(SEED + 1009)
     rng = torch.Generator().manual_seed(SEED)
-    features, labels, captured = [], [], []
+    features, labels, scores, captured = [], [], [], []
+    support = {direction: {} for direction in DIRECTIONS}
     hook = model.final.register_forward_pre_hook(lambda _, args: captured.append(args[0]))
     try:
         with torch.no_grad():
@@ -113,36 +154,44 @@ def collect_features(model, cfg, baseline, device):
                     y, coverage = _labels_in_output_order(coords, y, x.C)
                     if coverage != 1.0:
                         raise RuntimeError("Incomplete native labels for classifier features")
-                y = y.cpu()
-                indices = []
-                for label in range(8):
-                    choices = torch.where(y == label)[0]
-                    if choices.numel() > CLASS_CROP_LIMIT:
-                        choices = choices[torch.randperm(choices.numel(), generator=rng)[:CLASS_CROP_LIMIT]]
-                    indices.append(choices)
-                ids = torch.cat(indices)
-                features.append(x.F.index_select(0, ids.to(device)).float().cpu())
-                labels.append(y[ids])
+                full_scores = output.F.float()
+                ids, eligible = select_crop_rows(full_scores, y, rng)
+                chosen_scores, chosen_labels = full_scores[ids], y[ids]
+                tile, = batch["paths"]
+                for direction, count in zip(DIRECTIONS, eligible, strict=True):
+                    actual, rival = direction
+                    retained = ((chosen_labels == actual) &
+                                (chosen_scores[:, actual] - chosen_scores[:, rival] < MARGIN)).sum().item()
+                    if count:
+                        row = support[direction].setdefault(str(tile), {"eligible": 0, "retained": 0})
+                        row["eligible"] += count
+                        row["retained"] += retained
+                features.append(x.F.index_select(0, ids).float().cpu())
+                labels.append(chosen_labels.cpu())
+                scores.append(chosen_scores.cpu())
                 if len(features) == 1:
-                    scores = output.F.index_select(0, ids.to(device)).float()
                     kernel = model.final.kernel.reshape(-1, 8)
                     torch.testing.assert_close(features[-1].to(device) @ kernel + model.final.bias,
-                                               scores, atol=0.0002, rtol=0.0001)
+                                               chosen_scores, atol=0.0002, rtol=0.0001)
                 if len(features) % 26 == 0:
                     print(f"Frozen features: {len(features)}/312 DALES crops", flush=True)
     finally:
         hook.remove()
-    return torch.cat(features), torch.cat(labels)
+    rows = []
+    for (actual, rival), tiles in support.items():
+        retained = sum(row["retained"] for row in tiles.values())
+        n_tiles = sum(row["retained"] > 0 for row in tiles.values())
+        rows.append({"actual_native_train_id": actual, "rival_native_train_id": rival,
+                     "eligible": sum(row["eligible"] for row in tiles.values()),
+                     "retained": retained, "retained_tiles": n_tiles, "by_tile": tiles,
+                     "passed": retained >= MIN_PAIR_ROWS and n_tiles >= MIN_PAIR_TILES})
+    return torch.cat(features), torch.cat(labels), torch.cat(scores), rows
 
 
-def fit(model, cfg, baseline, device):
+def fit(model, cfg, features, labels, scores, device):
     import torch
     from train import build_loss
 
-    features, labels = collect_features(model, cfg, baseline, device)
-    counts = labels.bincount(minlength=8).tolist()
-    if min(counts) < 128 or not features.isfinite().all():
-        raise ValueError("Insufficient or invalid classifier fitting examples")
     initial = torch.nn.Linear(features.shape[1], 8, device=device)
     with torch.no_grad():
         initial.weight.copy_(model.final.kernel.reshape(-1, 8).T)
@@ -160,13 +209,14 @@ def fit(model, cfg, baseline, device):
         totals = [0.0, 0.0, 0.0]
         for ids in torch.randperm(len(labels), generator=rng).split(BATCH_ROWS):
             x, y = features[ids].to(device), labels[ids].to(device)
+            initial_scores = scores[ids].to(device)
             for index, (head, optimizer) in enumerate(zip(heads, optimizers, strict=True)):
                 optimizer.zero_grad(set_to_none=True)
                 logits = head(x)
                 loss = criterion(logits, y)
                 totals[index] += float(loss.detach())
                 if index == 1:
-                    margin, used = pair_loss(logits, y, initial(x))
+                    margin, used = pair_loss(logits, y, initial_scores)
                     pair_counts = [a + b for a, b in zip(pair_counts, used, strict=True)]
                     loss = loss + PAIR_WEIGHT * margin
                     totals[2] += float(margin.detach())
@@ -176,7 +226,7 @@ def fit(model, cfg, baseline, device):
                 optimizer.step()
         audit.append({"epoch": epoch, "sum_batch_losses": totals, "directed_pair_examples": pair_counts})
         print(f"Head fit {epoch}/{FIT_EPOCHS}: directed examples {pair_counts}", flush=True)
-    return [h.state_dict() for h in (initial, *heads)], counts, audit
+    return [h.state_dict() for h in (initial, *heads)], audit
 
 
 def run(args, out, status):
@@ -217,26 +267,43 @@ def run(args, out, status):
                 "seed": SEED, "fit_epochs": FIT_EPOCHS, "learning_rate": LEARNING_RATE,
                 "pair_weight": PAIR_WEIGHT, "margin": MARGIN, "pairs_native": PAIRS,
                 "pair_direction_cap_per_batch": PAIR_LIMIT, "class_crop_cap": CLASS_CROP_LIMIT,
+                "hard_crop_cap_per_direction": HARD_CROP_LIMIT, "min_rows_per_direction": MIN_PAIR_ROWS,
+                "min_tiles_per_direction": MIN_PAIR_TILES, "mined_before_sampling": True,
                 "batch_rows": BATCH_ROWS, "fixed_final_head": True})
     device = torch.device("cuda:0")
     torch.manual_seed(SEED)
     model = build_model(10, 8, cfg=cfg).to(device).eval().requires_grad_(False)
     model.load_state_dict(checkpoint["model_state"], strict=True)
     del checkpoint
-    status("fitting")
-    states, counts, audit = fit(model, cfg, baseline, device)
-    atomic_json(out / "fit_audit.json", {"native_label_counts": counts, "epochs": audit})
-    if any(count < 128 for count in audit[0]["directed_pair_examples"]):
-        status("complete", decision="insufficient_source_pair_support", eclair_evaluated=False)
-        return
-    torch.save([{key: value.cpu() for key, value in head.items()} for head in states], out / "head_weights.pt")
-
     def backbone_digest():
         return model_digest({k: v for k, v in model.state_dict().items() if not k.startswith("final.")})
 
     frozen = backbone_digest()
+    status("checking_source_support")
+    features, labels, scores, support = collect_features(model, cfg, baseline, device)
     if model_digest(model.state_dict()) != BASELINE_MODEL:
         raise RuntimeError("Feature extraction changed the frozen model")
+    counts = labels.bincount(minlength=8).tolist()
+    if min(counts) < MIN_PAIR_ROWS or not features.isfinite().all() or not scores.isfinite().all():
+        raise ValueError("Insufficient or invalid classifier fitting examples")
+    exposure = first_epoch_exposure(labels, scores)
+    for row, count in zip(support, exposure, strict=True):
+        row["first_epoch_examples"] = count
+        row["passed"] &= count >= MIN_PAIR_ROWS
+    passed = all(row["passed"] for row in support)
+    atomic_json(out / "source_pair_support.json", {"passed": passed, "native_label_counts": counts,
+                "unit": "voxel occurrences across crops; overlapping crops may repeat physical locations",
+                "directions": support})
+    if not passed:
+        status("complete", decision="insufficient_source_pair_support", heads_fitted=False, eclair_evaluated=False)
+        return
+    status("fitting")
+    states, audit = fit(model, cfg, features, labels, scores, device)
+    del features, labels, scores
+    atomic_json(out / "fit_audit.json", {"native_label_counts": counts, "epochs": audit})
+    if audit[0]["directed_pair_examples"] != exposure:
+        raise RuntimeError("First-epoch pair exposure differs from the pre-fit audit")
+    torch.save([{key: value.cpu() for key, value in head.items()} for head in states], out / "head_weights.pt")
     logger = logging.getLogger(ARM)
     logger.setLevel(logging.INFO)
     logger.addHandler(logging.StreamHandler())
